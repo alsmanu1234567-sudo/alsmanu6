@@ -47,6 +47,10 @@ async function setup(t) {
       sent.push(content);
       return { key: { id: `sent-${sent.length}` } };
     },
+    relayMessage: async (_groupId, content, options) => {
+      sent.push({ rawInteractive: content, options });
+      return { key: { id: options?.messageId || `interactive-${sent.length}` } };
+    },
   };
 
   return { service, sock, sent };
@@ -131,4 +135,73 @@ test("WhatsApp identity comparison supports JID variants without conflating LIDs
   assert.equal(sameWhatsAppIdentity("249000000001:7@s.whatsapp.net", "249000000001@c.us"), true);
   assert.equal(sameWhatsAppIdentity("249000000001@lid", "249000000001@s.whatsapp.net"), false);
   assert.equal(sameWhatsAppIdentity("", ""), false);
+});
+
+test("world activation works without bot-admin status and disable keeps balances", async (t) => {
+  const { service, sock, sent } = await setup(t);
+  const balanceBefore = (await service.getMemberProfile(GROUP, MEMBER)).balance;
+  await service.setEnabled(GROUP, false, "web-owner", "اختبار");
+  await handleGroupWorldMessage("web-owner", sock, message("world-enable-no-admin", ".تفعيل العالم"), "notify");
+  assert.equal((await service.getGroup(GROUP)).enabled, true);
+  assert.equal((await service.getMemberProfile(GROUP, MEMBER)).balance, balanceBefore);
+  assert.match(sent.map((entry) => entry.text || "").join("\n"), /لا يحتاج التفعيل/);
+
+  sent.length = 0;
+  await handleGroupWorldMessage("web-owner", sock, message("world-disable-no-admin", ".تعطيل العالم"), "notify");
+  assert.equal((await service.getGroup(GROUP)).enabled, false);
+  assert.equal((await service.getMemberProfile(GROUP, MEMBER)).balance, balanceBefore);
+});
+
+test("the list command sends a native button and reads the selected row ID", async (t) => {
+  const { sock, sent } = await setup(t);
+  await handleGroupWorldMessage("web-owner", sock, message("native-list", ".قائمة"), "notify");
+  const first = sent.find((entry) => entry.rawInteractive)?.rawInteractive
+    ?.viewOnceMessage?.message?.interactiveMessage;
+  assert.ok(first);
+  assert.equal(first.nativeFlowMessage.buttons[0].name, "quick_reply");
+  assert.equal(JSON.parse(first.nativeFlowMessage.buttons[0].buttonParamsJson).display_text, "📋 فتح القائمة");
+
+  const openResponse = {
+    key: { id: "button-open-list", remoteJid: GROUP, fromMe: false, participant: MEMBER },
+    message: { buttonsResponseMessage: { selectedButtonId: "gw:list:open" } },
+  };
+  await handleGroupWorldMessage("web-owner", sock, openResponse, "notify");
+  const list = sent.filter((entry) => entry.rawInteractive).at(-1)
+    ?.rawInteractive?.viewOnceMessage?.message?.interactiveMessage;
+  assert.equal(list.nativeFlowMessage.buttons[0].name, "single_select");
+
+  const rowResponse = {
+    key: { id: "select-profile", remoteJid: GROUP, fromMe: false, participant: MEMBER },
+    message: { listResponseMessage: { singleSelectReply: { selectedRowId: "gw:list:profile" } } },
+  };
+  await handleGroupWorldMessage("web-owner", sock, rowResponse, "notify");
+  assert.match(sent.map((entry) => entry.text || "").join("\n"), /الملف الشخصي/);
+});
+
+test("XO native button replies use the clicking member and enforce turns", async (t) => {
+  const { sock, sent } = await setup(t);
+  const start = {
+    key: { id: "xo-start", remoteJid: GROUP, fromMe: true, participant: OWNER_LID, participantAlt: OWNER_PHONE },
+    message: { extendedTextMessage: { text: ".اكس_او @249000000002", contextInfo: { mentionedJid: [MEMBER] } } },
+    pushName: "Owner",
+  };
+  await handleGroupWorldMessage("web-owner", sock, start, "notify");
+  const board = sent.find((entry) => entry.rawInteractive)?.rawInteractive
+    ?.viewOnceMessage?.message?.interactiveMessage;
+  assert.ok(board);
+  const button = JSON.parse(board.nativeFlowMessage.buttons[0].buttonParamsJson);
+  assert.equal(button.name, undefined);
+  assert.match(button.id, /^gw:xo:xo-/);
+  const gameId = button.id.split(":")[2];
+
+  const click = (id, participant, key) => ({
+    key: { id, remoteJid: GROUP, fromMe: false, participant },
+    message: { interactiveResponseMessage: { nativeFlowResponseMessage: { paramsJson: JSON.stringify({ id: key }) } } },
+  });
+  await handleGroupWorldMessage("web-owner", sock, click("xo-owner-move", OWNER_LID, `gw:xo:${gameId}:move:0`), "notify");
+  const afterX = (await (await import("../../dist/services/groups/group-world-service.mjs")).groupWorldService.getGroup(GROUP)).games.find((game) => game.id === gameId);
+  assert.equal(afterX.board[0], "X");
+  sent.length = 0;
+  await handleGroupWorldMessage("web-owner", sock, click("xo-out-of-turn", OWNER_LID, `gw:xo:${gameId}:move:1`), "notify");
+  assert.match(sent.map((entry) => entry.text || "").join("\n"), /ليس دورك/);
 });

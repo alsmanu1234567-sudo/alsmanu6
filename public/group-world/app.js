@@ -142,7 +142,7 @@ function selectGroupPrompt() {
   if (!state.overview?.enabled) {
     return emptyState(
       "عالم المجموعة غير مفعّل",
-      "سيُنشأ اقتصاد مستقل لهذه المجموعة مع رصيد بداية للأعضاء الحاليين. يتطلب التفعيل أن يكون رقم واتساب المرتبط مشرفًا في المجموعة.",
+      "سيُنشأ اقتصاد مستقل لهذه المجموعة مع رصيد بداية للأعضاء الحاليين. لا يشترط أن يكون البوت مشرفاً؛ صلاحيات WhatsApp مطلوبة فقط لإجراءات الإشراف.",
       `<button class="button button-primary" data-action="activate">تفعيل عالم المجموعة</button>`,
     );
   }
@@ -180,7 +180,7 @@ function renderOverview() {
       <section class="card"><div class="card-header"><div><h3>أعلى الأرصدة</h3><p>ترتيب المجموعة الحالي</p></div><span class="pill green">الإمبراطور هو الأعلى</span></div>${top}</section>
       <section class="card"><div class="card-header"><div><h3>آخر العمليات</h3><p>أحدث الحركات المسجلة</p></div><button class="button button-secondary button-small" data-nav="logs">فتح السجل</button></div>${recent}</section>
     </div>
-    ${o.connection?.botIsAdmin === false ? `<div class="warning-box" style="margin-top:12px">رقم واتساب المحدد ليس مشرفًا حاليًا في المجموعة. ستعمل الأوامر المتاحة، لكن طرد السبام أو بعض إجراءات المجموعة لن تعمل.</div>` : ""}
+    ${o.connection?.botIsAdmin === false ? `<div class="warning-box" style="margin-top:12px">رقم واتساب المحدد ليس مشرفاً. يعمل الاقتصاد والألعاب؛ الطرد أو حذف الرسائل يتطلب صلاحية مشرف WhatsApp.</div>` : ""}
   `;
 }
 

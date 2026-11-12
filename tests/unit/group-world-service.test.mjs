@@ -253,3 +253,71 @@ test("owner phone permissions do not treat a LID with matching digits as a phone
   assert.equal(await h.service.hasPermission(GROUP_A, "249000000001@lid", "points"), false);
   assert.equal(await h.service.hasPermission(GROUP_A, "249000000001", "points"), false);
 });
+
+test("XO enforces turns, settles wins, and keeps player statistics", async (t) => {
+  const h = await harness(t);
+  await activate(h.service, GROUP_A, [{ memberId: ALICE, name: "Alice" }, { memberId: BOB, name: "Bob" }]);
+  const game = await h.service.startTicTacToe(GROUP_A, ALICE, BOB);
+  await assert.rejects(h.service.moveTicTacToe(GROUP_A, game.id, BOB, 0), /ليس دورك/);
+  await h.service.moveTicTacToe(GROUP_A, game.id, ALICE, 0);
+  await h.service.moveTicTacToe(GROUP_A, game.id, BOB, 3);
+  await assert.rejects(h.service.moveTicTacToe(GROUP_A, game.id, ALICE, 3), /مستخدمة/);
+  await h.service.moveTicTacToe(GROUP_A, game.id, ALICE, 1);
+  await h.service.moveTicTacToe(GROUP_A, game.id, BOB, 4);
+  const finished = await h.service.moveTicTacToe(GROUP_A, game.id, ALICE, 2);
+  assert.equal(finished.status, "finished");
+  assert.equal(finished.winnerId, ALICE);
+  assert.equal((await h.service.getMemberProfile(GROUP_A, ALICE)).balance, 600);
+  assert.equal((await h.service.getMemberProfile(GROUP_A, ALICE)).gameStats.xo.wins, 1);
+});
+
+test("member challenges use unique names, reject duplicate answers, and award the first winner", async (t) => {
+  const h = await harness(t);
+  await activate(h.service, GROUP_A, [{ memberId: ALICE, name: "Alice" }, { memberId: BOB, name: "Bob" }]);
+  const challenge = await h.service.createMemberChallenge(GROUP_A, ALICE, BOB, { challenger: "Alice", opponent: "Bob" });
+  assert.match(challenge.name, /^THE_LEGENDARY_[A-Z_]+_BATTLE_2026_[A-F0-9]{6}$/);
+  await assert.rejects(h.service.acceptMemberChallenge(GROUP_A, challenge.name, ALICE), /موجّه/);
+  const accepted = await h.service.acceptMemberChallenge(GROUP_A, challenge.name, BOB, ALICE);
+  assert.equal(accepted.status, "active");
+  const stored = (await h.service.getGroup(GROUP_A)).challenges.find((item) => item.name === challenge.name);
+  const wrong = await h.service.answerMemberChallenge(GROUP_A, challenge.name, ALICE, "ليست الإجابة");
+  assert.equal(wrong.correct, false);
+  await assert.rejects(h.service.answerMemberChallenge(GROUP_A, challenge.name, BOB, "ليست الإجابة"), /من قبل/);
+  const result = await h.service.answerMemberChallenge(GROUP_A, challenge.name, BOB, stored.answer);
+  assert.equal(result.correct, true);
+  assert.equal(result.challenge.winnerId, BOB);
+  assert.equal((await h.service.getMemberProfile(GROUP_A, BOB)).gameStats.challenges.wins, 1);
+});
+
+test("scheduled rewards are group-local, period-idempotent, and survive restart", async (t) => {
+  const h = await harness(t);
+  await activate(h.service, GROUP_A, [{ memberId: ALICE }, { memberId: BOB }]);
+  await activate(h.service, GROUP_B, [{ memberId: ALICE }]);
+  const period = groupWorldDayKey(new Date("2026-11-12T10:00:00.000Z"));
+  const first = await h.service.distributeScheduledReward(GROUP_A, "daily", period, new Date("2026-11-12T10:00:00.000Z"));
+  assert.equal(first.totalDistributed, 400);
+  assert.equal(first.beneficiaries, 2);
+  assert.equal(first.topTen.length, 2);
+  const afterRestart = h.makeService();
+  const duplicate = await afterRestart.distributeScheduledReward(GROUP_A, "daily", period, new Date("2026-11-12T10:00:00.000Z"));
+  assert.equal(duplicate.duplicate, true);
+  assert.equal((await afterRestart.getMemberProfile(GROUP_A, ALICE)).balance, 700);
+  assert.equal((await afterRestart.getMemberProfile(GROUP_B, ALICE)).balance, 500);
+});
+
+test("scheduled reward time and game settings are validated per group", async (t) => {
+  const h = await harness(t);
+  await activate(h.service);
+  await h.service.updateSettings(GROUP_A, {
+    scheduledRewards: { dailyTime: "07:30", weeklyDay: 1, weeklyTime: "08:15" },
+    gameplay: { xo: { winPoints: 250 }, challenges: { difficulty: "hard", durationMinutes: 10 } },
+  }, "web-owner");
+  const group = await h.service.getGroup(GROUP_A);
+  assert.equal(group.settings.scheduledRewards.dailyTime, "07:30");
+  assert.equal(group.settings.scheduledRewards.weeklyDay, 1);
+  assert.equal(group.settings.gameplay.xo.winPoints, 250);
+  assert.equal(group.settings.gameplay.challenges.difficulty, "hard");
+  await assert.rejects(h.service.updateSettings(GROUP_A, {
+    scheduledRewards: { dailyTime: "25:90" },
+  }, "web-owner"), /HH:MM/);
+});

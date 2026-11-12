@@ -4,6 +4,7 @@
  * Exports: setGroupWorldDeps, handleGroupWorldMessage, handleGroupWorldParticipants.
  */
 
+import { randomUUID } from "node:crypto";
 import {
   groupWorldService as defaultGroupWorldService,
   groupWorldDayKey,
@@ -23,12 +24,24 @@ const GROUP_ID_PATTERN = /^[A-Za-z0-9._:-]{3,128}@g\.us$/;
 const MAX_REPLY_LENGTH = 3_500;
 const commandEvents = new Map();
 const participantEvents = new Map();
+const interactiveActions = new Map();
 
 export function setGroupWorldDeps(deps = {}) {
   _deps = { ..._deps, ...deps };
 }
 
 function messageText(message) {
+  let content = unwrappedMessageContent(message);
+  return [
+    content.conversation,
+    content.extendedTextMessage?.text,
+    content.imageMessage?.caption,
+    content.videoMessage?.caption,
+    content.documentMessage?.caption,
+  ].filter(Boolean).join("\n").trim();
+}
+
+function unwrappedMessageContent(message) {
   let content = message?.message || {};
   for (let index = 0; index < 5; index += 1) {
     const wrapped =
@@ -39,13 +52,33 @@ function messageText(message) {
     if (!wrapped) break;
     content = wrapped;
   }
-  return [
-    content.conversation,
-    content.extendedTextMessage?.text,
-    content.imageMessage?.caption,
-    content.videoMessage?.caption,
-    content.documentMessage?.caption,
-  ].filter(Boolean).join("\n").trim();
+  return content;
+}
+
+function messageInteractionId(message) {
+  const content = unwrappedMessageContent(message);
+  const direct = [
+    content.buttonsResponseMessage?.selectedButtonId,
+    content.listResponseMessage?.singleSelectReply?.selectedRowId,
+    content.listResponseMessage?.title,
+    content.interactiveResponseMessage?.nativeFlowResponseMessage?.name,
+  ].filter(Boolean);
+  for (const value of direct) {
+    const text = String(value);
+    if (text.startsWith("gw:")) return text;
+  }
+  const rawParams = content.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson;
+  if (typeof rawParams === "string") {
+    try {
+      const params = JSON.parse(rawParams);
+      for (const value of [params.id, params.row_id, params.selected_id, params.button_id, params.selection_id]) {
+        if (typeof value === "string" && value.startsWith("gw:")) return value;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 function participantId(message) {
@@ -187,6 +220,36 @@ async function isGroupWorldOwner(groupId, userId, sock) {
   return Boolean(savedPhone && linkedPhone && savedPhone === linkedPhone);
 }
 
+async function handleWorldToggle(userId, sock, message, groupId, memberId, text, fromMe) {
+  const token = String(text || "").trim();
+  const enable = token === ".تفعيل العالم";
+  const disable = token === ".تعطيل العالم";
+  if (!enable && !disable) return null;
+  const authorized = fromMe || await groupWorldService.hasPermission(groupId, memberId, "settings");
+  if (!authorized) {
+    return sendText(sock, groupId, "تفعيل أو تعطيل العالم متاح لمالك البوت أو للمشغّل المخوّل فقط.");
+  }
+  if (enable) {
+    if (typeof sock?.groupMetadata !== "function") throw new Error("تعذّر قراءة أعضاء المجموعة");
+    const metadata = await sock.groupMetadata(groupId);
+    const members = (metadata?.participants || []).map((participant) => ({
+      memberId: participant.id || participant.jid || participant.pn || participant.lid,
+      name: participant.notify || participant.name || "",
+    })).filter((member) => member.memberId);
+    const current = await groupWorldService.getGroup(groupId);
+    const result = await groupWorldService.activateGroup({
+      groupId,
+      ownerId: current.ownerId || String(userId),
+      ownerPhoneNumber: current.ownerPhoneNumber || socketPhoneNumber(sock),
+      members,
+      actor: memberId,
+    });
+    return sendText(sock, groupId, `تم تفعيل عالم المجموعة. لا يحتاج التفعيل إلى أن يكون البوت مشرفاً. رصيد الأعضاء السابق محفوظ. (${result.seededMembers} عضو تمت تهيئته)`);
+  }
+  await groupWorldService.setEnabled(groupId, false, memberId, "تعطيل عالم المجموعة");
+  return sendText(sock, groupId, "تم تعطيل عالم المجموعة لهذه المجموعة فقط. الأرصدة والبيانات محفوظة.");
+}
+
 function groupAdmin(metadata, memberId) {
   const participants = Array.isArray(metadata?.participants) ? metadata.participants : [];
   const participant = participants.find((item) =>
@@ -239,11 +302,111 @@ async function sendText(sock, groupId, text) {
   for (const chunk of chunks) await sock.sendMessage(groupId, { text: chunk });
 }
 
+async function prepareInteractiveImage(sock, imageUrl) {
+  const upload = sock?.waUploadToServer;
+  if (typeof upload !== "function") throw new Error("تعذّر تجهيز الصورة التفاعلية من اتصال Baileys");
+  const { prepareWAMessageMedia } = await import("baileys");
+  if (typeof prepareWAMessageMedia !== "function") throw new Error("صيغة الصور التفاعلية غير متاحة في إصدار Baileys المثبّت");
+  const media = await prepareWAMessageMedia(
+    { image: { url: String(imageUrl) } },
+    { upload, jid: sock?.user?.id },
+  );
+  if (!media?.imageMessage) throw new Error("تعذّر تجهيز الصورة لرسالة WhatsApp التفاعلية");
+  return media.imageMessage;
+}
+
+async function sendNativeInteractive(sock, groupId, { text, buttons = [], imageMessage = null, footer = "" }) {
+  if (typeof sock?.relayMessage !== "function") {
+    throw new Error("اتصال WhatsApp الحالي لا يوفّر إرسال الرسائل التفاعلية عبر Baileys");
+  }
+  if (!Array.isArray(buttons) || !buttons.length || buttons.length > 10) {
+    throw new Error("عدد الأزرار التفاعلية يجب أن يكون بين 1 و10");
+  }
+  const nativeButtons = buttons.map((button) => {
+    if (button.type === "list") {
+      const rows = (button.rows || []).slice(0, 10).map((row) => ({
+        id: String(row.id).slice(0, 256),
+        title: String(row.title || "").slice(0, 24),
+        description: String(row.description || "").slice(0, 72),
+      }));
+      return {
+        name: "single_select",
+        buttonParamsJson: JSON.stringify({
+          title: String(button.title || "اختر").slice(0, 24),
+          sections: [{ title: String(button.sectionTitle || "الخيارات").slice(0, 24), rows }],
+        }),
+      };
+    }
+    const id = String(button.id || "");
+    if (!id.startsWith("gw:") || id.length > 256) throw new Error("معرّف زر تفاعلي غير صالح");
+    return {
+      name: "quick_reply",
+      buttonParamsJson: JSON.stringify({
+        display_text: String(button.title || "اختيار").slice(0, 25),
+        id,
+      }),
+    };
+  });
+  const interactiveMessage = {
+    header: {
+      title: "عالم المجموعات",
+      hasMediaAttachment: Boolean(imageMessage),
+      ...(imageMessage ? { imageMessage } : {}),
+    },
+    body: { text: String(text || "اختر من الخيارات").slice(0, MAX_REPLY_LENGTH) },
+    footer: { text: String(footer || "عالم المجموعات").slice(0, 60) },
+    nativeFlowMessage: { buttons: nativeButtons },
+  };
+  const messageId = randomUUID().replaceAll("-", "").slice(0, 20);
+  await sock.relayMessage(groupId, {
+    viewOnceMessage: {
+      message: {
+        messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+        interactiveMessage,
+      },
+    },
+  }, { messageId });
+  return { sent: true, interactive: true, messageId };
+}
+
+async function sendInteractiveList(sock, groupId, text, title, rows, options = {}) {
+  return sendNativeInteractive(sock, groupId, {
+    text,
+    footer: options.footer,
+    imageMessage: options.imageMessage,
+    buttons: [{
+      type: "list",
+      title,
+      sectionTitle: options.sectionTitle || "الخيارات",
+      rows,
+    }],
+  });
+}
+
+function rememberInteractiveAction(action) {
+  const id = `gw:template:${randomUUID()}`;
+  interactiveActions.set(id, { ...action, expiresAt: Date.now() + 30 * 60_000 });
+  if (interactiveActions.size > 2_000) {
+    const now = Date.now();
+    for (const [key, value] of interactiveActions) if (value.expiresAt < now) interactiveActions.delete(key);
+    while (interactiveActions.size > 2_000) interactiveActions.delete(interactiveActions.keys().next().value);
+  }
+  return id;
+}
+
 async function sendTemplate(sock, groupId, template, values) {
   const rendered = renderMessageTemplate(template, values);
   if (rendered.buttons.length) {
-    _deps.logger?.warn?.({ groupId }, "Skipped a template with unsupported outgoing interactive buttons");
-    return false;
+    const imageMessage = rendered.image ? await prepareInteractiveImage(sock, rendered.image) : null;
+    const buttons = rendered.buttons.slice(0, 10).map((button) => ({
+      id: rememberInteractiveAction({ groupId, response: button.response }),
+      title: button.label,
+    }));
+    return sendNativeInteractive(sock, groupId, {
+      text: rendered.text,
+      buttons,
+      imageMessage,
+    });
   }
   if (rendered.image) {
     await sock.sendMessage(groupId, {
@@ -304,6 +467,160 @@ function formatMemberLine(member, index) {
   return `${index + 1}. ${name} — ${Number(member.balance).toLocaleString("ar")} نقطة · ${member.rank?.name || "مبتدئ"}`;
 }
 
+function xoBoardText(game) {
+  const cells = game.board.map((cell, index) => cell || String(index + 1));
+  return `${cells.slice(0, 3).join(" │ ")}\n───┼───┼───\n${cells.slice(3, 6).join(" │ ")}\n───┼───┼───\n${cells.slice(6, 9).join(" │ ")}`;
+}
+
+async function sendXoBoard(sock, groupId, game) {
+  const playerName = (id) => game.names?.[id] || id?.split("@")[0] || "لاعب";
+  let text = `🎮 مباراة X و O\nX: ${playerName(game.xPlayer)}\nO: ${playerName(game.oPlayer)}\n\n${xoBoardText(game)}\n\n`;
+  const buttons = [];
+  if (game.status === "active") {
+    text += `الدور الآن: ${game.turn === game.xPlayer ? "X" : "O"} — ${playerName(game.turn)}`;
+    for (let index = 0; index < 9; index += 1) {
+      if (!game.board[index]) buttons.push({ id: `gw:xo:${game.id}:move:${index}`, title: `الخانة ${index + 1}` });
+    }
+    buttons.push({ id: `gw:xo:${game.id}:cancel`, title: "إلغاء المباراة" });
+  } else if (game.status === "draw") {
+    text += "انتهت المباراة بالتعادل.";
+    buttons.push({ id: `gw:xo:${game.id}:replay`, title: "إعادة اللعب" });
+  } else if (game.status === "finished") {
+    text += `🏆 الفائز: ${playerName(game.winnerId)}`;
+    buttons.push({ id: `gw:xo:${game.id}:replay`, title: "إعادة اللعب" });
+  } else {
+    text += "تم إلغاء المباراة.";
+  }
+  if (buttons.length) {
+    return sendNativeInteractive(sock, groupId, {
+      text,
+      buttons,
+      footer: "اضغط خانة للعب؛ لا تُقبل الحركة إلا من صاحب الدور.",
+    });
+  }
+  return sendText(sock, groupId, text);
+}
+
+const HELP_SECTIONS = {
+  points: {
+    title: "أوامر النقاط",
+    text: "• .نقاطي — رصيدك ومستواك\n• .صدارة — ترتيب الأعضاء\n• .هدية — الهدية اليدوية إن كانت مفعّلة\n• .متجر و .شراء <المعرّف> — المتجر",
+  },
+  pets: {
+    title: "أوامر الحيوانات",
+    text: "• .حيواني — حيوانك النشط\n• .قدرات الحيوان — قدرات حيوانك\n• .قدرات الحيوان التنين — تفاصيل حيوان من الكتالوج\n• .حيواناتي — حيواناتك المملوكة\n• .ترقية حيواني — ترقية الحيوان النشط",
+  },
+  games: {
+    title: "أوامر الألعاب",
+    text: "• .الألعاب — قائمة الألعاب\n• .اكس_او @الخصم — مباراة X و O\n• .تحدي @الخصم — تحدٍ آلي بين عضوين\n• .زعيم — حالة زعيم المجموعة\n• .صيد الكلمات — بدء صيد كلمة",
+  },
+  challenges: {
+    title: "أوامر التحديات",
+    text: "• .تحدي @الشخص — إنشاء تحدٍ\n• .قبول @المتحدي اسم_التحدي — قبول الاسم المطابق\n• .رفض @المتحدي — رفض الدعوة\n• .تحدياتي — عرض التحديات\n• .إلغاء التحدي — إلغاء تحديك\n• .إجابة اسم_التحدي الإجابة — إرسال إجابة",
+  },
+  social: {
+    title: "أوامر العالم الاجتماعي",
+    text: "• .فريقي و .الفرق — فرق الأعضاء\n• .نقابة إنشاء <اسم> و .نقابة انضمام <المعرّف>\n• .مغامرة — بدء مغامرة\n• .كنز — البحث عن الكنز\n• .كلمة <إجابة> — إجابة صيد الكلمات\n• .عجلة — عجلة الحظ المجانية",
+  },
+  admin: {
+    title: "أوامر الإدارة",
+    text: "• .تفعيل العالم و .تعطيل العالم — لمالك البوت أو المشرف المخوّل\n• .تحديث القائمة — تحديث خانات المجموعة\n• .تزويد <رقم> <مبلغ> — تعديل النقاط بصلاحية الإدارة\n• .حسم — تسوية تحدي الرهان القديم بصلاحية الإدارة",
+  },
+};
+
+async function sendHelpMenu(sock, groupId) {
+  const rows = Object.entries(HELP_SECTIONS).map(([id, section]) => ({
+    id: `gw:help:${id}`,
+    title: section.title,
+  }));
+  return sendInteractiveList(sock, groupId, "اختر القسم لعرض أوامر عالم المجموعات.", "أقسام المساعدة", rows);
+}
+
+async function sendGamesMenu(sock, groupId) {
+  return sendInteractiveList(sock, groupId, "اختر لعبة أو نشاطاً لمعرفة طريقة تشغيله.", "الألعاب والأنشطة", [
+    { id: "gw:games:xo", title: "لعبة X و O", description: "مباراة مباشرة بين عضوين" },
+    { id: "gw:games:challenges", title: "تحديات الأعضاء", description: "15 نوعاً من التحديات الآلية" },
+    { id: "gw:games:boss", title: "زعيم المجموعة", description: "هجوم جماعي على الزعيم" },
+    { id: "gw:games:treasure", title: "البحث عن الكنز", description: "حل الألغاز للفوز" },
+    { id: "gw:games:dungeon", title: "الأبراج المحصنة", description: "مراحل وألغاز متتابعة" },
+    { id: "gw:games:word", title: "صيد الكلمات", description: "اكتشف الكلمة من التلميح" },
+    { id: "gw:games:wheel", title: "عجلة الحظ", description: "مكافآت افتراضية محدودة" },
+  ]);
+}
+
+async function handleGroupWorldInteraction(userId, sock, groupId, memberId, interactionId) {
+  const templateAction = interactiveActions.get(interactionId);
+  if (templateAction) {
+    interactiveActions.delete(interactionId);
+    if (templateAction.expiresAt < Date.now() || templateAction.groupId !== groupId) return null;
+    return sendText(sock, groupId, templateAction.response);
+  }
+  if (interactionId === "gw:list:open") {
+    return sendInteractiveList(sock, groupId, "قائمة عالم المجموعات — اختر ما تريد فتحه.", "قائمة العالم", [
+      { id: "gw:list:points", title: "النقاط والصدارة" },
+      { id: "gw:list:profile", title: "ملفي الشخصي" },
+      { id: "gw:list:shop", title: "المتجر" },
+      { id: "gw:list:pets", title: "الحيوانات" },
+      { id: "gw:list:games", title: "الألعاب" },
+      { id: "gw:list:help", title: "المساعدة" },
+    ]);
+  }
+  if (interactionId.startsWith("gw:list:")) {
+    const action = interactionId.slice("gw:list:".length);
+    const command = {
+      points: ".نقاطي",
+      profile: ".ملفي",
+      shop: ".متجر",
+      pets: ".قدرات الحيوان",
+    }[action];
+    if (action === "games") return sendGamesMenu(sock, groupId);
+    if (action === "help") return sendHelpMenu(sock, groupId);
+    if (command) return commandReply(sock, groupId, memberId, { pushName: "" }, command, false);
+  }
+  if (interactionId.startsWith("gw:help:")) {
+    const section = HELP_SECTIONS[interactionId.slice("gw:help:".length)];
+    if (section) return sendText(sock, groupId, `${section.title}\n${section.text}`);
+  }
+  if (interactionId.startsWith("gw:games:")) {
+    const action = interactionId.slice("gw:games:".length);
+    const instructions = {
+      xo: "لبدء مباراة: .اكس_او @الخصم",
+      challenges: "لبدء تحدٍ: .تحدي @الخصم — ثم يقبل الخصم باسم التحدي",
+      boss: "عرض حالة الزعيم: .زعيم · المساهمة في الهجوم: .زعيم هجوم",
+      treasure: "بدء البحث عن الكنز أو عرض التلميح: .كنز · أرسل الحل: .حل <الإجابة>",
+      dungeon: "بدء الأبراج المحصنة: .مغامرة · أرسل الحل: .حل_المغامرة <الإجابة>",
+      word: "بدء صيد الكلمات: .صيد الكلمات · أرسل الحل: .كلمة <الإجابة>",
+      wheel: "استخدم .عجلة للحصول على فرصة مجانية محدودة يومياً.",
+    };
+    if (instructions[action]) return sendText(sock, groupId, instructions[action]);
+  }
+  const gameMatch = interactionId.match(/^gw:xo:([^:]+):(move|cancel|replay)(?::(\d+))?$/);
+  if (gameMatch) {
+    const [, gameId, action, position] = gameMatch;
+    if (action === "move") {
+      const game = await groupWorldService.moveTicTacToe(groupId, gameId, memberId, Number(position));
+      return sendXoBoard(sock, groupId, game);
+    }
+    if (action === "cancel") {
+      const game = await groupWorldService.cancelTicTacToe(groupId, gameId, memberId);
+      return sendXoBoard(sock, groupId, game);
+    }
+    const game = await groupWorldService.replayTicTacToe(groupId, gameId, memberId);
+    return sendXoBoard(sock, groupId, game);
+  }
+  const challengeMatch = interactionId.match(/^gw:challenge:(accept|reject):(.+)$/);
+  if (challengeMatch) {
+    const [, action, challengeName] = challengeMatch;
+    const challenge = action === "accept"
+      ? await groupWorldService.acceptMemberChallenge(groupId, challengeName, memberId)
+      : await groupWorldService.rejectMemberChallenge(groupId, challengeName, memberId);
+    return sendText(sock, groupId, action === "accept"
+      ? `قُبل ${challenge.name} (${challenge.typeLabel}).\n${challenge.prompt}\nأجب: .إجابة ${challenge.name} <إجابتك>`
+      : `تم رفض ${challenge.name}.`);
+  }
+  return null;
+}
+
 async function commandReply(sock, groupId, memberId, message, text, isBotOwner = false) {
   const commandToken = text.trim().split(/\s+/)[0];
   const args = text.trim().slice(commandToken.length).trim();
@@ -311,6 +628,30 @@ async function commandReply(sock, groupId, memberId, message, text, isBotOwner =
   await groupWorldService.ensureMember(groupId, memberId, name);
   const profile = await groupWorldService.getMemberProfile(groupId, memberId);
   const argsList = args.split(/\s+/).filter(Boolean);
+
+  if ([".الألعاب", ".العاب"].includes(commandToken)) {
+    return sendGamesMenu(sock, groupId);
+  }
+
+  if (commandToken === ".مساعدة") {
+    return sendHelpMenu(sock, groupId);
+  }
+
+  if (commandToken === ".اكس_او") {
+    const mentioned = message?.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+    if (!mentioned.length) return sendText(sock, groupId, "استخدم: .اكس_او @الخصم");
+    const metadata = await sock.groupMetadata(groupId);
+    const opponent = (metadata.participants || []).find((item) =>
+      [item.id, item.jid, item.pn, item.lid].some((value) => sameMember(value, mentioned[0]))
+    );
+    if (!opponent) return sendText(sock, groupId, "يجب أن يكون الخصم عضوًا حاليًا في المجموعة.");
+    const opponentId = opponent.id || opponent.jid || opponent.pn || opponent.lid;
+    const game = await groupWorldService.startTicTacToe(groupId, memberId, opponentId, {
+      x: profile.name || name,
+      o: opponent.notify || opponent.name || "",
+    });
+    return sendXoBoard(sock, groupId, game);
+  }
 
   if (commandToken === ".نقاطي") {
     return sendText(sock, groupId, [
@@ -380,6 +721,26 @@ async function commandReply(sock, groupId, memberId, message, text, isBotOwner =
       : "ليس لديك حيوان نشط. استخدم .متجر لعرض الحيوانات.");
   }
 
+  if (commandToken === ".قدرات" && argsList[0] === "الحيوان") {
+    const petName = argsList.slice(1).join(" ");
+    const pet = await groupWorldService.getPetAbilities(groupId, memberId, petName);
+    if (!pet) {
+      return sendText(sock, groupId, petName
+        ? "لم أجد هذا الحيوان في كتالوج المجموعة."
+        : "لا تملك حيوانًا نشطًا. استخدم .قدرات الحيوان <اسم> لعرض قدرات حيوان من الكتالوج.");
+    }
+    const value = pet.ability === "periodic"
+      ? `${Number(pet.value).toLocaleString("ar")} نقطة`
+      : `${Math.round(Number(pet.value) * 100)}%`;
+    return sendText(sock, groupId, [
+      `${pet.icon || "🐾"} ${pet.name} · ${pet.owned ? `المستوى ${pet.level}/${pet.maxLevel}` : "معروض في الكتالوج"}`,
+      `السعر: ${Number(pet.price).toLocaleString("ar")} نقطة`,
+      `القدرة: ${pet.abilityDescription} (${value} في المستوى الأساسي)`,
+      `مستويات القدرة: ${pet.levels.map((item) => `${item.level}: ${item.value}${pet.ability === "periodic" ? " نقطة" : ""}`).join(" · ")}`,
+      pet.nextUpgradeCost ? `تكلفة الترقية التالية: ${pet.nextUpgradeCost.toLocaleString("ar")} نقطة` : "",
+    ].filter(Boolean).join("\n"));
+  }
+
   if (commandToken === ".حيواناتي") {
     return sendText(sock, groupId, profile.pets.length
       ? `حيواناتك:\n${profile.pets.map((pet) => `${pet.catalog?.icon || "🐾"} ${pet.catalog?.name || pet.petId} · مستوى ${pet.level}${profile.activePetId === pet.petId ? " (نشط)" : ""}`).join("\n")}`
@@ -435,6 +796,21 @@ async function commandReply(sock, groupId, memberId, message, text, isBotOwner =
     ].join("\n"));
   }
 
+  if (commandToken === ".عالمي") {
+    const xo = profile.gameStats?.xo || { wins: 0, losses: 0, draws: 0 };
+    const challenges = profile.gameStats?.challenges || { wins: 0, losses: 0, draws: 0 };
+    const resources = Object.entries(profile.resources || {}).map(([key, value]) => `${key}: ${value}`).join(" · ") || "لا توجد موارد";
+    return sendText(sock, groupId, [
+      `🌍 عالم ${profile.name || name || "اللاعب"}`,
+      `${profile.rank?.icon || "⭐"} ${profile.rank?.name || "مبتدئ"} · المركز ${profile.position || "—"}`,
+      `النقاط ${profile.balance} · المستوى ${profile.level} · XP ${profile.xp}`,
+      `الحيوان ${profile.activePet?.catalog?.name || "لا يوجد"} · النقابة ${profile.guildId || "لا يوجد"}`,
+      `XO: ${xo.wins} فوز · ${xo.losses} خسارة · ${xo.draws} تعادل`,
+      `التحديات: ${challenges.wins} فوز · ${challenges.losses} خسارة · ${challenges.draws} تعادل`,
+      `الموارد: ${resources}`,
+    ].join("\n"));
+  }
+
   if (commandToken === ".حقيبتي") {
     const items = profile.inventory.map((item) => `${item.itemId} ×${item.quantity}`);
     const pets = profile.pets.map((pet) => `${pet.catalog?.icon || "🐾"} ${pet.catalog?.name || pet.petId}`);
@@ -451,25 +827,242 @@ async function commandReply(sock, groupId, memberId, message, text, isBotOwner =
     return sendText(sock, groupId, team ? `فريقك: ${team.title}` : "لست ضمن فريق حاليًا.");
   }
 
+  if (commandToken === ".الفرق") {
+    const teams = (await groupWorldService.getOverview(groupId)).teams
+      .sort((a, b) => b.balance - a.balance || b.members - a.members)
+      .slice(0, 10);
+    return sendText(sock, groupId, teams.length
+      ? `ترتيب الفرق:\n${teams.map((team, index) => `${index + 1}. ${team.icon || "🛡️"} ${team.title} — ${team.balance.toLocaleString("ar")} نقطة · ${team.members} عضو`).join("\n")}`
+      : "لا توجد فرق مسجلة في المجموعة.");
+  }
+
+  if (commandToken === ".نقابة" && argsList[0] === "إنشاء") {
+    const guild = await groupWorldService.createGuild(groupId, memberId, argsList.slice(1).join(" "));
+    return sendText(sock, groupId, `تم إنشاء النقابة ${guild.icon} ${guild.title}\nالمعرّف: ${guild.id}\nيمكن للأعضاء الانضمام عبر .نقابة انضمام ${guild.id}`);
+  }
+
+  if (commandToken === ".نقابة" && ["انضمام", "انضم"].includes(argsList[0])) {
+    if (!argsList[1]) return sendText(sock, groupId, "استخدم: .نقابة انضمام <معرّف النقابة>");
+    const guild = await groupWorldService.joinGuild(groupId, memberId, argsList[1]);
+    return sendText(sock, groupId, `انضممت إلى ${guild.icon} ${guild.title}.`);
+  }
+
+  if (commandToken === ".نقابتي") {
+    const guild = (await groupWorldService.getGuilds(groupId)).find((item) => item.members.includes(memberId));
+    return sendText(sock, groupId, guild
+      ? `${guild.icon} ${guild.title}\nالمستوى ${guild.level} · الأعضاء ${guild.membersCount} · الترتيب ${guild.score.toLocaleString("ar")} نقطة`
+      : "لست في نقابة. استخدم .النقابات لعرض النقابات المتاحة.");
+  }
+
+  if (commandToken === ".النقابات") {
+    const guilds = await groupWorldService.getGuilds(groupId);
+    return sendText(sock, groupId, guilds.length
+      ? `ترتيب النقابات:\n${guilds.slice(0, 10).map((guild, index) => `${index + 1}. ${guild.icon} ${guild.title} · ${guild.membersCount} عضو · ${guild.score.toLocaleString("ar")} نقطة · ${guild.id}`).join("\n")}`
+      : "لا توجد نقابات حتى الآن. أنشئ واحدة عبر .نقابة إنشاء <الاسم>.");
+  }
+
+  if (commandToken === ".صناعة") {
+    const group = await groupWorldService.getGroup(groupId);
+    const recipes = group.settings.gameplay.crafting.recipes || [];
+    if (!args) {
+      return sendText(sock, groupId, [
+        `مواردك: ${Object.entries(profile.resources || {}).map(([key, value]) => `${key} ${value}`).join(" · ") || "لا توجد"}`,
+        "الوصفات:",
+        ...recipes.map((recipe) => `${recipe.name} — .صناعة ${recipe.id} · يحتاج ${Object.entries(recipe.costs).map(([key, value]) => `${key} ${value}`).join(" و ")}`),
+      ].join("\n"));
+    }
+    const result = await groupWorldService.craftItem(groupId, memberId, argsList[0]);
+    return sendText(sock, groupId, `صنعت ${result.recipe.name} بنجاح.`);
+  }
+
   if (commandToken === ".تحدي") {
     const mentioned = message?.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-    const stake = Number(argsList.find((item) => /^\d+$/.test(item)));
-    if (!mentioned.length || !Number.isInteger(stake) || stake < 1) {
-      return sendText(sock, groupId, "استخدم منشن الخصم ثم مبلغًا، مثل: .تحدي @عضو 100");
-    }
+    if (!mentioned.length) return sendText(sock, groupId, "استخدم: .تحدي @الشخص");
     const metadata = await sock.groupMetadata(groupId);
-    const opponentIsPresent = (metadata.participants || []).some((item) =>
+    const opponent = (metadata.participants || []).find((item) =>
       [item.id, item.jid, item.pn, item.lid].some((value) => sameMember(value, mentioned[0]))
     );
-    if (!opponentIsPresent) return sendText(sock, groupId, "يجب أن يكون الخصم عضوًا حاليًا في المجموعة.");
-    await groupWorldService.ensureMember(groupId, mentioned[0]);
-    const challenge = await groupWorldService.createChallenge(groupId, memberId, mentioned[0], stake, memberId);
-    return sendText(sock, groupId, `تم إنشاء التحدي ${challenge.id} برهان ${stake}. على الخصم كتابة .قبول ${challenge.id}`);
+    if (!opponent) return sendText(sock, groupId, "يجب أن يكون الخصم عضوًا حاليًا في المجموعة.");
+    const opponentId = opponent.id || opponent.jid || opponent.pn || opponent.lid;
+    await groupWorldService.ensureMember(groupId, opponentId, opponent.notify || opponent.name || "");
+    const stake = Number(argsList.find((item) => /^\d+$/.test(item)));
+    if (Number.isInteger(stake) && stake > 0) {
+      const challenge = await groupWorldService.createChallenge(groupId, memberId, opponentId, stake, memberId);
+      return sendText(sock, groupId, `تم إنشاء تحدي الرهان ${challenge.id} بمبلغ ${stake}. اكتب .قبول ${challenge.id} لقبوله.`);
+    }
+    const challenge = await groupWorldService.createMemberChallenge(groupId, memberId, opponentId, {
+      challenger: profile.name || name,
+      opponent: opponent.notify || opponent.name || "",
+    });
+    return sendNativeInteractive(sock, groupId, {
+      text: `تحدي جديد: ${challenge.typeLabel}\n${challenge.name}\n${profile.name || "عضو"} تحدّى ${opponent.notify || opponent.name || "عضواً"}.\nعلى المستهدف القبول أو الرفض.`,
+      buttons: [
+        { id: `gw:challenge:accept:${challenge.name}`, title: "قبول التحدي" },
+        { id: `gw:challenge:reject:${challenge.name}`, title: "رفض التحدي" },
+      ],
+    });
   }
 
   if (commandToken === ".قبول" && args) {
+    const mentioned = message?.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+    const challengeName = argsList.find((item) => item.startsWith("THE_LEGENDARY_"));
+    if (challengeName) {
+      if (!mentioned.length) return sendText(sock, groupId, "استخدم: .قبول @المتحدي اسم_التحدي");
+      const open = await groupWorldService.listMemberChallenges(groupId, memberId);
+      const challengeFromMentioned = open.find((item) => item.name === challengeName && sameMember(item.challenger, mentioned[0]));
+      if (!challengeFromMentioned) return sendText(sock, groupId, "اسم التحدي أو منشن المتحدي غير مطابق.");
+      const challenge = await groupWorldService.acceptMemberChallenge(groupId, challengeName, memberId);
+      return sendText(sock, groupId, `قُبل ${challenge.name} — ${challenge.typeLabel}.\n${challenge.prompt}\nأرسل: .إجابة ${challenge.name} <إجابتك>`);
+    }
     const challenge = await groupWorldService.acceptChallenge(groupId, args, memberId);
-    return sendText(sock, groupId, `قُبل التحدي ${challenge.id}. يستطيع مشرف المجموعة تسويته بعد انتهائه.`);
+    return sendText(sock, groupId, `قُبل تحدي الرهان ${challenge.id}. يستطيع المشرف تسويته بعد انتهائه.`);
+  }
+
+  if (commandToken === ".رفض") {
+    const mentioned = message?.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+    if (!mentioned.length) return sendText(sock, groupId, "استخدم: .رفض @المتحدي");
+    const open = await groupWorldService.listMemberChallenges(groupId, memberId);
+    const challenge = open.find((item) => item.status === "open" && sameMember(item.challenger, mentioned[0]));
+    if (!challenge) return sendText(sock, groupId, "لا يوجد تحدٍ مفتوح من هذا العضو.");
+    await groupWorldService.rejectMemberChallenge(groupId, challenge.name, memberId);
+    return sendText(sock, groupId, `تم رفض ${challenge.name}.`);
+  }
+
+  if (commandToken === ".تحدياتي") {
+    const challenges = await groupWorldService.listMemberChallenges(groupId, memberId);
+    if (!challenges.length) return sendText(sock, groupId, "لا توجد تحديات مفتوحة لك.");
+    for (const challenge of challenges) {
+      const text = `${challenge.name}\n${challenge.typeLabel} · الحالة: ${challenge.status}\n${challenge.prompt || ""}`;
+      if (challenge.status === "open" && challenge.opponent === memberId) {
+        await sendNativeInteractive(sock, groupId, {
+          text,
+          buttons: [
+            { id: `gw:challenge:accept:${challenge.name}`, title: "قبول التحدي" },
+            { id: `gw:challenge:reject:${challenge.name}`, title: "رفض التحدي" },
+          ],
+        });
+      } else {
+        await sendText(sock, groupId, text);
+      }
+    }
+    return { sent: true };
+  }
+
+  if (commandToken === ".إلغاء" && argsList[0] === "التحدي") {
+    const challenge = await groupWorldService.cancelMemberChallenge(groupId, memberId, argsList[1] || "");
+    return sendText(sock, groupId, `تم إلغاء ${challenge.name}.`);
+  }
+
+  if (commandToken === ".إجابة" && args) {
+    const challengeName = argsList[0];
+    if (!challengeName?.startsWith("THE_LEGENDARY_") || argsList.length < 2) {
+      return sendText(sock, groupId, "استخدم: .إجابة اسم_التحدي إجابتك");
+    }
+    const answer = argsList.slice(1).join(" ");
+    const result = await groupWorldService.answerMemberChallenge(groupId, challengeName, memberId, answer);
+    if (result.expired) return sendText(sock, groupId, "انتهى الوقت؛ انتهى التحدي بالتعادل.");
+    return sendText(sock, groupId, result.correct
+      ? `إجابة صحيحة! فزت بالتحدي ${challengeName} وحصلت على ${result.challenge.rewards?.points || 0} نقطة و${result.challenge.rewards?.xp || 0} XP.`
+      : "إجابة غير صحيحة. بقي وقت للمحاولة بإجابة مختلفة.");
+  }
+
+  if (commandToken === ".زعيم") {
+    if (argsList[0] === "هجوم") {
+      const result = await groupWorldService.attackBoss(groupId, memberId, profile.name || name);
+      return sendText(sock, groupId, result.defeated
+        ? `🏆 هُزم ${result.boss.title} المستوى ${result.boss.level}! شارك ${result.boss.winnerIds.length} أعضاء وحصلوا على مكافآتهم.`
+        : `⚔️ ساهمت بـ${result.damage} ضرر على ${result.boss.title}.\nالصحة: ${result.boss.health}/${result.boss.maxHealth}\nللمساهمة اكتب .زعيم هجوم`);
+    }
+    const boss = await groupWorldService.getBossRaid(groupId);
+    return sendText(sock, groupId, `👹 ${boss.title} · المستوى ${boss.level}\nالصحة: ${boss.health}/${boss.maxHealth}\nالمساهمون: ${Object.keys(boss.contributions || {}).length}\nاكتب .زعيم هجوم للمشاركة.`);
+  }
+
+  if (commandToken === ".كنز") {
+    const hunt = await groupWorldService.startTreasureHunt(groupId, memberId);
+    return sendText(sock, groupId, `🗺️ البحث عن الكنز بدأ!\n${hunt.prompt}\nأرسل الحل عبر: .حل <الإجابة>`);
+  }
+
+  if (commandToken === ".حل" && args) {
+    const result = await groupWorldService.solveTreasureHunt(groupId, memberId, args);
+    return sendText(sock, groupId, result.correct
+      ? `🎉 عثرت على الكنز! حصلت على ${result.reward.points} نقطة و${result.reward.xp} XP.`
+      : "ليست الإجابة الصحيحة. جرّب حلاً مختلفاً.");
+  }
+
+  if (commandToken === ".مغامرة") {
+    const dungeon = await groupWorldService.startDungeon(groupId, memberId);
+    return sendText(sock, groupId, `🏰 مغامرتك بدأت — المرحلة ${dungeon.stage}/${dungeon.totalStages}\n${dungeon.prompt}\nأرسل: .حل_المغامرة <الإجابة>`);
+  }
+
+  if (commandToken === ".حل_المغامرة" && args) {
+    const result = await groupWorldService.answerDungeon(groupId, memberId, args);
+    if (!result.correct) return sendText(sock, groupId, "إجابة غير صحيحة. جرّب إجابة مختلفة قبل انتهاء المغامرة.");
+    if (result.completed) return sendText(sock, groupId, `🏆 أكملت الأبراج المحصنة وحصلت على ${result.reward.points} نقطة و${result.reward.xp} XP.`);
+    return sendText(sock, groupId, `✅ نجحت! المرحلة ${result.stage}/${result.totalStages}\n${result.prompt}\nأرسل: .حل_المغامرة <الإجابة>`);
+  }
+
+  if (commandToken === ".صيد" && argsList[0] === "الكلمات") {
+    const hunt = await groupWorldService.startWordHunt(groupId, memberId);
+    return sendText(sock, groupId, `🔎 صيد الكلمات بدأ!\nالتلميح: ${hunt.clue}\nأرسل: .كلمة <الإجابة>`);
+  }
+
+  if (commandToken === ".كلمة" && args) {
+    const result = await groupWorldService.answerWordHunt(groupId, memberId, args);
+    return sendText(sock, groupId, result.correct
+      ? `🎉 اكتشفت الكلمة وحصلت على ${result.reward.points} نقطة و${result.reward.xp} XP.`
+      : "ليست الكلمة الصحيحة. جرّب كلمة مختلفة.");
+  }
+
+  if (commandToken === ".عجلة") {
+    const result = await groupWorldService.spinLuckyWheel(groupId, memberId);
+    return sendText(sock, groupId, `🎡 جائزة افتراضية: ${result.prize} نقطة · أضيف إلى رصيدك ${result.credited} نقطة. المحاولات المتبقية اليوم: ${result.remaining}.`);
+  }
+
+  if (commandToken === ".بطولتي") {
+    if (argsList[0] === "إنشاء") {
+      const permitted = isBotOwner || await groupWorldService.hasPermission(groupId, memberId, "settings");
+      if (!permitted) return sendText(sock, groupId, "إنشاء البطولة متاح لمالك البوت أو للمشغّل المخوّل.");
+      const mode = argsList[1] === "جماعية" ? "guild" : "individual";
+      const title = argsList.slice(mode === "guild" ? 2 : 1).join(" ") || "دوري الأبطال";
+      const tournament = await groupWorldService.createTournament(groupId, title, memberId, mode);
+      return sendText(sock, groupId, `تم إنشاء ${mode === "guild" ? "بطولة نقابات" : "بطولة فردية"}: ${tournament.title}\nالمعرّف: ${tournament.id}\nالتسجيل: .بطولتي تسجيل`);
+    }
+    if (argsList[0] === "تسجيل") {
+      const tournament = await groupWorldService.joinTournament(groupId, argsList[1] || null, memberId);
+      return sendText(sock, groupId, `تم تسجيلك في ${tournament.title}.`);
+    }
+    if (argsList[0] === "بدء") {
+      const permitted = isBotOwner || await groupWorldService.hasPermission(groupId, memberId, "settings");
+      if (!permitted) return sendText(sock, groupId, "بدء البطولة متاح لمالك البوت أو للمشغّل المخوّل.");
+      const tournament = await groupWorldService.startTournament(groupId, argsList[1], memberId);
+      return sendText(sock, groupId, `انطلقت ${tournament.title}. اكتب .بطولتي لعب لبدء مباراتك.`);
+    }
+    if (argsList[0] === "لعب") {
+      const current = await groupWorldService.getTournamentMatchForMember(groupId, memberId);
+      if (!current) return sendText(sock, groupId, "لا توجد لك مباراة حالية في بطولة نشطة.");
+      if (current.match.status === "active") {
+        const activeGame = (await groupWorldService.getGroup(groupId)).games.find((item) => item.id === current.match.gameId);
+        return activeGame ? sendXoBoard(sock, groupId, activeGame) : sendText(sock, groupId, "تعذّر استعادة لوحة المباراة.");
+      }
+      const [firstId, secondId] = current.match.players;
+      const entries = current.tournament.entries;
+      const first = entries.find((entry) => entry.id === firstId);
+      const second = entries.find((entry) => entry.id === secondId);
+      if (!first || !second) return sendText(sock, groupId, "بيانات طرفي المباراة غير مكتملة.");
+      const xPlayer = first.captain;
+      const oPlayer = second.captain;
+      if (![xPlayer, oPlayer].includes(memberId)) return sendText(sock, groupId, "بدء مباراة النقابة متاح لقائد كل نقابة.");
+      const game = await groupWorldService.startTicTacToe(groupId, xPlayer, oPlayer, { x: first.label, o: second.label });
+      await groupWorldService.attachTournamentGame(groupId, current.tournament.id, current.match.id, game.id, {
+        [xPlayer]: first.id,
+        [oPlayer]: second.id,
+      });
+      return sendXoBoard(sock, groupId, game);
+    }
+    const tournaments = await groupWorldService.getTournamentStatus(groupId);
+    return sendText(sock, groupId, tournaments.length
+      ? tournaments.slice(-5).reverse().map((item) => `${item.title} · ${item.mode === "guild" ? "جماعية" : "فردية"} · ${item.status} · ${item.entries.length} مشارك · ${item.championId ? `البطل ${item.championId}` : item.status === "registration" ? `سجّل عبر .بطولتي تسجيل` : "اكتب .بطولتي لعب"}`).join("\n")
+      : "لا توجد بطولات. يستطيع مالك البوت إنشاء بطولة من الأمر أو لوحة المطور.");
   }
 
   if (commandToken === ".حسم" && args) {
@@ -486,10 +1079,10 @@ async function commandReply(sock, groupId, memberId, message, text, isBotOwner =
   }
 
   if (commandToken === ".قائمة") {
-    const slots = await groupWorldService.getSlots(groupId);
-    return sendText(sock, groupId, slots.length
-      ? `قائمة الأعضاء:\n${slots.map((slot) => `${slot.slot}. ${slot.memberId ? slot.name || slot.memberId.split("@")[0] : "— فارغ —"}`).join("\n")}`
-      : "القائمة فارغة. استخدم .تحديث القائمة بعد تفعيل النظام.");
+    return sendNativeInteractive(sock, groupId, {
+      text: "اضغط الزر لفتح قائمة عالم المجموعات التفاعلية.",
+      buttons: [{ id: "gw:list:open", title: "📋 فتح القائمة" }],
+    });
   }
 
   if (commandToken === ".تحديث" && args === "القائمة") {
@@ -554,7 +1147,16 @@ async function commandReply(sock, groupId, memberId, message, text, isBotOwner =
   );
   if (custom) {
     if (custom.buttons.length) {
-      return sendText(sock, groupId, "لم يُرسل الرد: الأزرار التفاعلية غير مدعومة في إصدار Baileys الحالي. لم يتم تحويلها إلى نصوص شكلية.");
+      const imageMessage = custom.image ? await prepareInteractiveImage(sock, custom.image) : null;
+      const buttons = custom.buttons.slice(0, 10).map((button) => ({
+        id: rememberInteractiveAction({ groupId, response: button.response }),
+        title: button.label,
+      }));
+      return sendNativeInteractive(sock, groupId, {
+        text: custom.text,
+        buttons,
+        imageMessage,
+      });
     }
     if (custom.image) {
       await sock.sendMessage(groupId, {
@@ -572,15 +1174,32 @@ export async function handleGroupWorldMessage(userId, sock, message, eventType =
   const groupId = String(message?.key?.remoteJid || "");
   if (!GROUP_ID_PATTERN.test(groupId)) return null;
   const text = messageText(message);
+  const interactionId = messageInteractionId(message);
   const fromMe = message?.key?.fromMe === true;
   if (fromMe && (eventType !== "notify" || !text.startsWith("."))) return null;
   if (fromMe && !(await isCurrentSocketOwnerMessage(groupId, sock, message))) return null;
   const memberId = fromMe
     ? await ownerMemberId(groupId, sock, message)
     : accountIdFromMessage(message);
-  if (!memberId || !text) return null;
+  if (!memberId || (!text && !interactionId)) return null;
 
   try {
+    if (interactionId) {
+      const eventId = String(message?.key?.id || "");
+      const dedupeKey = `${groupId}:${eventId}`;
+      if (eventId && commandEvents.has(dedupeKey)) return { duplicate: true };
+      if (eventId) {
+        commandEvents.set(dedupeKey, Date.now());
+        if (commandEvents.size > 10_000) {
+          const cutoff = Date.now() - 10 * 60_000;
+          for (const [key, at] of commandEvents) if (at < cutoff) commandEvents.delete(key);
+        }
+      }
+      return await handleGroupWorldInteraction(String(userId), sock, groupId, memberId, interactionId);
+    }
+    if ([".تفعيل العالم", ".تعطيل العالم"].includes(text.trim())) {
+      return await handleWorldToggle(userId, sock, message, groupId, memberId, text, fromMe);
+    }
     if (text.startsWith(".")) {
       const eventId = String(message?.key?.id || "");
       const dedupeKey = `${groupId}:${eventId}`;
@@ -594,6 +1213,11 @@ export async function handleGroupWorldMessage(userId, sock, message, eventType =
           }
           while (commandEvents.size > 10_000) commandEvents.delete(commandEvents.keys().next().value);
         }
+      }
+      const group = await groupWorldService.getGroup(groupId);
+      const commandToken = text.trim().split(/\s+/)[0];
+      if (group.commandSettings?.[commandToken] === false) {
+        return sendText(sock, groupId, `الأمر ${commandToken} متوقف لهذه المجموعة.`);
       }
       const botOwner = fromMe && await isGroupWorldOwner(groupId, userId, sock);
       return await commandReply(sock, groupId, memberId, message, text, botOwner);
@@ -637,7 +1261,7 @@ export async function handleGroupWorldMessage(userId, sock, message, eventType =
     }
     return result;
   } catch (error) {
-    if (text.startsWith(".")) {
+    if (text.startsWith(".") || interactionId) {
       await sendText(sock, groupId, error?.message || "تعذّر تنفيذ الأمر.");
     }
     _deps.logger?.warn?.({ err: String(error), userId, groupId }, "Group World message failed");

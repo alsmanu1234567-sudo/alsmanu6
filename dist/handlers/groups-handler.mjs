@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { webappUrlFor } from "../webapp-auth.mjs";
 import { findNextMawdoo3Article } from "../services/groups/mawdoo3-feed-service.mjs";
+import { groupWorldDayKey, groupWorldWeekKey } from "../services/groups/group-world-service.mjs";
 import {
   groupWorldService,
   handleGroupWorldMessage,
@@ -29,7 +30,9 @@ const _warningTimes = new Map();
 const _inviteCache = new Map();
 let _listenerRecoveryTimer = null;
 let _autoPostTimer = null;
+let _groupWorldRewardsTimer = null;
 let _autoPostSweepInFlight = false;
+let _groupWorldRewardsSweepInFlight = false;
 let _hasActiveGroupWorld = false;
 let _groupWorldScanAt = 0;
 let _groupWorldScanInFlight = false;
@@ -50,6 +53,10 @@ export function setDeps(d) {
   if (!_autoPostTimer) {
     _autoPostTimer = setInterval(runScheduledGroupAutoPosts, 30_000);
     _autoPostTimer.unref?.();
+  }
+  if (!_groupWorldRewardsTimer) {
+    _groupWorldRewardsTimer = setInterval(runScheduledGroupWorldRewards, 30_000);
+    _groupWorldRewardsTimer.unref?.();
   }
 }
 
@@ -173,7 +180,81 @@ export function getKhartoumClock(date = new Date()) {
   return {
     date: `${values.year}-${values.month}-${values.day}`,
     time: `${values.hour}:${values.minute}`,
+    weekday: new Intl.DateTimeFormat("en-US", {
+      timeZone: AUTO_POST_TIME_ZONE,
+      weekday: "short",
+    }).format(date),
   };
+}
+
+function automaticRewardReportText(report) {
+  const label = report.type === "weekly" ? "الأسبوعية" : "اليومية";
+  const name = (member) => member?.name || member?.memberId?.split("@")[0] || "لا يوجد";
+  const lines = [
+    `🌅 تقرير مكافآت ${label}`,
+    `الفترة: ${report.periodKey}`,
+    `تم توزيع ${Number(report.totalDistributed || 0).toLocaleString("ar")} نقطة على ${Number(report.beneficiaries || 0).toLocaleString("ar")} عضو.`,
+    `👑 أكبر زيادة: ${name(report.biggestIncrease)} (+${Number(report.biggestIncrease?.credited || 0).toLocaleString("ar")})`,
+    `💎 أعلى رصيد: ${name(report.highestBalance)} (${Number(report.highestBalance?.balance || 0).toLocaleString("ar")} نقطة)`,
+    `🚀 الأكثر تطوراً: ${name(report.mostDeveloped)} (+${Number(report.mostDeveloped?.xpEarned || 0).toLocaleString("ar")} XP)`,
+    `🔥 أكبر تقدم في الترتيب: ${name(report.biggestRankJump)}${report.biggestRankJump ? ` (${Number(report.biggestRankJump.jump).toLocaleString("ar")} مركز)` : ""}`,
+    `🏆 الأكثر نشاطاً: ${name(report.mostActive)} (${Number(report.mostActive?.messages || 0).toLocaleString("ar")} رسالة)`,
+    "أفضل 10 أعضاء:",
+    ...(report.topTen || []).map((member, index) => `${index + 1}. ${name(member)} — ${Number(member.balance || 0).toLocaleString("ar")} نقطة`),
+  ];
+  if (report.previousComparison) {
+    const previousLabel = report.type === "weekly" ? "الأسبوع السابق" : "اليوم السابق";
+    lines.push(
+      `مقارنة ${previousLabel}: ${report.previousComparison.changeDistributed >= 0 ? "+" : ""}${Number(report.previousComparison.changeDistributed).toLocaleString("ar")} نقطة · ${report.previousComparison.changeBeneficiaries >= 0 ? "+" : ""}${Number(report.previousComparison.changeBeneficiaries).toLocaleString("ar")} مستفيد`,
+    );
+  }
+  return lines.join("\n");
+}
+
+export async function runScheduledGroupWorldRewards() {
+  if (_groupWorldRewardsSweepInFlight || !_deps) return;
+  _groupWorldRewardsSweepInFlight = true;
+  try {
+    const clock = getKhartoumClock();
+    const weekdayIndex = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[clock.weekday];
+    const groups = await groupWorldService.listGroups();
+    for (const group of groups) {
+      if (!group.enabled || !group.ownerId || !String(group.groupId || "").endsWith("@g.us")) continue;
+      const schedule = group.settings?.scheduledRewards || {};
+      const due = [];
+      if (schedule.dailyEnabled !== false && schedule.dailyTime === clock.time) due.push("daily");
+      if (
+        schedule.weeklyEnabled !== false &&
+        Number(schedule.weeklyDay) === weekdayIndex &&
+        schedule.weeklyTime === clock.time
+      ) due.push("weekly");
+      const pending = (group.rewardReports || []).filter((report) => !report.reportSentAt);
+      const reportIds = new Set(pending.map((report) => report.id));
+      for (const type of due) {
+        const periodKey = type === "daily"
+          ? groupWorldDayKey(new Date())
+          : groupWorldWeekKey(new Date());
+        const result = await groupWorldService.distributeScheduledReward(group.groupId, type, periodKey);
+        if (result?.id) reportIds.add(result.id);
+      }
+      if (!reportIds.size) continue;
+      const sock = await findSocketForGroup(group.ownerId, group.groupId, group.ownerPhoneNumber);
+      if (!sock) continue;
+      for (const reportId of reportIds) {
+        const report = await groupWorldService.claimRewardReportForDelivery(group.groupId, reportId);
+        if (!report) continue;
+        try {
+          await sock.sendMessage(group.groupId, { text: automaticRewardReportText(report) });
+        } catch (error) {
+          _deps?.logger?.warn?.({ err: String(error), groupId: group.groupId, reportId }, "Automatic Group World reward report could not be sent");
+        }
+      }
+    }
+  } catch (error) {
+    _deps?.logger?.warn?.({ err: String(error) }, "Automatic Group World reward sweep failed");
+  } finally {
+    _groupWorldRewardsSweepInFlight = false;
+  }
 }
 
 async function publishScheduledItem(userId, item, day, time) {
@@ -446,7 +527,6 @@ async function refreshGroupWorldListeners(force = false) {
   try {
     const groups = await groupWorldService.listGroups();
     if (groups.some((group) => group.enabled)) _hasActiveGroupWorld = true;
-    if (!_hasActiveGroupWorld) return;
     const users = _deps?.inMemoryDB?.users;
     if (!(users instanceof Map)) return;
     for (const userId of users.keys()) {
@@ -478,7 +558,7 @@ export async function getGroupWorldConnection(userId, groupId, phoneNumber = nul
 export async function activateGroupWorldForWeb(userId, groupId, phoneNumber) {
   const uid = String(userId);
   const { sock, metadata, phoneNumber: ownerPhoneNumber } =
-    await getGroupWorldConnection(uid, groupId, phoneNumber, true);
+    await getGroupWorldConnection(uid, groupId, phoneNumber, false);
   const members = (metadata.participants || []).map((participant) => ({
     memberId: participant.id || participant.jid || participant.pn || participant.lid,
     name: participant.notify || participant.name || "",
@@ -909,8 +989,11 @@ export function stopModerationListenerRecovery() {
   _listenerRecoveryTimer = null;
   if (_autoPostTimer) clearInterval(_autoPostTimer);
   _autoPostTimer = null;
+  if (_groupWorldRewardsTimer) clearInterval(_groupWorldRewardsTimer);
+  _groupWorldRewardsTimer = null;
   _autoPostInFlight.clear();
   _autoPostSweepInFlight = false;
+  _groupWorldRewardsSweepInFlight = false;
 }
 
 function controlsKeyboard(userId, groupId) {
