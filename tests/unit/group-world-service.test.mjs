@@ -293,6 +293,7 @@ test("scheduled rewards are group-local, period-idempotent, and survive restart"
   const h = await harness(t);
   await activate(h.service, GROUP_A, [{ memberId: ALICE }, { memberId: BOB }]);
   await activate(h.service, GROUP_B, [{ memberId: ALICE }]);
+  await h.service.claimGift(GROUP_A, ALICE, "daily");
   const period = groupWorldDayKey(new Date("2026-11-12T10:00:00.000Z"));
   const first = await h.service.distributeScheduledReward(GROUP_A, "daily", period, new Date("2026-11-12T10:00:00.000Z"));
   assert.equal(first.totalDistributed, 400);
@@ -301,7 +302,7 @@ test("scheduled rewards are group-local, period-idempotent, and survive restart"
   const afterRestart = h.makeService();
   const duplicate = await afterRestart.distributeScheduledReward(GROUP_A, "daily", period, new Date("2026-11-12T10:00:00.000Z"));
   assert.equal(duplicate.duplicate, true);
-  assert.equal((await afterRestart.getMemberProfile(GROUP_A, ALICE)).balance, 700);
+  assert.equal((await afterRestart.getMemberProfile(GROUP_A, ALICE)).balance, 900);
   assert.equal((await afterRestart.getMemberProfile(GROUP_B, ALICE)).balance, 500);
 });
 

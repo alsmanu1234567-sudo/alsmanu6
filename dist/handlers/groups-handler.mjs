@@ -220,6 +220,9 @@ export async function runScheduledGroupWorldRewards() {
     const groups = await groupWorldService.listGroups();
     for (const group of groups) {
       if (!group.enabled || !group.ownerId || !String(group.groupId || "").endsWith("@g.us")) continue;
+      await groupWorldService.expireMemberChallenges(group.groupId).catch((error) => {
+        _deps?.logger?.warn?.({ err: String(error), groupId: group.groupId }, "Could not expire Group World challenges");
+      });
       const schedule = group.settings?.scheduledRewards || {};
       const due = [];
       if (schedule.dailyEnabled !== false && schedule.dailyTime === clock.time) due.push("daily");

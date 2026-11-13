@@ -20,8 +20,8 @@ const BUILTIN_COMMANDS = [
   ".قبول", ".رفض", ".تحدياتي", ".إلغاء التحدي", ".إجابة", ".حسم",
   ".قائمة", ".مساعدة", ".العاب", ".الألعاب", ".اكس_او", ".عالمي",
   ".قدرات الحيوان", ".الفرق", ".مغامرة", ".كنز", ".زعيم",
-  ".بطولتي", ".نقابة", ".النقابات", ".صناعة", ".صيد الكلمات",
-  ".كلمة", ".عجلة", ".تعطيل العالم", ".تفعيل العالم", ".تحديث القائمة", ".تزويد",
+  ".بطولتي", ".بطولة", ".نقابة", ".نقابتي", ".النقابات", ".صناعة", ".صيد الكلمات",
+  ".كلمة", ".حل", ".حل_المغامرة", ".عجلة", ".تعطيل العالم", ".تفعيل العالم", ".تحديث القائمة", ".تزويد",
 ];
 
 const DEFAULT_CHALLENGE_QUESTIONS = [
@@ -40,7 +40,10 @@ const DEFAULT_CHALLENGE_QUESTIONS = [
   { type: "cipher", label: "حل الشيفرات", prompt: "شفرة A1Z26: 3-1-20. ما الكلمة الإنجليزية؟", answer: "cat" },
   { type: "logic", label: "التفكير المنطقي", prompt: "لدى سارة 3 تفاحات وأخذت تفاحتين. كم تفاحة معها؟", answer: "2" },
   { type: "sequence", label: "السلاسل والتتابعات", prompt: "أكمل السلسلة: 2، 4، 8، 16، ؟", answer: "32" },
-];
+].map((question, index) => ({
+  ...question,
+  difficulty: index < 5 ? "easy" : index < 10 ? "normal" : "hard",
+}));
 
 const DEFAULT_GUILD_RECIPES = [
   { id: "healing-potion", name: "جرعة الشفاء", costs: { herb: 2, crystal: 1 }, item: "healing-potion" },
@@ -164,7 +167,7 @@ const DEFAULT_SETTINGS = {
   },
   gameplay: {
     xo: { winPoints: 100, winXp: 25, drawPoints: 25, drawXp: 5 },
-    challenges: { rewardPoints: 100, rewardXp: 25, drawPoints: 25, drawXp: 5, durationMinutes: 5, difficulty: "normal", questions: [] },
+    challenges: { rewardPoints: 100, rewardXp: 25, drawPoints: 25, drawXp: 5, durationMinutes: 5, difficulty: "mixed", questions: [] },
     bossRaid: { baseHealth: 1_000, damagePerAction: 25, rewardPoints: 250, rewardXp: 50 },
     treasure: { rewardPoints: 200, rewardXp: 20, durationMinutes: 20 },
     guilds: { createCost: 100, initialLevel: 1 },
@@ -303,6 +306,8 @@ function ensureAccount(state, memberId, name = "") {
       lastActiveDay: null,
       lastDailyGiftDay: null,
       lastWeeklyGiftWeek: null,
+      lastDailyAutoPeriod: null,
+      lastWeeklyAutoPeriod: null,
       lastWheelDay: null,
       taskProgress: {},
       spamMessages: 0,
@@ -1365,7 +1370,10 @@ export function createGroupWorldService(options = {}) {
                 const prompt = String(question?.prompt || "").trim().slice(0, 500);
                 const answer = normalizeGameAnswer(question?.answer);
                 if (!label || !prompt || !answer) throw new Error(`بيانات السؤال ${index + 1} غير مكتملة`);
-                return { type: String(question.type || `custom-${index + 1}`).slice(0, 50), label, prompt, answer };
+                const difficulty = ["easy", "normal", "hard"].includes(question.difficulty)
+                  ? question.difficulty
+                  : "normal";
+                return { type: String(question.type || `custom-${index + 1}`).slice(0, 50), label, prompt, answer, difficulty };
               });
             } else if (feature === "crafting" && key === "recipes") {
               if (!Array.isArray(value) || value.length > 100) throw new Error("وصفات الصناعة غير صالحة");
@@ -1773,6 +1781,7 @@ export function createGroupWorldService(options = {}) {
       settings: deepClone(state.settings),
       catalogs: deepClone(state.catalogs),
       commands: deepClone(state.commands),
+      commandSettings: deepClone(state.commandSettings),
       administrators: deepClone(state.administrators),
       slotsCount: state.slots.length,
       teams: state.teams.map((team) => ({
@@ -1785,6 +1794,16 @@ export function createGroupWorldService(options = {}) {
       challenges: deepClone(state.challenges),
       events: deepClone(state.events),
       season: deepClone(state.season),
+      games: deepClone(state.games.filter((game) => game.status === "active")),
+      gameHistory: deepClone(state.gameHistory.slice(-50).reverse()),
+      gameBans: deepClone(state.gameBans),
+      guilds: deepClone(state.guilds),
+      tournaments: deepClone(state.tournaments),
+      bossRaids: deepClone(state.bossRaids.slice(-10).reverse()),
+      treasureHunts: deepClone(state.treasureHunts.slice(-10).reverse()),
+      dungeons: deepClone(state.dungeons.slice(-30).reverse()),
+      wordHunts: deepClone(state.wordHunts.slice(-10).reverse()),
+      rewardReports: state.rewardReports.slice(-20).reverse().map(({ memberSnapshots, payouts, ...report }) => deepClone(report)),
     };
   }
 
@@ -1821,7 +1840,8 @@ export function createGroupWorldService(options = {}) {
   async function getPublicCommands(groupId) {
     const state = await getGroup(groupId);
     const custom = state.commands.filter((item) => item.enabled).map((item) => item.name);
-    return [...new Set([...BUILTIN_COMMANDS, ...custom])];
+    const builtin = BUILTIN_COMMANDS.filter((command) => state.commandSettings[command] !== false);
+    return [...new Set([...builtin, ...custom])];
   }
 
   async function createChallenge(groupId, memberId, opponentId, stake, actor) {
@@ -2075,7 +2095,12 @@ export function createGroupWorldService(options = {}) {
       if (conflict) throw new Error("يوجد تحدٍ غير منتهٍ بين هذين العضوين بالفعل");
       const customQuestions = state.settings.gameplay.challenges.questions;
       const questions = customQuestions.length ? customQuestions : DEFAULT_CHALLENGE_QUESTIONS;
-      const question = questions[Math.floor(Math.random() * questions.length)];
+      const requestedDifficulty = state.settings.gameplay.challenges.difficulty;
+      const matchingQuestions = requestedDifficulty === "mixed"
+        ? questions
+        : questions.filter((item) => item.difficulty === requestedDifficulty);
+      const questionPool = matchingQuestions.length ? matchingQuestions : questions;
+      const question = questionPool[Math.floor(Math.random() * questionPool.length)];
       const type = String(question.type || "custom").replace(/[^A-Z0-9]+/gi, "_").toUpperCase();
       const challenge = {
         id: gameId("challenge"),
@@ -2112,6 +2137,7 @@ export function createGroupWorldService(options = {}) {
         item.mode === "game" && item.name === String(challengeName || "")
       );
       if (!challenge || challenge.status !== "open") throw new Error("اسم التحدي غير صحيح أو لم يعد متاحًا");
+      if (challenge.expiresAt && Date.parse(challenge.expiresAt) <= now().getTime()) throw new Error("انتهى وقت قبول هذا التحدي");
       if (challenge.opponent !== accepting) throw new Error("هذا التحدي موجّه إلى عضو آخر");
       if (expectedChallenger && challenge.challenger !== expectedChallenger) throw new Error("اسم المتحدي لا يطابق هذا التحدي");
       requirePlayableMember(state, accepting, "challenges");
@@ -2136,6 +2162,7 @@ export function createGroupWorldService(options = {}) {
         item.status === "open"
       );
       if (!challenge || challenge.status !== "open") throw new Error("التحدي غير موجود أو لم يعد مفتوحًا");
+      if (challenge.expiresAt && Date.parse(challenge.expiresAt) <= now().getTime()) throw new Error("انتهى وقت هذا التحدي");
       challenge.status = "rejected";
       challenge.finishedAt = now().toISOString();
       return publicMemberChallenge(challenge);
@@ -2269,12 +2296,12 @@ export function createGroupWorldService(options = {}) {
       const payouts = [];
       for (const account of eligible) {
         const alreadyClaimed = type === "daily"
-          ? account.lastDailyGiftDay === period
-          : account.lastWeeklyGiftWeek === period;
+          ? account.lastDailyAutoPeriod === period
+          : account.lastWeeklyAutoPeriod === period;
         if (alreadyClaimed) continue;
         initializeAccount(state, account, at);
-        if (type === "daily") account.lastDailyGiftDay = period;
-        else account.lastWeeklyGiftWeek = period;
+        if (type === "daily") account.lastDailyAutoPeriod = period;
+        else account.lastWeeklyAutoPeriod = period;
         const base = Number(type === "daily"
           ? state.settings.rewards.dailyGift
           : state.settings.rewards.weeklyGift);

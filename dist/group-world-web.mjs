@@ -111,6 +111,24 @@ export function registerGroupWorldWebApp(app, parseJson, guard) {
     return groupWorldService.updateSettings(groupId, patch, uid);
   }));
 
+  app.post("/api/group-world/game-ban", parseJson, guard(async (uid, req) => {
+    const { groupId, memberId, game, enabled } = req.body || {};
+    await requirePermission(uid, groupId, "settings");
+    return groupWorldService.setGameBan(groupId, memberId, game, enabled, uid);
+  }));
+
+  app.post("/api/group-world/tournament/create", parseJson, guard(async (uid, req) => {
+    const { groupId, title, mode } = req.body || {};
+    await requirePermission(uid, groupId, "settings");
+    return groupWorldService.createTournament(groupId, title, uid, mode || "individual");
+  }));
+
+  app.post("/api/group-world/tournament/start", parseJson, guard(async (uid, req) => {
+    const { groupId, tournamentId } = req.body || {};
+    await requirePermission(uid, groupId, "settings");
+    return groupWorldService.startTournament(groupId, tournamentId, uid);
+  }));
+
   app.get("/api/group-world/members", guard(async (uid, req) => {
     const groupId = groupIdFrom(req);
     await requirePermission(uid, groupId, "view");

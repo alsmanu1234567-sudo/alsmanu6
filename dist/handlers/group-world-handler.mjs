@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { listButton, quickReply, sendInteractive } from "../../services/interactive.js";
 import {
   groupWorldService as defaultGroupWorldService,
   groupWorldDayKey,
@@ -302,84 +303,37 @@ async function sendText(sock, groupId, text) {
   for (const chunk of chunks) await sock.sendMessage(groupId, { text: chunk });
 }
 
-async function prepareInteractiveImage(sock, imageUrl) {
-  const upload = sock?.waUploadToServer;
-  if (typeof upload !== "function") throw new Error("تعذّر تجهيز الصورة التفاعلية من اتصال Baileys");
-  const { prepareWAMessageMedia } = await import("baileys");
-  if (typeof prepareWAMessageMedia !== "function") throw new Error("صيغة الصور التفاعلية غير متاحة في إصدار Baileys المثبّت");
-  const media = await prepareWAMessageMedia(
-    { image: { url: String(imageUrl) } },
-    { upload, jid: sock?.user?.id },
-  );
-  if (!media?.imageMessage) throw new Error("تعذّر تجهيز الصورة لرسالة WhatsApp التفاعلية");
-  return media.imageMessage;
-}
-
-async function sendNativeInteractive(sock, groupId, { text, buttons = [], imageMessage = null, footer = "" }) {
-  if (typeof sock?.relayMessage !== "function") {
-    throw new Error("اتصال WhatsApp الحالي لا يوفّر إرسال الرسائل التفاعلية عبر Baileys");
-  }
+async function sendNativeInteractive(sock, groupId, { text, buttons = [], imageMessage = null, image = null, footer = "" }) {
   if (!Array.isArray(buttons) || !buttons.length || buttons.length > 10) {
     throw new Error("عدد الأزرار التفاعلية يجب أن يكون بين 1 و10");
   }
   const nativeButtons = buttons.map((button) => {
     if (button.type === "list") {
-      const rows = (button.rows || []).slice(0, 10).map((row) => ({
-        id: String(row.id).slice(0, 256),
-        title: String(row.title || "").slice(0, 24),
-        description: String(row.description || "").slice(0, 72),
-      }));
-      return {
-        name: "single_select",
-        buttonParamsJson: JSON.stringify({
-          title: String(button.title || "اختر").slice(0, 24),
-          sections: [{ title: String(button.sectionTitle || "الخيارات").slice(0, 24), rows }],
-        }),
-      };
+      return listButton(button.title || "اختر", [{
+        title: button.sectionTitle || "الخيارات",
+        rows: (button.rows || []).slice(0, 10),
+      }]);
     }
-    const id = String(button.id || "");
-    if (!id.startsWith("gw:") || id.length > 256) throw new Error("معرّف زر تفاعلي غير صالح");
-    return {
-      name: "quick_reply",
-      buttonParamsJson: JSON.stringify({
-        display_text: String(button.title || "اختيار").slice(0, 25),
-        id,
-      }),
-    };
+    return quickReply(button.title || "اختيار", button.id);
   });
-  const interactiveMessage = {
-    header: {
-      title: "عالم المجموعات",
-      hasMediaAttachment: Boolean(imageMessage),
-      ...(imageMessage ? { imageMessage } : {}),
-    },
-    body: { text: String(text || "اختر من الخيارات").slice(0, MAX_REPLY_LENGTH) },
-    footer: { text: String(footer || "عالم المجموعات").slice(0, 60) },
-    nativeFlowMessage: { buttons: nativeButtons },
-  };
-  const messageId = randomUUID().replaceAll("-", "").slice(0, 20);
-  await sock.relayMessage(groupId, {
-    viewOnceMessage: {
-      message: {
-        messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
-        interactiveMessage,
-      },
-    },
-  }, { messageId });
-  return { sent: true, interactive: true, messageId };
+  return sendInteractive(sock, groupId, {
+    text,
+    footer,
+    buttons: nativeButtons,
+    imageMessage,
+    image,
+  });
 }
 
 async function sendInteractiveList(sock, groupId, text, title, rows, options = {}) {
-  return sendNativeInteractive(sock, groupId, {
+  return sendInteractive(sock, groupId, {
     text,
     footer: options.footer,
     imageMessage: options.imageMessage,
-    buttons: [{
-      type: "list",
-      title,
-      sectionTitle: options.sectionTitle || "الخيارات",
+    buttons: [listButton(title, [{
+      title: options.sectionTitle || "الخيارات",
       rows,
-    }],
+    }])],
   });
 }
 
@@ -397,7 +351,6 @@ function rememberInteractiveAction(action) {
 async function sendTemplate(sock, groupId, template, values) {
   const rendered = renderMessageTemplate(template, values);
   if (rendered.buttons.length) {
-    const imageMessage = rendered.image ? await prepareInteractiveImage(sock, rendered.image) : null;
     const buttons = rendered.buttons.slice(0, 10).map((button) => ({
       id: rememberInteractiveAction({ groupId, response: button.response }),
       title: button.label,
@@ -405,7 +358,7 @@ async function sendTemplate(sock, groupId, template, values) {
     return sendNativeInteractive(sock, groupId, {
       text: rendered.text,
       buttons,
-      imageMessage,
+      image: rendered.image,
     });
   }
   if (rendered.image) {
@@ -1147,7 +1100,6 @@ async function commandReply(sock, groupId, memberId, message, text, isBotOwner =
   );
   if (custom) {
     if (custom.buttons.length) {
-      const imageMessage = custom.image ? await prepareInteractiveImage(sock, custom.image) : null;
       const buttons = custom.buttons.slice(0, 10).map((button) => ({
         id: rememberInteractiveAction({ groupId, response: button.response }),
         title: button.label,
@@ -1155,7 +1107,7 @@ async function commandReply(sock, groupId, memberId, message, text, isBotOwner =
       return sendNativeInteractive(sock, groupId, {
         text: custom.text,
         buttons,
-        imageMessage,
+        image: custom.image,
       });
     }
     if (custom.image) {
@@ -1215,8 +1167,10 @@ export async function handleGroupWorldMessage(userId, sock, message, eventType =
         }
       }
       const group = await groupWorldService.getGroup(groupId);
-      const commandToken = text.trim().split(/\s+/)[0];
-      if (group.commandSettings?.[commandToken] === false) {
+      const commandParts = text.trim().split(/\s+/);
+      const commandToken = commandParts[0];
+      const commandName = commandParts.slice(0, 2).join(" ");
+      if (group.commandSettings?.[commandName] === false || group.commandSettings?.[commandToken] === false) {
         return sendText(sock, groupId, `الأمر ${commandToken} متوقف لهذه المجموعة.`);
       }
       const botOwner = fromMe && await isGroupWorldOwner(groupId, userId, sock);

@@ -179,7 +179,7 @@ test("the list command sends a native button and reads the selected row ID", asy
 });
 
 test("XO native button replies use the clicking member and enforce turns", async (t) => {
-  const { sock, sent } = await setup(t);
+  const { service, sock, sent } = await setup(t);
   const start = {
     key: { id: "xo-start", remoteJid: GROUP, fromMe: true, participant: OWNER_LID, participantAlt: OWNER_PHONE },
     message: { extendedTextMessage: { text: ".اكس_او @249000000002", contextInfo: { mentionedJid: [MEMBER] } } },
@@ -199,7 +199,7 @@ test("XO native button replies use the clicking member and enforce turns", async
     message: { interactiveResponseMessage: { nativeFlowResponseMessage: { paramsJson: JSON.stringify({ id: key }) } } },
   });
   await handleGroupWorldMessage("web-owner", sock, click("xo-owner-move", OWNER_LID, `gw:xo:${gameId}:move:0`), "notify");
-  const afterX = (await (await import("../../dist/services/groups/group-world-service.mjs")).groupWorldService.getGroup(GROUP)).games.find((game) => game.id === gameId);
+  const afterX = (await service.getGroup(GROUP)).games.find((game) => game.id === gameId);
   assert.equal(afterX.board[0], "X");
   sent.length = 0;
   await handleGroupWorldMessage("web-owner", sock, click("xo-out-of-turn", OWNER_LID, `gw:xo:${gameId}:move:1`), "notify");

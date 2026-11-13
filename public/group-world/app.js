@@ -28,12 +28,21 @@ const MODULE_LABELS = {
   shops: ["المتاجر", "العناصر والمقتنيات"],
   tasks: ["المهام", "اليومية والأسبوعية"],
   achievements: ["الإنجازات", "الشارات والتقدم"],
-  challenges: ["التحديات", "رهانات الأعضاء"],
+  challenges: ["التحديات", "تحديات الأعضاء والألعاب"],
   teams: ["الفرق", "العضوية والتنافس"],
   seasons: ["المواسم", "التقدم والجوائز"],
   events: ["الفعاليات", "إعلانات المجموعة"],
   messageTemplates: ["قوالب الرسائل", "رسائل النظام"],
   customCommands: ["الأوامر المخصصة", "ردود نصية آمنة"],
+  ticTacToe: ["لعبة X و O", "مباريات تفاعلية"],
+  bossRaid: ["زعيم المجموعة", "غارات ومساهمات الأعضاء"],
+  treasure: ["البحث عن الكنز", "ألغاز المجموعة"],
+  guilds: ["نقابات اللاعبين", "فرق ومستودع جماعي"],
+  crafting: ["صناعة العناصر", "وصفات وموارد"],
+  dungeons: ["الأبراج المحصنة", "مراحل ومكافآت"],
+  tournaments: ["دوري الأبطال", "بطولات ومباريات"],
+  wordHunt: ["صيد الكلمات", "ألغاز وتلميحات"],
+  luckyWheel: ["عجلة الحظ المجانية", "مكافآت افتراضية محدودة"],
 };
 
 const PERMISSIONS = [
@@ -354,18 +363,30 @@ function renderTasks() {
 function renderSocial() {
   const teams = state.overview.teams || [];
   const challenges = state.overview.challenges || [];
+  const guilds = state.overview.guilds || [];
+  const activeGames = state.overview.games || [];
+  const raids = state.overview.bossRaids || [];
   return `
     ${sectionTitle("الفرق", "أضف الفرق ثم عيّن الأعضاء من صفحة المحافظ.")}
     <section class="card"><form data-form="teams">
       <div class="field"><label>قائمة الفرق — JSON</label><textarea name="data">${escapeHtml(JSON.stringify(teams, null, 2))}</textarea></div>
       <div class="form-actions"><button class="button button-primary">حفظ الفرق</button></div>
     </form></section>
-    ${sectionTitle("تحديات الأعضاء", "بعد قبول الرهان، يستطيع مشرف مخوّل تسجيل الفائز وتسوية الرصيد.")}
+    ${sectionTitle("نقابات اللاعبين", "الأعضاء ينشئون النقابات وينضمون إليها من WhatsApp؛ الترتيب يحسب أرصدة النقابة المكتسبة.")}
+    <div class="record-list">${guilds.length ? guilds.map((guild) => `
+      <article class="record"><div><strong>${escapeHtml(guild.icon || "🛡️")} ${escapeHtml(guild.title)}</strong><small>${escapeHtml(guild.id)} · المستوى ${Number(guild.level || 1)} · ${Number(guild.membersCount || 0)} عضو</small></div><span class="pill green">${formatNumber(guild.score)} نقطة</span></article>`).join("") : `<div class="card muted">لا توجد نقابات.</div>`}</div>
+    ${sectionTitle("المباريات النشطة", "تُحفظ حالة XO ويُقبل الضغط من لاعب المباراة صاحب الدور فقط.")}
+    <div class="record-list">${activeGames.length ? activeGames.map((game) => `
+      <article class="record"><div><strong>${escapeHtml(game.kind || "لعبة")} · ${escapeHtml(game.status)}</strong><small>${escapeHtml((game.players || []).join(" مقابل "))} · الدور ${escapeHtml(game.turn || "—")}</small></div><span class="pill warning">${escapeHtml(game.id)}</span></article>`).join("") : `<div class="card muted">لا توجد مباريات نشطة.</div>`}</div>
+    ${sectionTitle("زعيم المجموعة", "المشاركون يهاجمون الزعيم من الأمر .زعيم هجوم.")}
+    <div class="record-list">${raids.length ? raids.map((boss) => `
+      <article class="record"><div><strong>${escapeHtml(boss.title)} · المستوى ${Number(boss.level)}</strong><small>الصحة ${Number(boss.health)}/${Number(boss.maxHealth)} · مساهمون ${Object.keys(boss.contributions || {}).length}</small></div><span class="pill ${boss.status === "active" ? "warning" : "green"}">${escapeHtml(boss.status)}</span></article>`).join("") : `<div class="card muted">لم يظهر زعيم بعد.</div>`}</div>
+    ${sectionTitle("التحديات والنتائج", "تظهر هنا تحديات الأعضاء الآلية وتحديات الرهان القديمة للمراجعة.")}
     <div class="record-list">${challenges.length ? challenges.map((item) => `
       <article class="card">
-        <div class="card-header"><div><h3>${escapeHtml(item.id)}</h3><p>${escapeHtml(item.challenger)} مقابل ${escapeHtml(item.opponent)}</p></div><span class="pill ${item.status === "settled" ? "green" : "warning"}">${escapeHtml(item.status)}</span></div>
-        <div class="muted">الرهان: ${formatNumber(item.stake)} لكل عضو${item.winnerId ? ` · الفائز ${escapeHtml(item.winnerId)}` : ""}</div>
-        ${item.status === "accepted" ? `<div class="form-actions"><button class="button button-primary button-small" data-action="settle-challenge" data-challenge="${escapeHtml(item.id)}" data-winner="${escapeHtml(item.challenger)}">فوز الطرف الأول</button><button class="button button-secondary button-small" data-action="settle-challenge" data-challenge="${escapeHtml(item.id)}" data-winner="${escapeHtml(item.opponent)}">فوز الطرف الثاني</button></div>` : ""}
+        <div class="card-header"><div><h3>${escapeHtml(item.name || item.id)}</h3><p>${item.mode === "game" ? `${escapeHtml(item.typeLabel)} · ${escapeHtml(item.challenger)} مقابل ${escapeHtml(item.opponent)}` : `${escapeHtml(item.challenger)} مقابل ${escapeHtml(item.opponent)}`}</p></div><span class="pill ${["settled", "finished", "draw"].includes(item.status) ? "green" : "warning"}">${escapeHtml(item.status)}</span></div>
+        ${item.mode === "game" ? `<div class="muted">${escapeHtml(item.prompt || "")}${item.difficulty ? ` · الصعوبة ${escapeHtml(item.difficulty)}` : ""}${item.answer ? ` · الحل: ${escapeHtml(item.answer)}` : ""}${item.winnerId ? ` · الفائز ${escapeHtml(item.winnerId)}` : ""}</div>` : `<div class="muted">الرهان: ${formatNumber(item.stake)} لكل عضو${item.winnerId ? ` · الفائز ${escapeHtml(item.winnerId)}` : ""}</div>`}
+        ${item.mode !== "game" && item.status === "accepted" ? `<div class="form-actions"><button class="button button-primary button-small" data-action="settle-challenge" data-challenge="${escapeHtml(item.id)}" data-winner="${escapeHtml(item.challenger)}">فوز الطرف الأول</button><button class="button button-secondary button-small" data-action="settle-challenge" data-challenge="${escapeHtml(item.id)}" data-winner="${escapeHtml(item.opponent)}">فوز الطرف الثاني</button></div>` : ""}
       </article>`).join("") : `<div class="card muted">لا توجد تحديات محفوظة.</div>`}</div>
   `;
 }
@@ -401,13 +422,13 @@ function renderMessages() {
   return `
     ${sectionTitle("قوالب الرسائل", "رسائل الترحيب والتنبيه تُرسل من أحداث المجموعة.")}
     <section class="card">
-      <div class="warning-box">إصدار Baileys الحالي لا يوفّر بناء أزرار تفاعلية صادرة. المعاينة أدناه شكلية للعرض فقط؛ إذا احتوى رد أمر على _boton_ فلن يُرسل، ولن يتم استبداله بنص وهمي.</div>
+      <div class="warning-box">تُرسل الأزرار كرسائل WhatsApp تفاعلية حقيقية، وتصل ردود الضغط إلى معالج المجموعة. المعاينة هنا لعرض النص والزر قبل الإرسال.</div>
       <div class="field" style="margin-top:13px"><label for="templateKind">نوع الرسالة</label><select id="templateKind"><option value="welcome">ترحيب عند انضمام عضو</option><option value="spamWarning">تنبيه سبام مؤكد</option></select></div>
       <div class="field"><label for="messageTemplate">نص القالب</label><textarea id="messageTemplate" placeholder="أهلًا _neam، رصيدك _cone نقطة.">${escapeHtml(current)}</textarea></div>
       <div class="variables">
         ${["_cone","_neam","_time","_img","_allcon","_rank","_position","_earned","_spent","_pet","_next"].map((item) => `<code data-insert="${item}">${item}</code>`).join("")}
       </div>
-      <div class="field"><label>صيغة الزر للمعاينة فقط</label><input id="buttonSyntax" type="text" placeholder="_boton_عرض الرصيد_رصيدك _cone"></div>
+      <div class="field"><label>صيغة زر رد سريع</label><input id="buttonSyntax" type="text" placeholder="_boton_عرض الرصيد_رصيدك _cone"></div>
       <div class="form-actions"><button class="button button-secondary" data-action="preview-template">معاينة</button><button class="button button-primary" data-action="save-template">حفظ رسالة الترحيب</button></div>
       <div id="messagePreview" class="template-preview">ستظهر المعاينة هنا.</div>
     </section>
@@ -531,7 +552,83 @@ function renderReports() {
 }
 
 function renderSettings() {
+  const settings = state.overview.settings || {};
+  const schedule = settings.scheduledRewards || {};
+  const gameplay = settings.gameplay || {};
+  const commands = state.overview.commandSettings || {};
+  const gameBans = state.overview.gameBans || [];
+  const tournaments = state.overview.tournaments || [];
+  const history = state.overview.gameHistory || [];
+  const games = [
+    ["*", "كل الألعاب"],
+    ["ticTacToe", "لعبة XO"],
+    ["challenges", "التحديات"],
+    ["bossRaid", "زعيم المجموعة"],
+    ["treasure", "البحث عن الكنز"],
+    ["guilds", "النقابات"],
+    ["crafting", "الصناعة"],
+    ["dungeons", "الأبراج المحصنة"],
+    ["tournaments", "البطولات"],
+    ["wordHunt", "صيد الكلمات"],
+    ["luckyWheel", "عجلة الحظ"],
+  ];
+  const weekdays = ["الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
   return `
+    ${sectionTitle("التوزيع التلقائي", "موعد التوزيع بتوقيت أفريقيا/الخرطوم. يُسجّل كل توزيع مرة واحدة لكل مجموعة وفترة.")}
+    <section class="card"><form data-form="reward-schedule">
+      <div class="form-grid">
+        <div class="field"><label><input type="checkbox" name="dailyEnabled" ${schedule.dailyEnabled !== false ? "checked" : ""}> تفعيل المكافأة اليومية</label><input name="dailyTime" type="time" value="${escapeHtml(schedule.dailyTime || "08:00")}" required></div>
+        <div class="field"><label><input type="checkbox" name="weeklyEnabled" ${schedule.weeklyEnabled !== false ? "checked" : ""}> تفعيل المكافأة الأسبوعية</label><input name="weeklyTime" type="time" value="${escapeHtml(schedule.weeklyTime || "08:00")}" required></div>
+        <div class="field"><label for="weeklyDay">يوم التوزيع الأسبوعي</label><select id="weeklyDay" name="weeklyDay">${weekdays.map((day, index) => `<option value="${index}" ${Number(schedule.weeklyDay ?? 5) === index ? "selected" : ""}>${day}</option>`).join("")}</select></div>
+      </div>
+      <p class="hint">قيمة المكافآت اليومية والأسبوعية تُضبط من صفحة إعدادات النقاط. الأرصدة السابقة لا تتغير.</p>
+      <div class="form-actions"><button class="button button-primary">حفظ الجدول</button></div>
+    </form></section>
+    ${sectionTitle("ضبط الألعاب والأوامر", "الإعدادات محفوظة لهذه المجموعة فقط. الأسئلة والرسائل نصوص بيانات وليست كوداً قابلاً للتنفيذ.")}
+    <section class="card"><form data-form="gameplay-settings">
+      <div class="form-grid">
+        <div class="field"><label>مكافآت الألعاب، التحديات، الصعوبة والوصفات — JSON</label><textarea name="gameplay">${escapeHtml(JSON.stringify(gameplay, null, 2))}</textarea></div>
+        <div class="field"><label>تعطيل أو تفعيل الأوامر المدمجة — JSON</label><textarea name="commands">${escapeHtml(JSON.stringify(commands, null, 2))}</textarea><div class="hint">مثال: { ".نقاطي": false }.</div></div>
+      </div>
+      <div class="form-actions"><button class="button button-primary">حفظ إعدادات الألعاب والأوامر</button></div>
+    </form></section>
+    ${sectionTitle("حظر لاعب من لعبة", "يُطبّق الحظر على هذه المجموعة فقط.")}
+    <section class="card">
+      <form data-form="game-ban">
+        <div class="form-grid">
+          <div class="field"><label>معرّف عضو WhatsApp</label><input name="memberId" type="text" placeholder="رقم@s.whatsapp.net" dir="ltr" required></div>
+          <div class="field"><label>اللعبة</label><select name="game">${games.map(([id, label]) => `<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`).join("")}</select></div>
+          <div class="field"><label><input type="checkbox" name="enabled" checked> حظر اللاعب</label></div>
+        </div>
+        <div class="form-actions"><button class="button button-primary">حفظ الحظر</button></div>
+      </form>
+      <div class="record-list">${gameBans.length ? gameBans.map((ban) => `
+        <article class="record">
+          <div><strong>${escapeHtml(ban.memberId)}</strong><small>${escapeHtml(games.find(([id]) => id === ban.game)?.[1] || ban.game)}</small></div>
+          <div class="table-actions"><span class="pill ${ban.enabled === false ? "red" : "green"}">${ban.enabled === false ? "غير محظور" : "محظور"}</span><button class="button button-secondary button-small" data-action="toggle-game-ban" data-member="${escapeHtml(ban.memberId)}" data-game="${escapeHtml(ban.game)}" data-enabled="${ban.enabled !== false}">${ban.enabled === false ? "إعادة السماح" : "إلغاء الحظر"}</button></div>
+        </article>`).join("") : `<div class="muted">لا توجد حالات حظر ألعاب.</div>`}</div>
+    </section>
+    ${sectionTitle("دوري الأبطال", "البطولات الفردية أو الجماعية؛ تبدأ المباريات كلوحات XO تفاعلية.")}
+    <section class="card">
+      <form data-form="tournament-create">
+        <div class="form-grid">
+          <div class="field"><label>اسم البطولة</label><input name="title" type="text" value="دوري الأبطال" required></div>
+          <div class="field"><label>نوع البطولة</label><select name="mode"><option value="individual">فردية</option><option value="guild">جماعية للنقابات</option></select></div>
+        </div>
+        <div class="form-actions"><button class="button button-primary">إنشاء بطولة</button></div>
+      </form>
+      <div class="record-list">${tournaments.length ? tournaments.slice(-12).reverse().map((item) => `
+        <article class="record">
+          <div><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.mode)} · ${escapeHtml(item.id)} · ${Number(item.entries?.length || 0)} مشارك · ${item.championId ? `البطل: ${escapeHtml(item.championId)}` : ""}</small></div>
+          <div class="table-actions"><span class="pill ${item.status === "completed" ? "green" : "warning"}">${escapeHtml(item.status)}</span>${item.status === "registration" ? `<button class="button button-primary button-small" data-action="start-tournament" data-id="${escapeHtml(item.id)}">بدء البطولة</button>` : ""}</div>
+        </article>`).join("") : `<div class="muted">لا توجد بطولات محفوظة.</div>`}</div>
+    </section>
+    ${sectionTitle("مراجعة نتائج الألعاب", "آخر النتائج المسجلة في هذه المجموعة.")}
+    <div class="record-list">${history.length ? history.map((item) => `
+      <article class="record">
+        <div><strong>${escapeHtml(item.kind || "لعبة")} · ${escapeHtml(item.status || "")}</strong><small>${escapeHtml((item.players || []).join(" مقابل "))}${item.winnerId ? ` · الفائز ${escapeHtml(item.winnerId)}` : ""}</small></div>
+        <time>${escapeHtml(item.finishedAt || "")}</time>
+      </article>`).join("") : `<div class="card muted">لا توجد نتائج ألعاب بعد.</div>`}</div>
     ${sectionTitle("النسخ الاحتياطي", "تنزيل نسخة JSON من بيانات المجموعة المحددة.")}
     <section class="card">
       <p>تحتوي النسخة على الإعدادات والأرصدة والرتب والعناصر والسجلات. احفظها في مكان خاص لأنها تتضمن معرّفات أعضاء المجموعة.</p>
@@ -542,7 +639,7 @@ function renderSettings() {
       <section class="card"><h3>الأوامر المخصصة</h3><p>تقبل نصوصًا ومتغيرات ثابتة فقط؛ لا يتم تشغيل JavaScript أو كود المستخدم.</p></section>
       <section class="card"><h3>الأرصدة</h3><p>التعديلات تستخدم معاملات متسلسلة وكتابة ذرية على القرص، مع منع الرصيد السالب في الشراء والخصم.</p></section>
       <section class="card"><h3>عزل البيانات</h3><p>لكل مجموعة ملف بيانات مستقل، ويمكن إيقاف وحداتها دون حذف الأرصدة.</p></section>
-      <section class="card"><h3>الأزرار التفاعلية</h3><p>يظل إرسال الأزرار غير مفعّل لأن إصدار Baileys الحالي لا يدعم إنشاءها.</p></section>
+      <section class="card"><h3>الأزرار التفاعلية</h3><p>تُرسل عبر Baileys Native Flow، وتُفحص هوية الضاغط قبل تنفيذ حركة XO أو أي إجراء حساس.</p></section>
     </div>
   `;
 }
@@ -729,6 +826,40 @@ async function handleForm(form) {
     antiSpam.enabled = $("input[name=enabled]", form).checked;
     await api("/api/group-world/settings", { groupId: state.groupId, patch: { antiSpam } });
     notify("تم حفظ حدود مكافحة السبام.");
+  } else if (kind === "reward-schedule") {
+    const values = formDataObject(form);
+    const scheduledRewards = {
+      dailyEnabled: $("input[name=dailyEnabled]", form).checked,
+      dailyTime: values.dailyTime,
+      weeklyEnabled: $("input[name=weeklyEnabled]", form).checked,
+      weeklyTime: values.weeklyTime,
+      weeklyDay: Number(values.weeklyDay),
+    };
+    await api("/api/group-world/settings", { groupId: state.groupId, patch: { scheduledRewards } });
+    notify("تم حفظ مواعيد التوزيع التلقائي.");
+  } else if (kind === "gameplay-settings") {
+    const values = formDataObject(form);
+    const gameplay = JSON.parse(values.gameplay);
+    const commands = JSON.parse(values.commands);
+    await api("/api/group-world/settings", { groupId: state.groupId, patch: { gameplay, commands } });
+    notify("تم حفظ إعدادات الألعاب والأوامر.");
+  } else if (kind === "game-ban") {
+    const values = formDataObject(form);
+    await api("/api/group-world/game-ban", {
+      groupId: state.groupId,
+      memberId: values.memberId,
+      game: values.game,
+      enabled: $("input[name=enabled]", form).checked,
+    });
+    notify("تم حفظ حظر اللعبة.");
+  } else if (kind === "tournament-create") {
+    const values = formDataObject(form);
+    const tournament = await api("/api/group-world/tournament/create", {
+      groupId: state.groupId,
+      title: values.title,
+      mode: values.mode,
+    });
+    notify(`تم إنشاء البطولة ${tournament.title}.`);
   } else if (kind === "catalog") {
     const values = formDataObject(form);
     const collection = form.dataset.collection;
@@ -872,6 +1003,23 @@ async function handleClick(button) {
     if (!confirm("تسوية الرهان نهائية. تأكد من نتيجة التحدي قبل المتابعة.")) return;
     await api("/api/group-world/challenge/settle", { groupId: state.groupId, challengeId: button.dataset.challenge, winnerId: button.dataset.winner });
     notify("تمت تسوية التحدي.");
+    return refreshOverview();
+  }
+  if (action === "toggle-game-ban") {
+    const enabled = button.dataset.enabled !== "true";
+    await api("/api/group-world/game-ban", {
+      groupId: state.groupId,
+      memberId: button.dataset.member,
+      game: button.dataset.game,
+      enabled,
+    });
+    notify(enabled ? "تم حظر اللاعب من اللعبة." : "تم إلغاء الحظر.");
+    return refreshOverview();
+  }
+  if (action === "start-tournament") {
+    if (!confirm("سيبدأ التسجيل في هذه البطولة، وبعد الانطلاق تبدأ مباريات XO. متابعة؟")) return;
+    await api("/api/group-world/tournament/start", { groupId: state.groupId, tournamentId: button.dataset.id });
+    notify("بدأت البطولة.");
     return refreshOverview();
   }
   if (action === "stop-season") {
