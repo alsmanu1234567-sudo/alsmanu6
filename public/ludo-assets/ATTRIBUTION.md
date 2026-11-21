@@ -6,3 +6,5 @@
 - Step, message and reaction effects: Interface Sounds by Kenney, CC0 (tick_001, open_001, minimize_002, pluck_002, glass_004, question_002 and confirmation_004), converted to MP3: https://opengameart.org/content/interface-sounds.
 
 - Ludo game effects (son-roll, son-step, son-home, son-star, son-capture, son-win and son-win-other): provided in the user-specified repository https://github.com/alsmanu1234567-sudo/son, revision 2e2296ac500161c723729807e4020e4d3ff37208, converted from Ogg Vorbis to MP3 for browser compatibility. The source repository does not specify a license; permission for redistribution is not established here.
+
+- Pawn silhouette: OpenClipart, public domain / CC0, https://freesvg.org/ludo-piece-scarlett-red. Recoloured using CSS mask and gradients.
