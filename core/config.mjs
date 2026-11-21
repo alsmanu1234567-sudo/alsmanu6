@@ -16,7 +16,7 @@ import { ok, wrn, inf } from "./logger.mjs";
 
 // ── القيم الافتراضية المعروفة ─────────────────────────────────
 const ENV_DEFAULTS = {
-  TELEGRAM_BOT_TOKEN: "8424252675:AAH1de_dMpiYKusK_d4uYxNMTX8dzSh8ucI",
+  TELEGRAM_BOT_TOKEN: "",
   DEVELOPER_ID:       "7428421245",
   PORT:               "5000",
   MAX_RAM_MB:         "600",

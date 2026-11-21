@@ -10,6 +10,9 @@ import * as _broadcastSvc from '../services/admin/broadcast-service.mjs';
 import * as _userAdminSvc from '../services/admin/user-admin-service.mjs';
 import * as _bulkPtsSvc   from '../services/points/bulk-points-service.mjs';
 
+import {createMessagesWebService,validateMessagePatch} from '../../services/messages-settings.mjs';
+let broadcastService;
+export async function confirmMessagesBroadcast(uid,id){if(!broadcastService)throw Error('المعاينة غير متاحة');return broadcastService.send(uid,id)}
 let _deps = {};
 
 export function setDeps(d) {
@@ -38,6 +41,35 @@ export async function handleText(bot2, msg) {
 
   if (!state.state) return false;
 
+  // Account-wide Messages states; these are separate from My Messages.
+  const simpleStates={awaiting_away_message:'awayMessage',awaiting_welcome_message:'welcomeMessage',awaiting_fwd_keywords:'forwardOnlyKeywords',awaiting_notify_keywords:'smartNotifyKeywords',awaiting_word_filter:'wordFilter',awaiting_ignore_number:'ignoreList'};
+  if(simpleStates[state.state]){
+    const key=simpleStates[state.state],isList=['forwardOnlyKeywords','smartNotifyKeywords','wordFilter','ignoreList'].includes(key);
+    const value=isList?text.split(/[،,\n]+/).map(x=>x.trim()).filter(Boolean):text.trim();
+    try{const updated=isList&&['wordFilter','ignoreList'].includes(key)?[...new Set([...(user.msgSettings?.[key]||[]),...value])]:value;
+      const patch=validateMessagePatch({[key]:updated},user.msgSettings||{});saveUser(userId,{msgSettings:{...user.msgSettings,...patch}});clearState(userId);await bot2.sendMessage(chatId,'✅ تم حفظ الإعداد.');
+    }catch(e){await bot2.sendMessage(chatId,'⚠️ '+e.message)}return true;
+  }
+  if(state.state==='awaiting_qr_trigger'||state.state==='awaiting_template_name'){
+    const label=text.trim().replace(state.state==='awaiting_qr_trigger'?/^\//:/^$/,'');if(!label||label.length>100){await bot2.sendMessage(chatId,'⚠️ أدخل اسماً صالحاً.');return true}
+    const next=state.state==='awaiting_qr_trigger'?'awaiting_msgs_qr_content':'awaiting_msgs_template_content';setState(userId,next,{label});await bot2.sendMessage(chatId,'اكتب محتوى الرسالة:');return true;
+  }
+  if(state.state==='awaiting_msgs_qr_content'||state.state==='awaiting_msgs_template_content'){
+    const type=state.state==='awaiting_msgs_qr_content'?'quickReplies':'msgTemplates',key=type==='quickReplies'?'trigger':'name';
+    try{createMessagesWebService({getUser,saveUser}).list(userId,type,[...(user[type]||[]),{[key]:state.data?.label,content:text}]);clearState(userId);await bot2.sendMessage(chatId,'✅ تم حفظ الرسالة.')}catch(e){await bot2.sendMessage(chatId,'⚠️ '+e.message)}return true;
+  }
+  if(state.state==='awaiting_msgs_template_recipient'){
+    const digits=text.replace(/\D/g,'');if(!/^[+\d\s().-]+$/.test(text)||digits.length<7||digits.length>15){await bot2.sendMessage(chatId,'أدخل رقم واتساب صالحاً مع رمز الدولة.');return true}
+    const raw=inMemoryDB?.sessions?.get(userId),sock=raw?.sock||raw;if(!sock?.sendMessage){await bot2.sendMessage(chatId,'واتساب غير متصل.');return true}
+    try{await sock.sendMessage(digits+'@s.whatsapp.net',{text:String(state.data?.content||'')});clearState(userId);await bot2.sendMessage(chatId,'✅ تم إرسال القالب.')}catch(e){await bot2.sendMessage(chatId,'تعذر الإرسال: '+e.message)}return true;
+  }
+  if(state.state==='awaiting_broadcast_content'){
+    if(state.data?.broadcastTarget==='custom'){setState(userId,'awaiting_msgs_broadcast_numbers',{content:text});await bot2.sendMessage(chatId,'أرسل الأرقام مع رمز الدولة مفصولة بفواصل أو أسطر.');return true}
+    try{broadcastService ||= createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB});const preview=broadcastService.preview(userId,{target:state.data?.broadcastTarget,content:text});const raw=inMemoryDB.sessions.get(userId),sock=raw?.sock||raw;setState(userId,'awaiting_msgs_broadcast_confirm',{id:preview.id,senderId:String(sock.user.id)});await bot2.sendMessage(chatId,`المستلمون: ${preview.count}\n${preview.recipients.join('، ')}\n\n${preview.content}\n\nلن يُرسل شيء قبل الضغط على تأكيد`,{reply_markup:{inline_keyboard:[[{text:'تأكيد الإرسال',callback_data:'msgs_bcast_confirm'},{text:'إلغاء',callback_data:'msgs_bcast_cancel'}]]}})}catch(e){await bot2.sendMessage(chatId,'⚠️ '+e.message)}return true;
+  }
+  if(state.state==='awaiting_msgs_broadcast_numbers'){
+    try{broadcastService ||= createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB});const preview=broadcastService.preview(userId,{target:'custom',content:state.data?.content,numbers:text});const raw=inMemoryDB.sessions.get(userId),sock=raw?.sock||raw;setState(userId,'awaiting_msgs_broadcast_confirm',{id:preview.id,senderId:String(sock.user.id)});await bot2.sendMessage(chatId,`المستلمون: ${preview.count}\n${preview.recipients.join('، ')}\n\n${preview.content}\n\nلن يُرسل شيء قبل الضغط على تأكيد`,{reply_markup:{inline_keyboard:[[{text:'تأكيد الإرسال',callback_data:'msgs_bcast_confirm'},{text:'إلغاء',callback_data:'msgs_bcast_cancel'}]]}})}catch(e){await bot2.sendMessage(chatId,'⚠️ '+e.message)}return true;
+  }
   switch (state.state) {
     // ── Auto-reply: awaiting trigger type ───────────────────────────────────
     // [FIX_BUG007] طريقة الاختيار عبر أزرار ttype_* فقط — نص مباشر لا يقبل

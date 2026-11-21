@@ -1,8 +1,14 @@
+import {rememberGroupMessageName,resolveGroupMemberName} from '../../services/group-member-names.mjs';
+import { prepareArticleWithAi } from "../../services/ai/article-ai.mjs";
+import { getMessageCutoff, isMessageAfterCutoff, guardMessageSocket } from "../../engine/message-cutoff.mjs";
 // dist/handlers/groups-handler.mjs
 // Domain: Groups — /groups + callbacks
 import { randomUUID } from "node:crypto";
 import { webappUrlFor } from "../webapp-auth.mjs";
-import { findNextMawdoo3Article } from "../services/groups/mawdoo3-feed-service.mjs";
+import {
+  fetchMawdoo3ArticleContent,
+  findNextMawdoo3Article,
+} from "../services/groups/mawdoo3-feed-service.mjs";
 import { groupWorldDayKey, groupWorldWeekKey } from "../services/groups/group-world-service.mjs";
 import {
   groupWorldService,
@@ -31,8 +37,12 @@ const _inviteCache = new Map();
 let _listenerRecoveryTimer = null;
 let _autoPostTimer = null;
 let _groupWorldRewardsTimer = null;
+let _groupLockScheduleTimer = null;
+let _groupReminderTimer = null;
 let _autoPostSweepInFlight = false;
 let _groupWorldRewardsSweepInFlight = false;
+let _groupLockScheduleSweepInFlight = false;
+let _groupReminderSweepInFlight = false;
 let _hasActiveGroupWorld = false;
 let _groupWorldScanAt = 0;
 let _groupWorldScanInFlight = false;
@@ -41,6 +51,24 @@ const AUTO_POST_TIME_ZONE = "Africa/Khartoum";
 const MAX_AUTO_POSTS_PER_USER = 40;
 const MAX_AUTO_POST_TIMES = 8;
 const MAX_AUTO_POST_SEEN_URLS_PER_GROUP = 5_000;
+const MAX_GROUP_REMINDERS_PER_USER = 40;
+const KHARTOUM_WEEKDAYS = Object.freeze({ Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 });
+const DEFAULT_GROUP_MESSAGE_SETTINGS = Object.freeze({
+  antiLinkWarningMessage: "",
+  bannedWordsEnabled: false,
+  bannedWords: [],
+  bannedWordWarningMessage: "",
+  welcomeEnabled: false,
+  welcomeMessage: "أهلاً _nem! نورت _nemgrob.\nالوقت: _time",
+  goodbyeEnabled: false,
+  goodbyeMessage: "مع السلامة _nem من _nemgrob.\nالوقت: _time",
+});
+const DEFAULT_GROUP_LOCK_SCHEDULE = Object.freeze({
+  enabled: false,
+  closeTime: "22:00",
+  openTime: "07:00",
+  lastError: "",
+});
 
 export function setDeps(d) {
   _deps = { ...(_deps || {}), ...d };
@@ -58,16 +86,198 @@ export function setDeps(d) {
     _groupWorldRewardsTimer = setInterval(runScheduledGroupWorldRewards, 30_000);
     _groupWorldRewardsTimer.unref?.();
   }
+  if (!_groupLockScheduleTimer) {
+    _groupLockScheduleTimer = setInterval(runScheduledGroupLockSchedules, 30_000);
+    _groupLockScheduleTimer.unref?.();
+  }
+  if (!_groupReminderTimer) {
+    _groupReminderTimer = setInterval(runScheduledGroupReminders, 30_000);
+    _groupReminderTimer.unref?.();
+  }
 }
 
 function autoPostItems(user) {
   return Array.isArray(user?.groupAutoPosts) ? user.groupAutoPosts : [];
 }
 
+function groupReminderItems(user) {
+  return Array.isArray(user?.groupReminders) ? user.groupReminders : [];
+}
+
+function groupReminderFor(user, groupId, reminderId) {
+  return groupReminderItems(user).find((item) =>
+    item?.groupId === groupId && String(item.id) === String(reminderId)
+  );
+}
+
+function publicGroupReminder(item) {
+  return {
+    id: String(item?.id || ""),
+    message: String(item?.message || ""),
+    time: /^\d{2}:\d{2}$/u.test(String(item?.time || "")) ? item.time : "09:00",
+    days: Array.isArray(item?.days)
+      ? [...new Set(item.days.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))].sort()
+      : [],
+    enabled: item?.enabled === true,
+    lastSentAt: item?.lastSentAt || null,
+    lastError: item?.lastError ? String(item.lastError).slice(0, 220) : null,
+  };
+}
+
+function saveGroupReminderList(userId, reminders) {
+  if (typeof _deps?.saveUser !== "function") throw new Error("تعذّر حفظ تذكيرات المجموعة");
+  _deps.saveUser(String(userId), { groupReminders: reminders });
+}
+
+function saveGroupReminderResult(userId, reminderId, patch) {
+  const user = _deps?.getUser?.(String(userId));
+  if (!user) return;
+  const reminders = groupReminderItems(user).map((item) =>
+    String(item.id) === String(reminderId) ? { ...item, ...patch, updatedAt: new Date().toISOString() } : item
+  );
+  saveGroupReminderList(userId, reminders);
+}
+
+function groupMessageSettingsFor(user, groupId) {
+  const saved = Array.isArray(user?.groupMessageSettings)
+    ? user.groupMessageSettings.find((item) => item?.groupId === groupId)
+    : null;
+  const settings = { ...DEFAULT_GROUP_MESSAGE_SETTINGS, ...(saved || {}), groupId };
+  settings.bannedWords = Array.isArray(settings.bannedWords)
+    ? settings.bannedWords.filter((word) => typeof word === "string")
+    : [];
+  return settings;
+}
+
+function groupLockScheduleItems(user) {
+  return Array.isArray(user?.groupLockSchedules) ? user.groupLockSchedules : [];
+}
+
+function groupLockScheduleFor(user, groupId) {
+  const saved = groupLockScheduleItems(user).find((item) => item?.groupId === groupId);
+  return { ...DEFAULT_GROUP_LOCK_SCHEDULE, ...(saved || {}), groupId };
+}
+
+function publicGroupLockSchedule(schedule) {
+  return {
+    enabled: schedule?.enabled === true,
+    closeTime: String(schedule?.closeTime || DEFAULT_GROUP_LOCK_SCHEDULE.closeTime),
+    openTime: String(schedule?.openTime || DEFAULT_GROUP_LOCK_SCHEDULE.openTime),
+    lastError: String(schedule?.lastError || ""),
+  };
+}
+
+function saveGroupLockScheduleRecord(userId, groupId, patch) {
+  const user = _deps?.getUser?.(String(userId));
+  if (!user || typeof _deps?.saveUser !== "function") {
+    throw new Error("تعذّر الوصول إلى إعدادات جدولة المجموعة");
+  }
+  const current = groupLockScheduleFor(user, groupId);
+  const next = { ...current, ...patch, groupId, updatedAt: new Date().toISOString() };
+  const entries = groupLockScheduleItems(user).filter((item) => item?.groupId !== groupId);
+  _deps.saveUser(String(userId), { groupLockSchedules: [...entries, next] });
+  return next;
+}
+
+async function findGroupLockScheduleAccess(userId, groupId, phoneNumber) {
+  for (const sock of findSockets(String(userId))) {
+    if (!socketMatchesPhone(sock, phoneNumber) || typeof sock.groupMetadata !== "function") continue;
+    try {
+      const metadata = await sock.groupMetadata(groupId);
+      if (metadata?.id === groupId || Array.isArray(metadata?.participants)) {
+        return { sock, metadata };
+      }
+    } catch {}
+  }
+  return null;
+}
+
+function shouldGroupBeLocked(time, closeTime, openTime) {
+  if (closeTime < openTime) return time >= closeTime && time < openTime;
+  return time >= closeTime || time < openTime;
+}
+
+function saveGroupMessageSettings(userId, groupId, patch) {
+  const user = _deps?.getUser?.(String(userId));
+  if (!user || typeof _deps?.saveUser !== "function") {
+    throw new Error("تعذّر الوصول إلى إعدادات المجموعة");
+  }
+  const current = groupMessageSettingsFor(user, groupId);
+  const next = { ...current, ...patch, groupId, updatedAt: new Date().toISOString() };
+  const entries = Array.isArray(user.groupMessageSettings) ? user.groupMessageSettings : [];
+  _deps.saveUser(String(userId), {
+    groupMessageSettings: [
+      ...entries.filter((item) => item?.groupId !== groupId),
+      next,
+    ],
+  });
+  return next;
+}
+
+function normalizeGroupFilterTerm(value) {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .toLocaleLowerCase("ar")
+    .replace(/[\u064b-\u065f\u0670\u06d6-\u06ed]/gu, "")
+    .replace(/ـ/gu, "")
+    .replace(/[أإآٱ]/gu, "ا")
+    .replace(/ى/gu, "ي")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function findBannedWordMatch(text, bannedWords) {
+  const normalizedText = ` ${normalizeGroupFilterTerm(text)} `;
+  if (!normalizedText.trim()) return null;
+  for (const word of Array.isArray(bannedWords) ? bannedWords : []) {
+    const normalizedWord = normalizeGroupFilterTerm(word);
+    if (normalizedWord && normalizedText.includes(` ${normalizedWord} `)) return word;
+  }
+  return null;
+}
+
+async function sendModerationWarning(userId, sock, groupId, message, category, customText, fallbackText) {
+  const key = message?.key || {};
+  const sender = String(key.participant || message?.participant || "");
+  const warningKey = `${userId}:${groupId}:${category}:${sender}`;
+  const lastWarning = _warningTimes.get(warningKey) || 0;
+  if (Date.now() - lastWarning < 10_000) return false;
+
+  _warningTimes.set(warningKey, Date.now());
+  if (_warningTimes.size > 500) _warningTimes.delete(_warningTimes.keys().next().value);
+  const warning = String(customText || "").trim() || fallbackText;
+  const mentionTag = sender
+    .split("@")[0]
+    .split(":")[0]
+    .replace(/[^A-Za-z0-9]/gu, "");
+  const payload = {
+    text: mentionTag ? `${warning}\n\n@${mentionTag}` : warning,
+  };
+  if (sender) payload.mentions = [sender];
+  try {
+    await sock.sendMessage(groupId, payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasGroupEventFeatures(user) {
+  return (user?.antiLinkGroups?.length || user?.inspectInviteGroups?.length) ||
+    (Array.isArray(user?.groupMessageSettings) && user.groupMessageSettings.some((item) =>
+      item?.bannedWordsEnabled === true ||
+      item?.welcomeEnabled === true ||
+      item?.goodbyeEnabled === true
+    ));
+}
+
 function publicAutoPost(item) {
   return {
     id: String(item.id || ""),
     topic: String(item.topic || ""),
+    excerptLength: Number.isInteger(item.excerptLength) ? item.excerptLength : 500,
+    excerptMode: ["ai", "full"].includes(item.excerptMode) ? item.excerptMode : "length",
+    aiPrompt: String(item.aiPrompt || ""),
     times: Array.isArray(item.times) ? item.times.filter((time) => /^\d{2}:\d{2}$/.test(time)) : [],
     enabled: item.enabled === true,
     lastSentAt: item.lastSentAt || null,
@@ -162,8 +372,72 @@ function saveAutoPostResult(userId, groupId, autoPostId, patch) {
   saveAutoPostList(userId, updated);
 }
 
-function postTextForArticle(article) {
-  return `📖 ${article.title}\n${article.url}\nالمصدر: موضوع`;
+export function articleExcerpt(content, length = 500) {
+  const cleaned = String(content || "")
+    .split(/\n+/u)
+    .filter(line => !/^\s*(?:تمت الكتابة بواسطة|كتابة|بقلم|الكاتب|المؤلف|المراجع|المصدر|آخر تحديث|آخر تعديل|تاريخ النشر)\s*[:：]?/u.test(line))
+    .join("\n\n")
+    .replace(/https?:\/\/\S+|www\.\S+/giu, "")
+    .trim();
+  const limit = Number.isInteger(length) && length >= 50 && length <= 12000 ? length : 500;
+  if (cleaned.length <= limit) return cleaned;
+  let excerpt = cleaned.slice(0, limit - 1).trimEnd();
+  const boundary = excerpt.lastIndexOf(" ");
+  if (boundary > limit * 0.7) excerpt = excerpt.slice(0, boundary).trimEnd();
+  return `${excerpt}…`;
+}
+function postTextForArticle(article, length) {
+  const content = String(article?.content || "").trim();
+  if (content.length < 40) throw new Error("لم يتوفر نص المقال؛ لم تُرسل رسالة تحتوي الرابط فقط");
+  return `📖 ${article.title}\n\n${articleExcerpt(content, length)}`;
+}
+
+function isStoryTopic(topic) {
+  const normalized = String(topic || '').normalize('NFKC').replace(/[\u064b-\u065f\u0670\u0640]/g, '').replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه');
+  return /(?:^|\s)(?:ال)?(?:قصه|قصص|حكايه|حكايات|روايه|روايات)(?:\s|$)/u.test(normalized);
+}
+export function cleanFullArticle(content) {
+  return String(content || '').split(/\n/u)
+    .filter(line => !/^\s*(?:تمت الكتابة بواسطة|كتابة|بقلم|الكاتب|المؤلف|المراجع|المصدر|آخر تحديث|آخر تعديل|تاريخ النشر)\s*[:：]?/u.test(line))
+    .join('\n').replace(/https?:\/\/\S+|www\.\S+/giu, '').trim();
+}
+async function preparePostArticle(userId, article, item) {
+  // A story is kept verbatim: generating it through an LLM can silently omit its ending.
+  if (item.excerptMode === 'full' || (item.excerptMode === 'ai' && isStoryTopic(item.topic))) {
+    const full = cleanFullArticle(article.content);
+    if (!full) throw new Error('تعذر استخراج المقال كاملاً');
+    return full;
+  }
+  if (item.excerptMode !== 'ai') return articleExcerpt(article.content, item.excerptLength);
+  const user = _deps?.getUser?.(String(userId)) || {};
+  return prepareArticleWithAi({
+    key: user.nvidiaKey || process.env.NVIDIA_API_KEY || null,
+    model: user.nvidiaModel || 'meta/llama-3.1-8b-instruct',
+    title: article.title, content: article.content, prompt: item.aiPrompt || '',
+  });
+}
+export function splitArticleForWhatsApp(title, content, maxLength = 3500) {
+  const text = `📖 ${title}\n\n${content}`;
+  if (text.length <= maxLength) return [text];
+  const parts = []; let rest = text;
+  const bodyLimit = maxLength - 32;
+  while (rest.length > bodyLimit) {
+    let cut = rest.lastIndexOf('\n', bodyLimit);
+    if (cut < bodyLimit / 2) cut = rest.lastIndexOf(' ', bodyLimit);
+    if (cut < bodyLimit / 2) cut = bodyLimit;
+    else cut += 1;
+    if (/[\uD800-\uDBFF]/u.test(rest[cut - 1])) cut--;
+    parts.push(rest.slice(0, cut)); rest = rest.slice(cut);
+  }
+  if (rest) parts.push(rest);
+  return parts.map((part, i) => `(${i + 1}/${parts.length})\n${part}`);
+}
+async function sendArticleInParts(sock, groupId, title, content) {
+  const parts = splitArticleForWhatsApp(title, content);
+  for (let i = 0; i < parts.length; i++) {
+    try { await sock.sendMessage(groupId, {text:parts[i]}); }
+    catch { throw new Error(`تعذر إرسال الجزء ${i + 1} من ${parts.length}؛ أُرسل ${i} جزء قبل الخطأ، ولن تتكرر تلقائياً`); }
+  }
 }
 
 export function getKhartoumClock(date = new Date()) {
@@ -185,6 +459,146 @@ export function getKhartoumClock(date = new Date()) {
       weekday: "short",
     }).format(date),
   };
+}
+
+export async function runScheduledGroupReminders(now = new Date()) {
+  if (_groupReminderSweepInFlight || !_deps) return;
+  const users = _deps.inMemoryDB?.users;
+  if (!(users instanceof Map)) return;
+  _groupReminderSweepInFlight = true;
+  const clock = getKhartoumClock(now);
+  const weekday = KHARTOUM_WEEKDAYS[clock.weekday];
+
+  try {
+    for (const [userIdValue, user] of users.entries()) {
+      const userId = String(userIdValue);
+      for (const configured of groupReminderItems(user)) {
+        const groupId = String(configured?.groupId || "");
+        if (!configured?.enabled || !groupId.endsWith("@g.us")) continue;
+        const days = Array.isArray(configured.days) ? configured.days : [];
+        if (!days.includes(weekday) || configured.time !== clock.time) continue;
+        if (configured.lastAttemptDate === clock.date) continue;
+
+        try {
+          const sock = await findSocketForGroup(userId, groupId, configured.phoneNumber);
+          if (!sock) throw new Error("المجموعة غير متاحة على رقم واتساب المختار");
+          const currentUser = _deps?.getUser?.(userId) || user;
+          const current = groupReminderFor(currentUser, groupId, configured.id);
+          if (!current?.enabled || current.lastAttemptDate === clock.date) continue;
+
+          saveGroupReminderResult(userId, current.id, {
+            lastAttemptDate: clock.date,
+            lastAttemptAt: new Date(now).toISOString(),
+            lastError: null,
+          });
+          await sock.sendMessage(groupId, { text: current.message });
+          saveGroupReminderResult(userId, current.id, {
+            lastSentAt: new Date(now).toISOString(),
+            lastError: null,
+          });
+        } catch (error) {
+          const message = String(error?.message || "تعذّر إرسال التذكير").slice(0, 220);
+          try {
+            saveGroupReminderResult(userId, configured.id, {
+              lastAttemptDate: clock.date,
+              lastAttemptAt: new Date(now).toISOString(),
+              lastError: message,
+            });
+          } catch {}
+          _deps?.logger?.warn?.(
+            { err: message, groupId, userId, reminderId: configured.id },
+            "Scheduled group reminder could not be sent",
+          );
+        }
+      }
+    }
+  } catch (error) {
+    _deps?.logger?.warn?.(
+      { err: String(error?.message || error) },
+      "Scheduled group reminder sweep failed",
+    );
+  } finally {
+    _groupReminderSweepInFlight = false;
+  }
+}
+
+export async function runScheduledGroupLockSchedules(now = new Date()) {
+  if (_groupLockScheduleSweepInFlight || !_deps) return;
+  const users = _deps.inMemoryDB?.users;
+  if (!(users instanceof Map)) return;
+  _groupLockScheduleSweepInFlight = true;
+  const clock = getKhartoumClock(now);
+  const nowMs = new Date(now).getTime();
+
+  try {
+    for (const [userIdValue, user] of users.entries()) {
+      const userId = String(userIdValue);
+      for (const configured of groupLockScheduleItems(user)) {
+        const groupId = String(configured?.groupId || "");
+        if (!configured?.enabled || !groupId.endsWith("@g.us")) continue;
+
+        const currentUser = _deps?.getUser?.(userId) || user;
+        const schedule = groupLockScheduleFor(currentUser, groupId);
+        if (!schedule.enabled) continue;
+        const previousErrorAt = Date.parse(schedule.lastErrorAt || "");
+        if (
+          schedule.lastError &&
+          Number.isFinite(previousErrorAt) &&
+          nowMs >= previousErrorAt &&
+          nowMs - previousErrorAt < 60_000
+        ) continue;
+
+        const shouldLock = shouldGroupBeLocked(clock.time, schedule.closeTime, schedule.openTime);
+        try {
+          const access = await findGroupLockScheduleAccess(
+            userId,
+            groupId,
+            schedule.phoneNumber,
+          );
+          if (!access) throw new Error("المجموعة غير متاحة على رقم واتساب المختار");
+          if ((access.metadata.announce === true) !== shouldLock) {
+            if (ownAccountIsAdmin(access.sock, access.metadata) !== true) {
+              throw new Error("يجب أن يكون البوت مشرفاً لتغيير أوقات فتح وإغلاق المجموعة");
+            }
+            if (typeof access.sock.groupSettingUpdate !== "function") {
+              throw new Error("تغيير صلاحية الإرسال غير متاح حالياً");
+            }
+            await access.sock.groupSettingUpdate(
+              groupId,
+              shouldLock ? "announcement" : "not_announcement",
+            );
+          }
+          if (schedule.lastError || schedule.lastAppliedLocked !== shouldLock) {
+            saveGroupLockScheduleRecord(userId, groupId, {
+              lastError: "",
+              lastErrorAt: null,
+              lastActionAt: new Date(now).toISOString(),
+              lastAppliedLocked: shouldLock,
+            });
+          }
+        } catch (error) {
+          const message = String(error?.message || "تعذّر تطبيق جدول المجموعة").slice(0, 240);
+          try {
+            saveGroupLockScheduleRecord(userId, groupId, {
+              lastError: message,
+              lastErrorAt: new Date(now).toISOString(),
+            });
+          } catch {}
+          _deps?.logger?.warn?.(
+            { err: message, groupId, userId },
+            "Scheduled group lock update failed",
+          );
+        }
+      }
+    }
+  } catch (error) {
+    _deps?.logger?.warn?.(
+      { err: String(error?.message || error) },
+      "Scheduled group lock sweep failed",
+    );
+  } finally {
+    _groupLockScheduleSweepInFlight = false;
+  }
 }
 
 function automaticRewardReportText(report) {
@@ -284,8 +698,10 @@ async function publishScheduledItem(userId, item, day, time) {
     const article = await findNextMawdoo3Article(current.topic, {
       seenUrls: seenAutoPostUrls(latestUser, groupId),
     });
+    article.content = await fetchMawdoo3ArticleContent(article.url);
+    const prepared = await preparePostArticle(userId, article, current);
     reserveAutoPostUrl(userId, groupId, article.url);
-    await access.sock.sendMessage(groupId, { text: postTextForArticle(article) });
+    await sendArticleInParts(access.sock, groupId, article.title, prepared);
     saveAutoPostResult(userId, groupId, item.id, {
       lastSentAt: new Date().toISOString(),
       lastError: null,
@@ -331,15 +747,23 @@ export async function saveWebGroupAutoPost(userId, groupId, phoneNumber, input =
   const topic = String(input.topic || "").trim().replace(/\s+/g, " ");
   if (topic.length < 2 || topic.length > 60) throw new Error("اكتب موضوعاً من حرفين إلى 60 حرفاً");
   const times = parseAutoPostTimes(input.times);
+  const excerptMode = input.excerptMode == null ? "length" : String(input.excerptMode);
+  if (!["length", "ai", "full"].includes(excerptMode)) throw new Error("طريقة إعداد المقتطف غير صالحة");
+  const aiPrompt = String(input.aiPrompt || "").trim();
+  if (aiPrompt.length > 2000) throw new Error("البرومبت يتجاوز 2000 حرف");
+  if (excerptMode === "ai" && !(user.nvidiaKey || process.env.NVIDIA_API_KEY)) throw new Error("أضف مفتاح NVIDIA في قسم الذكاء الاصطناعي أولاً");
+  const excerptLength = input.excerptLength == null || input.excerptLength === "" ? 500 : Number(input.excerptLength);
+  if (!Number.isInteger(excerptLength) || excerptLength < 50 || excerptLength > 12000) throw new Error("حدد طول المقتطف بين 50 و12000 حرف");
   const items = autoPostItems(user);
   let existing = null;
   if (input.id) {
     existing = findAutoPost(user, access.groupId, input.id);
     if (!existing) throw new Error("إعداد النشر التلقائي غير موجود في هذه المجموعة");
     if (existing.enabled) {
-      await findNextMawdoo3Article(topic, {
+      const article = await findNextMawdoo3Article(topic, {
         seenUrls: seenAutoPostUrls(user, access.groupId),
       });
+      await fetchMawdoo3ArticleContent(article.url);
     }
   } else if (items.length >= MAX_AUTO_POSTS_PER_USER) {
     throw new Error(`الحد الأقصى ${MAX_AUTO_POSTS_PER_USER} إعداد نشر تلقائي`);
@@ -351,6 +775,9 @@ export async function saveWebGroupAutoPost(userId, groupId, phoneNumber, input =
     phoneNumber: access.phoneNumber,
     topic,
     times,
+    excerptLength,
+    excerptMode,
+    aiPrompt,
     enabled: existing?.enabled === true,
     createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -369,7 +796,8 @@ export async function setWebGroupAutoPostEnabled(userId, groupId, phoneNumber, a
   const item = findAutoPost(user, access.groupId, autoPostId);
   if (!item) throw new Error("إعداد النشر التلقائي غير موجود");
   if (enabled) {
-    await findNextMawdoo3Article(item.topic, { seenUrls: seenAutoPostUrls(user, access.groupId) });
+    const article = await findNextMawdoo3Article(item.topic, { seenUrls: seenAutoPostUrls(user, access.groupId) });
+    await fetchMawdoo3ArticleContent(article.url);
   }
   const updated = autoPostItems(user).map((entry) =>
     entry.id === item.id ? { ...entry, enabled, updatedAt: new Date().toISOString(), lastError: null } : entry
@@ -395,7 +823,8 @@ export async function previewWebGroupAutoPost(userId, groupId, phoneNumber, auto
   const article = await findNextMawdoo3Article(item.topic, {
     seenUrls: seenAutoPostUrls(user, access.groupId),
   });
-  return article;
+  const content = await fetchMawdoo3ArticleContent(article.url);
+  return { ...article, content: await preparePostArticle(userId, { ...article, content }, item) };
 }
 
 export async function publishWebGroupAutoPostNow(userId, groupId, phoneNumber, autoPostId) {
@@ -410,8 +839,10 @@ export async function publishWebGroupAutoPostNow(userId, groupId, phoneNumber, a
     const article = await findNextMawdoo3Article(item.topic, {
       seenUrls: seenAutoPostUrls(user, access.groupId),
     });
+    article.content = await fetchMawdoo3ArticleContent(article.url);
+    const prepared = await preparePostArticle(access.userId, article, item);
     reserveAutoPostUrl(access.userId, access.groupId, article.url);
-    await access.sock.sendMessage(access.groupId, { text: postTextForArticle(article) });
+    await sendArticleInParts(access.sock, access.groupId, article.title, prepared);
     saveAutoPostResult(access.userId, access.groupId, item.id, {
       lastSentAt: new Date().toISOString(),
       lastError: null,
@@ -509,7 +940,14 @@ function ensureGroupWorldListeners(userId, sock) {
   if (!_groupWorldMessageListeners.has(sock)) {
     sock.ev.on("messages.upsert", (event) => {
       for (const message of event?.messages || []) {
-        void handleGroupWorldMessage(String(userId), sock, message, event?.type || "").catch(() => {});
+        if (!isMessageAfterCutoff(userId, message)) continue;
+        const guarded = guardMessageSocket(sock, userId, message, getMessageCutoff(userId));
+        void handleGroupWorldMessage(String(userId), guarded, message, event?.type || "").catch((error) => {
+          _deps?.logger?.warn?.(
+            { err: String(error?.message || error) },
+            "Group World message handling failed",
+          );
+        });
       }
     });
     _groupWorldMessageListeners.add(sock);
@@ -781,7 +1219,9 @@ async function handleModeratedMessage(userId, sock, message) {
   const user = _deps.getUser(userId);
   const antiLinkEnabled = (user.antiLinkGroups || []).includes(groupJid);
   const inspectEnabled = (user.inspectInviteGroups || []).includes(groupJid);
-  if (!antiLinkEnabled && !inspectEnabled) return;
+  const settings = groupMessageSettingsFor(user, groupJid);
+  const bannedWordsEnabled = settings.bannedWordsEnabled === true;
+  if (!antiLinkEnabled && !inspectEnabled && !bannedWordsEnabled) return;
 
   const inviteCode = extractWhatsAppGroupInviteCode(text);
   if (inspectEnabled && inviteCode) {
@@ -789,8 +1229,44 @@ async function handleModeratedMessage(userId, sock, message) {
       await sock.sendMessage(groupJid, { text: "تعذر جلب معاينة الرابط. قد يكون الرابط منتهياً أو غير صالح." }).catch(() => {});
     }
   }
-  if (!antiLinkEnabled || !messageHasLink(text)) return;
 
+  if (antiLinkEnabled && messageHasLink(text)) {
+    let admin = null;
+    try {
+      if (typeof sock.groupMetadata === "function") {
+        const metadata = await sock.groupMetadata(groupJid);
+        admin = ownAccountIsAdmin(sock, metadata);
+      }
+    } catch {}
+    if (admin !== true) {
+      await sendModerationWarning(
+        userId,
+        sock,
+        groupJid,
+        message,
+        "antiLink",
+        settings.antiLinkWarningMessage,
+        "⚠️ يمنع إرسال الروابط في هذه المجموعة. الرجاء حذف الرابط.",
+      );
+      return;
+    }
+    try {
+      await sock.sendMessage(groupJid, { delete: key });
+    } catch {
+      await sendModerationWarning(
+        userId,
+        sock,
+        groupJid,
+        message,
+        "antiLink",
+        settings.antiLinkWarningMessage,
+        "⚠️ تعذر حذف الرابط. تحقق من صلاحيات المشرف لحساب واتساب المرتبط.",
+      );
+    }
+    return;
+  }
+
+  if (!bannedWordsEnabled || !findBannedWordMatch(text, settings.bannedWords)) return;
   let admin = null;
   try {
     if (typeof sock.groupMetadata === "function") {
@@ -798,27 +1274,88 @@ async function handleModeratedMessage(userId, sock, message) {
       admin = ownAccountIsAdmin(sock, metadata);
     }
   } catch {}
-  if (admin !== true) {
-    const warningKey = `${userId}:${groupJid}`;
-    const lastWarning = _warningTimes.get(warningKey) || 0;
-    if (Date.now() - lastWarning < 60_000) return;
-    _warningTimes.set(warningKey, Date.now());
-    if (_warningTimes.size > 500) _warningTimes.delete(_warningTimes.keys().next().value);
-    await sock.sendMessage(groupJid, {
-      text: admin === false
-        ? "⚠️ تم تفعيل حذف الروابط، لكن رقم واتساب المرتبط غير مشرف في هذه المجموعة، لذلك لم تُحذف الرسالة. عيّنه مشرفاً مع صلاحية حذف الرسائل."
-        : "⚠️ تعذر التحقق من صلاحية المشرف الآن، لذلك لم تُحذف رسالة الرابط. تحقق من اتصال واتساب وصلاحية الرقم المرتبط."
-    }).catch(() => {});
-    return;
+
+  if (admin === true) {
+    try {
+      await sock.sendMessage(groupJid, { delete: key });
+      return;
+    } catch {}
   }
+  await sendModerationWarning(
+    userId,
+    sock,
+    groupJid,
+    message,
+    "bannedWord",
+    settings.bannedWordWarningMessage,
+    "⚠️ هذه الكلمة ممنوعة في المجموعة. الرجاء عدم تكرارها.",
+  );
+}
+
+function groupParticipantAddress(participant) {
+  if (typeof participant === "string") return participant;
+  return String(
+    participant?.id ||
+    participant?.jid ||
+    participant?.phoneNumber ||
+    participant?.lid ||
+    ""
+  );
+}
+
+function groupParticipantName(participant, address) {
+  if (participant && typeof participant === "object") {
+    const displayName = participant.notify || participant.name || participant.pushName;
+    if (displayName) return String(displayName);
+  }
+  return String(address || "").split("@")[0].split(":")[0] || "عضو جديد";
+}
+
+async function handleGroupParticipantUpdate(userId, sock, event) {
+  const groupId = String(event?.id || event?.jid || "");
+  const action = String(event?.action || "").toLowerCase();
+  if (!groupId.endsWith("@g.us") || !["add", "remove"].includes(action)) return;
+
+  const user = _deps?.getUser?.(String(userId));
+  const settings = groupMessageSettingsFor(user, groupId);
+  const enabled = action === "add" ? settings.welcomeEnabled : settings.goodbyeEnabled;
+  const template = action === "add" ? settings.welcomeMessage : settings.goodbyeMessage;
+  if (enabled !== true || !String(template || "").trim()) return;
+
+  let groupName = String(event?.subject || groupId);
+  let metadata;
   try {
-    await sock.sendMessage(groupJid, { delete: key });
-  } catch {
-    const warningKey = `${userId}:${groupJid}`;
-    const lastWarning = _warningTimes.get(warningKey) || 0;
-    if (Date.now() - lastWarning >= 60_000) {
-      _warningTimes.set(warningKey, Date.now());
-      await sock.sendMessage(groupJid, { text: "⚠️ تعذر حذف الرابط. تحقق من صلاحيات المشرف لحساب واتساب المرتبط." }).catch(() => {});
+    metadata = await sock.groupMetadata?.(groupId);
+    groupName = String(metadata?.subject || metadata?.name || groupName);
+  } catch {}
+
+  const participants = Array.isArray(event?.participants) ? event.participants : [];
+  for (const participant of participants) {
+    const address = groupParticipantAddress(participant);
+    if (!address) continue;
+    const ownIdentities = [sock?.user?.id, sock?.user?.jid, sock?.user?.lid, sock?.user?.pn].filter(Boolean);
+    if (ownIdentities.some((own) => sameWhatsAppIdentity(address, String(own)))) continue;
+
+    const name = resolveGroupMemberName(sock, participant, metadata);
+    const time = new Intl.DateTimeFormat("ar", {
+      timeZone: AUTO_POST_TIME_ZONE,
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).format(new Date());
+    const text = String(template)
+      .replaceAll("_nemgrob", groupName)
+      .replaceAll("_time", time)
+      .replaceAll("_nem", name)
+      .slice(0, 4_000);
+    if (!text.trim()) continue;
+    try {
+      await sock.sendMessage(groupId, { text });
+    } catch (error) {
+      _deps?.logger?.warn?.(
+        { err: String(error?.message || error), groupId, action },
+        "Could not send group join/leave message"
+      );
     }
   }
 }
@@ -827,10 +1364,21 @@ function ensureModerationListener(userId, sock = findSocket(userId)) {
   if (!sock?.ev?.on || _listeners.has(sock)) return;
   const listener = (event) => {
     for (const message of event?.messages || []) {
-      void handleModeratedMessage(String(userId), sock, message).catch(() => {});
+      rememberGroupMessageName(sock, message);
+      if (!isMessageAfterCutoff(userId, message)) continue;
+      const guarded = guardMessageSocket(sock, userId, message, getMessageCutoff(userId));
+      void handleModeratedMessage(String(userId), guarded, message).catch(() => {});
     }
   };
   sock.ev.on("messages.upsert", listener);
+  sock.ev.on("group-participants.update", (event) => {
+    void handleGroupParticipantUpdate(String(userId), sock, event).catch((error) => {
+      _deps?.logger?.warn?.(
+        { err: String(error?.message || error), groupId: event?.id },
+        "Could not process group participant update"
+      );
+    });
+  });
   _listeners.add(sock);
 }
 
@@ -883,6 +1431,11 @@ export async function getWebGroupDetails(userId, groupId, phoneNumber) {
     membersTruncated: participants.length > 500,
     antiLinkEnabled: (user.antiLinkGroups || []).includes(groupId),
     inspectInviteEnabled: (user.inspectInviteGroups || []).includes(groupId),
+    groupMessages: groupMessageSettingsFor(user, groupId),
+    lockSchedule: publicGroupLockSchedule(groupLockScheduleFor(user, groupId)),
+    reminders: groupReminderItems(user)
+      .filter((item) => item?.groupId === groupId)
+      .map(publicGroupReminder),
     autoPosts: autoPostItems(user)
       .filter((item) => item?.groupId === groupId)
       .map(publicAutoPost),
@@ -913,10 +1466,6 @@ export async function setWebGroupSetting(userId, groupId, phoneNumber, setting, 
 
   const sock = await findSocketForGroup(userId, groupId, phoneNumber);
   if (!sock) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
-  const metadata = await sock.groupMetadata(groupId);
-  if (ownAccountIsAdmin(sock, metadata) !== true) {
-    throw new Error("يجب أن يكون رقم واتساب مشرفاً لتغيير إعدادات حماية المجموعة");
-  }
 
   const user = _deps?.getUser?.(userId);
   if (!user || typeof _deps?.saveUser !== "function") {
@@ -934,6 +1483,206 @@ export async function setWebGroupSetting(userId, groupId, phoneNumber, setting, 
     antiLinkEnabled: setting === "antiLink" ? enabled : updated.includes(groupId),
     inspectInviteEnabled: setting === "inspectInvite" ? enabled : (user.inspectInviteGroups || []).includes(groupId),
   };
+}
+
+export async function saveWebGroupLinkWarningMessage(userId, groupId, phoneNumber, message) {
+  userId = String(userId);
+  groupId = String(groupId || "").trim();
+  if (!groupId.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+  const sock = await findSocketForGroup(userId, groupId, phoneNumber);
+  if (!sock) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
+  const text = String(message ?? "");
+  if (text.length > 1_000) throw new Error("رسالة التحذير تتجاوز 1000 حرف");
+  const settings = saveGroupMessageSettings(userId, groupId, {
+    antiLinkWarningMessage: text.trim(),
+  });
+  return { antiLinkWarningMessage: settings.antiLinkWarningMessage };
+}
+
+export async function saveWebGroupWordFilterSettings(userId, groupId, phoneNumber, input = {}) {
+  userId = String(userId);
+  groupId = String(groupId || "").trim();
+  if (!groupId.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+  if (typeof input.enabled !== "boolean") throw new Error("حالة فلتر الكلمات غير صالحة");
+
+  const sock = await findSocketForGroup(userId, groupId, phoneNumber);
+  if (!sock) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
+  if (typeof input.words !== "string") throw new Error("أدخل الكلمات الممنوعة كسطور منفصلة");
+  if (input.words.length > 2_000) throw new Error("قائمة الكلمات تتجاوز 2000 حرف");
+
+  const words = [];
+  const seen = new Set();
+  for (const rawWord of input.words.split(/\r?\n/u)) {
+    const word = rawWord.trim();
+    const normalized = normalizeGroupFilterTerm(word);
+    if (!normalized || seen.has(normalized)) continue;
+    if (word.length > 80) throw new Error("كل كلمة أو عبارة يجب ألا تتجاوز 80 حرفاً");
+    seen.add(normalized);
+    words.push(word);
+  }
+  if (words.length > 50) throw new Error("يمكن إضافة 50 كلمة أو عبارة كحد أقصى");
+  if (input.enabled && !words.length) {
+    throw new Error("أضف كلمة واحدة على الأقل أو أوقف الفلتر");
+  }
+
+  const warningMessage = String(input.warningMessage ?? "").trim();
+  if (warningMessage.length > 1_000) throw new Error("رسالة التنبيه تتجاوز 1000 حرف");
+  const settings = saveGroupMessageSettings(userId, groupId, {
+    bannedWordsEnabled: input.enabled,
+    bannedWords: words,
+    bannedWordWarningMessage: warningMessage,
+  });
+  ensureModerationListener(userId, sock);
+  return {
+    bannedWordsEnabled: settings.bannedWordsEnabled,
+    bannedWords: settings.bannedWords,
+    bannedWordWarningMessage: settings.bannedWordWarningMessage,
+  };
+}
+
+export async function saveWebGroupMessageSettings(userId, groupId, phoneNumber, input = {}) {
+  userId = String(userId);
+  groupId = String(groupId || "").trim();
+  if (!groupId.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+  const sock = await findSocketForGroup(userId, groupId, phoneNumber);
+  if (!sock) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
+  if (typeof input.welcomeEnabled !== "boolean" || typeof input.goodbyeEnabled !== "boolean") {
+    throw new Error("حالة رسائل الترحيب والوداع غير صالحة");
+  }
+  const welcomeMessage = String(input.welcomeMessage ?? "").trim();
+  const goodbyeMessage = String(input.goodbyeMessage ?? "").trim();
+  if (welcomeMessage.length > 1_000 || goodbyeMessage.length > 1_000) {
+    throw new Error("كل رسالة يجب ألا تتجاوز 1000 حرف");
+  }
+  if (input.welcomeEnabled && !welcomeMessage) {
+    throw new Error("اكتب رسالة الترحيب أو أوقف تفعيلها");
+  }
+  if (input.goodbyeEnabled && !goodbyeMessage) {
+    throw new Error("اكتب رسالة الوداع أو أوقف تفعيلها");
+  }
+  const settings = saveGroupMessageSettings(userId, groupId, {
+    welcomeEnabled: input.welcomeEnabled,
+    welcomeMessage,
+    goodbyeEnabled: input.goodbyeEnabled,
+    goodbyeMessage,
+  });
+  ensureModerationListener(userId, sock);
+  return {
+    welcomeEnabled: settings.welcomeEnabled,
+    welcomeMessage: settings.welcomeMessage,
+    goodbyeEnabled: settings.goodbyeEnabled,
+    goodbyeMessage: settings.goodbyeMessage,
+  };
+}
+
+export async function saveWebGroupLockSchedule(userId, groupId, phoneNumber, input = {}) {
+  userId = String(userId);
+  groupId = String(groupId || "").trim();
+  if (!groupId.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+  if (typeof input.enabled !== "boolean") throw new Error("حالة الجدولة غير صالحة");
+
+  const closeTime = String(input.closeTime || "").trim();
+  const openTime = String(input.openTime || "").trim();
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/u.test(closeTime) ||
+      !/^([01]\d|2[0-3]):[0-5]\d$/u.test(openTime)) {
+    throw new Error("أدخل وقتي الفتح والإغلاق بصيغة 24 ساعة");
+  }
+  if (closeTime === openTime) {
+    throw new Error("يجب أن يختلف وقت الفتح عن وقت الإغلاق");
+  }
+
+  let selectedPhone = String(phoneNumber || "").trim();
+  if (input.enabled) {
+    const access = await findGroupLockScheduleAccess(userId, groupId, phoneNumber);
+    if (!access) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
+    if (ownAccountIsAdmin(access.sock, access.metadata) !== true) {
+      throw new Error("يجب أن يكون البوت مشرفاً لتفعيل جدولة فتح وإغلاق المجموعة");
+    }
+    if (typeof access.sock.groupSettingUpdate !== "function") {
+      throw new Error("تغيير صلاحية الإرسال غير متاح حالياً");
+    }
+    selectedPhone = connectedSocketPhone(access.sock) || selectedPhone;
+  }
+
+  const saved = saveGroupLockScheduleRecord(userId, groupId, {
+    enabled: input.enabled,
+    closeTime,
+    openTime,
+    phoneNumber: selectedPhone,
+    lastError: "",
+    lastErrorAt: null,
+  });
+  return publicGroupLockSchedule(saved);
+}
+
+export async function saveWebGroupReminder(userId, groupId, phoneNumber, input = {}) {
+  const access = await getAutoPostGroupAccess(userId, groupId, phoneNumber);
+  const message = String(input.message || "").trim();
+  if (!message || message.length > 1_000) {
+    throw new Error("اكتب رسالة تذكير من حرف واحد إلى 1000 حرف");
+  }
+  const time = String(input.time || "").trim();
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(time)) {
+    throw new Error("اختر وقتاً صحيحاً بصيغة 24 ساعة");
+  }
+  if (!Array.isArray(input.days) || !input.days.length || input.days.length > 7 ||
+      input.days.some((day) => !Number.isInteger(day) || day < 0 || day > 6)) {
+    throw new Error("اختر يوماً واحداً على الأقل من أيام الأسبوع");
+  }
+  const days = [...new Set(input.days)].sort((a, b) => a - b);
+  const user = _deps?.getUser?.(access.userId);
+  if (!user) throw new Error("تعذّر الوصول إلى إعدادات المستخدم");
+  const items = groupReminderItems(user);
+  const existing = input.reminderId
+    ? groupReminderFor(user, access.groupId, input.reminderId)
+    : null;
+  if (input.reminderId && !existing) throw new Error("التذكير غير موجود في هذه المجموعة");
+  if (!existing && items.length >= MAX_GROUP_REMINDERS_PER_USER) {
+    throw new Error(`الحد الأقصى ${MAX_GROUP_REMINDERS_PER_USER} تذكيراً`);
+  }
+  const next = {
+    ...(existing || {}),
+    id: existing?.id || randomUUID(),
+    groupId: access.groupId,
+    phoneNumber: connectedSocketPhone(access.sock) || access.phoneNumber,
+    message,
+    time,
+    days,
+    enabled: existing ? existing.enabled === true : true,
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    lastError: null,
+  };
+  const updated = existing
+    ? items.map((item) => item.id === existing.id ? next : item)
+    : [...items, next];
+  saveGroupReminderList(access.userId, updated);
+  return publicGroupReminder(next);
+}
+
+export async function setWebGroupReminderEnabled(userId, groupId, phoneNumber, reminderId, enabled) {
+  const access = await getAutoPostGroupAccess(userId, groupId, phoneNumber);
+  if (typeof enabled !== "boolean") throw new Error("حالة التذكير غير صالحة");
+  const user = _deps?.getUser?.(access.userId);
+  const reminder = groupReminderFor(user, access.groupId, reminderId);
+  if (!reminder) throw new Error("التذكير غير موجود");
+  const updated = groupReminderItems(user).map((item) =>
+    item.id === reminder.id ? { ...item, enabled, updatedAt: new Date().toISOString(), lastError: null } : item
+  );
+  saveGroupReminderList(access.userId, updated);
+  return publicGroupReminder({ ...reminder, enabled });
+}
+
+export async function deleteWebGroupReminder(userId, groupId, phoneNumber, reminderId) {
+  const access = await getAutoPostGroupAccess(userId, groupId, phoneNumber);
+  const user = _deps?.getUser?.(access.userId);
+  const reminder = groupReminderFor(user, access.groupId, reminderId);
+  if (!reminder) throw new Error("التذكير غير موجود");
+  saveGroupReminderList(
+    access.userId,
+    groupReminderItems(user).filter((item) => item.id !== reminder.id),
+  );
+  return { ok: true };
 }
 
 export async function applyWebGroupAction(userId, groupId, phoneNumber, action, value) {
@@ -971,8 +1720,10 @@ export async function applyWebGroupAction(userId, groupId, phoneNumber, action, 
 
 function attachConfiguredListeners(userId) {
   const user = _deps?.getUser?.(String(userId));
-  if ((user?.antiLinkGroups?.length || user?.inspectInviteGroups?.length) && userId) {
-    ensureModerationListener(String(userId));
+  if (hasGroupEventFeatures(user) && userId) {
+    for (const sock of findSockets(String(userId))) {
+      ensureModerationListener(String(userId), sock);
+    }
   }
 }
 
@@ -981,8 +1732,10 @@ function recoverGroupListeners() {
   const users = _deps?.inMemoryDB?.users;
   if (!(users instanceof Map)) return;
   for (const [userId, user] of users.entries()) {
-    if (user?.antiLinkGroups?.length || user?.inspectInviteGroups?.length) {
-      ensureModerationListener(String(userId));
+      if (hasGroupEventFeatures(user)) {
+        for (const sock of findSockets(String(userId))) {
+          ensureModerationListener(String(userId), sock);
+        }
     }
   }
 }
@@ -994,9 +1747,15 @@ export function stopModerationListenerRecovery() {
   _autoPostTimer = null;
   if (_groupWorldRewardsTimer) clearInterval(_groupWorldRewardsTimer);
   _groupWorldRewardsTimer = null;
+  if (_groupLockScheduleTimer) clearInterval(_groupLockScheduleTimer);
+  _groupLockScheduleTimer = null;
+  if (_groupReminderTimer) clearInterval(_groupReminderTimer);
+  _groupReminderTimer = null;
   _autoPostInFlight.clear();
   _autoPostSweepInFlight = false;
   _groupWorldRewardsSweepInFlight = false;
+  _groupLockScheduleSweepInFlight = false;
+  _groupReminderSweepInFlight = false;
 }
 
 function controlsKeyboard(userId, groupId) {

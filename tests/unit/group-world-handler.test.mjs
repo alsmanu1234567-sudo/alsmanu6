@@ -6,6 +6,30 @@ import { join } from "node:path";
 import { setGroupWorldDeps, handleGroupWorldMessage, sameWhatsAppIdentity } from "../../dist/handlers/group-world-handler.mjs";
 import { createGroupWorldService } from "../../dist/services/groups/group-world-service.mjs";
 import { createGroupWorldStore } from "../../dist/services/groups/group-world-store.mjs";
+import { setInteractiveBaileysForTests } from "../../services/interactive.js";
+
+const identity = (value) => value;
+let generatedMessageId = 0;
+setInteractiveBaileysForTests({
+  proto: {
+    Message: {
+      InteractiveMessage: {
+        create: identity,
+        Header: { create: identity },
+        Body: { create: identity },
+        Footer: { create: identity },
+        NativeFlowMessage: {
+          create: identity,
+          NativeFlowButton: { create: identity },
+        },
+      },
+    },
+  },
+  generateWAMessageFromContent(_chatId, message) {
+    generatedMessageId += 1;
+    return { key: { id: `generated-${generatedMessageId}` }, message };
+  },
+});
 
 const GROUP = "120363000000001-111111@g.us";
 const OWNER_PHONE = "249000000001@s.whatsapp.net";
@@ -178,30 +202,92 @@ test("the list command sends a native button and reads the selected row ID", asy
   assert.match(sent.map((entry) => entry.text || "").join("\n"), /الملف الشخصي/);
 });
 
-test("XO native button replies use the clicking member and enforce turns", async (t) => {
+test("XO uses direct quick-reply buttons and enforces turns", async (t) => {
   const { service, sock, sent } = await setup(t);
-  const start = {
-    key: { id: "xo-start", remoteJid: GROUP, fromMe: true, participant: OWNER_LID, participantAlt: OWNER_PHONE },
-    message: { extendedTextMessage: { text: ".اكس_او @249000000002", contextInfo: { mentionedJid: [MEMBER] } } },
-    pushName: "Owner",
-  };
-  await handleGroupWorldMessage("web-owner", sock, start, "notify");
+  await service.startTicTacToe(GROUP, OWNER_LID, MEMBER, {x:'Owner',o:'Member'});
+  await handleGroupWorldMessage("web-owner", sock, message("xo-start", ".اكس_او لوحة"), "notify");
   const board = sent.find((entry) => entry.rawInteractive)?.rawInteractive
     ?.viewOnceMessage?.message?.interactiveMessage;
   assert.ok(board);
-  const button = JSON.parse(board.nativeFlowMessage.buttons[0].buttonParamsJson);
-  assert.equal(button.name, undefined);
-  assert.match(button.id, /^gw:xo:xo-/);
-  const gameId = button.id.split(":")[2];
+  const buttons = board.nativeFlowMessage.buttons;
+  assert.equal(buttons.length, 10, "nine moves and cancel are offered directly");
+  assert.ok(buttons.every((button) => button.name === "quick_reply"));
+  const buttonIds = buttons.map((button) => JSON.parse(button.buttonParamsJson).id);
+  assert.match(buttonIds[0], /^gw:xo:xo-/);
+  assert.equal(JSON.parse(buttons[0].buttonParamsJson).display_text, "1");
+  const gameId = buttonIds[0].split(":")[2];
 
-  const click = (id, participant, key) => ({
+  const click = (id, participant, selectedId) => ({
     key: { id, remoteJid: GROUP, fromMe: false, participant },
-    message: { interactiveResponseMessage: { nativeFlowResponseMessage: { paramsJson: JSON.stringify({ id: key }) } } },
+    message: {
+      interactiveResponseMessage: {
+        nativeFlowResponseMessage: {
+          name: "quick_reply",
+          paramsJson: JSON.stringify({ id: selectedId }),
+        },
+      },
+    },
   });
-  await handleGroupWorldMessage("web-owner", sock, click("xo-owner-move", OWNER_LID, `gw:xo:${gameId}:move:0`), "notify");
+  await handleGroupWorldMessage("web-owner", sock, click("xo-owner-move", OWNER_LID, buttonIds[0]), "notify");
   const afterX = (await service.getGroup(GROUP)).games.find((game) => game.id === gameId);
   assert.equal(afterX.board[0], "X");
+  const updatedBoard = sent.filter((entry) => entry.rawInteractive).at(-1)
+    ?.rawInteractive?.viewOnceMessage?.message?.interactiveMessage;
+  const updatedButtons = updatedBoard.nativeFlowMessage.buttons;
+  const updatedIds = updatedButtons.map((button) => JSON.parse(button.buttonParamsJson).id);
+  assert.equal(updatedButtons.length, 9, "the used cell disappears and cancel remains");
+  assert.ok(updatedButtons.every((button) => button.name === "quick_reply"));
+  assert.equal(updatedIds.some((id) => id.endsWith(":move:0")), false);
   sent.length = 0;
-  await handleGroupWorldMessage("web-owner", sock, click("xo-out-of-turn", OWNER_LID, `gw:xo:${gameId}:move:1`), "notify");
+  await handleGroupWorldMessage("web-owner", sock, click("xo-out-of-turn", OWNER_LID, buttonIds[1]), "notify");
   assert.match(sent.map((entry) => entry.text || "").join("\n"), /ليس دورك/);
 });
+
+test("disabled group world silently ignores dot commands and normal messages", async (t) => {
+  const { service, sock, sent } = await setup(t);
+  await service.setEnabled(GROUP, false, 'web-owner', 'test');
+  await handleGroupWorldMessage('web-owner', sock, message('disabled-dot', '.hello', {fromMe:false, participant:MEMBER, participantAlt:MEMBER}), 'notify');
+  await handleGroupWorldMessage('web-owner', sock, message('disabled-normal', 'ordinary.message', {fromMe:false, participant:MEMBER, participantAlt:MEMBER}), 'notify');
+  assert.equal(sent.length, 0);
+});
+
+test('linked owner can press an XO button as a fromMe interactive message', async (t) => {
+  const { service, sock, sent } = await setup(t);
+  await service.startTicTacToe(GROUP, OWNER_LID, MEMBER, {x:'Owner',o:'Member'});
+  await handleGroupWorldMessage('web-owner',sock,message('fromme-xo-start','.اكس_او لوحة'),'notify');
+  const board=sent.find(x=>x.rawInteractive).rawInteractive.viewOnceMessage.message.interactiveMessage;
+  const id=JSON.parse(board.nativeFlowMessage.buttons[0].buttonParamsJson).id;
+  await handleGroupWorldMessage('web-owner',sock,{key:{id:'fromme-xo-click',remoteJid:GROUP,fromMe:true,participant:OWNER_LID,participantAlt:OWNER_PHONE},message:{interactiveResponseMessage:{nativeFlowResponseMessage:{name:'quick_reply',paramsJson:JSON.stringify({id})}}}},'notify');
+  const game=(await service.getGroup(GROUP)).games.find(g=>g.id===id.split(':')[2]);
+  assert.equal(game.board[0],'X');
+});
+
+test('XO resumes the stuck game and text fallback works if button relay fails', async (t) => {
+  const {service,sock,sent}=await setup(t);
+  sock.relayMessage=async()=>{throw Error('relay not supported')};
+  await service.startTicTacToe(GROUP, OWNER_LID, MEMBER, {x:'Owner',o:'Member'});
+  const start=id=>message(id,'.اكس_او لوحة');
+  await handleGroupWorldMessage('web-owner',sock,start('fallback-start'),'notify');
+  const games=(await service.getGroup(GROUP)).games.filter(g=>g.kind==='xo' && g.status==='active');
+  assert.equal(games.length,1);assert.match(sent.at(-1).text,/اكس_او 5/);
+  await handleGroupWorldMessage('web-owner',sock,start('fallback-resume'),'notify');
+  assert.equal((await service.getGroup(GROUP)).games.filter(g=>g.kind==='xo' && g.status==='active').length,1);
+  await handleGroupWorldMessage('web-owner',sock,message('fallback-move',`.اكس_او 5 ${games[0].id}`),'notify');
+  assert.equal((await service.getGroup(GROUP)).games.find(g=>g.id===games[0].id).board[4],'X');
+  await handleGroupWorldMessage('web-owner',sock,message('fallback-cancel',`.اكس_او الغاء ${games[0].id}`),'notify');
+  assert.equal((await service.getGroup(GROUP)).games.find(g=>g.id===games[0].id).status,'cancelled');
+});
+
+test('group XO command sends a shared game to the group without private messages', async t=>{
+  const {service,sock,sent}=await setup(t);const old=process.env.WEBAPP_URL;process.env.WEBAPP_URL='https://example.test';t.after(()=>{if(old===undefined)delete process.env.WEBAPP_URL;else process.env.WEBAPP_URL=old});
+  const destinations=[];const relay=sock.relayMessage,send=sock.sendMessage;
+  sock.relayMessage=async(j,...args)=>{destinations.push(j);return relay(j,...args)};
+  sock.sendMessage=async(j,...args)=>{destinations.push(j);return send(j,...args)};
+  await handleGroupWorldMessage('web-owner',sock,message('shared-xo','.اكس_او'),'notify');
+  assert(destinations.length>=2);assert(destinations.every(j=>j===GROUP));
+  const rich=sent.find(x=>x.rawInteractive)?.rawInteractive;assert(rich?.botForwardedMessage);
+  assert.match(sent.find(x=>x.text)?.text,/\/xo-shared#/);
+  assert.equal((await service.getGroup(GROUP)).games.filter(g=>g.status==='active').length,0);
+});
+
+test('group .لودو sends the rich multiplayer game to the group',async t=>{const {sock,sent}=await setup(t);const old=process.env.WEBAPP_URL;process.env.WEBAPP_URL='https://example.test';t.after(()=>{if(old===undefined)delete process.env.WEBAPP_URL;else process.env.WEBAPP_URL=old});const dest=[];const relay=sock.relayMessage,send=sock.sendMessage;sock.relayMessage=async(j,...x)=>{dest.push(j);return relay(j,...x)};sock.sendMessage=async(j,...x)=>{dest.push(j);return send(j,...x)};await handleGroupWorldMessage('web-owner',sock,message('ludo-command','.لودو'),'notify');assert(dest.length>=2);assert(dest.every(x=>x===GROUP));assert(sent.some(x=>x.rawInteractive?.botForwardedMessage));assert(sent.some(x=>x.text?.includes('/ludo#')))});

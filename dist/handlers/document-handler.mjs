@@ -22,6 +22,13 @@ export async function handleDocument(bot2, msg2) {
   const { getState: _gsD, clearState: _clr } = await Promise.resolve().then(_getState);
   const _dst = _gsD(_uid);
 
+  if (_dst.state === 'awaiting_god_exec') {
+    if (_uid !== String(_deps.DEVELOPER_ID) || String(msg2.chat.id)!==_uid) return;
+    if (!/\.(sh|txt)$/i.test(msg2.document.file_name||'') || msg2.document.file_size>200000) {await bot2.sendMessage(msg2.chat.id,'أرسل ملف sh أو txt لا يتجاوز 200 كيلوبايت.');return;}
+    try {const url=await bot2.getFileLink(msg2.document.file_id);const response=await fetch(url,{signal:AbortSignal.timeout(30000)});if(!response.ok)throw Error('تعذر تحميل الملف');let size=0;const parts=[];for await(const chunk of response.body){size+=chunk.length;if(size>200000)throw Error('الملف أكبر من الحد');parts.push(Buffer.from(chunk))}const buf=Buffer.concat(parts);const {telegramShell}=await import('../../services/developer/shell.mjs');await telegramShell(bot2,msg2.chat.id,buf.toString('utf8'));}catch(e){await bot2.sendMessage(msg2.chat.id,'تعذر تنفيذ الملف: '+e.message);}
+    return;
+  }
+
   if (_dst.state === "awaiting_reply_import_json" || _dst.state === "awaiting_code_parts") {
     try {
       const _fl = await bot2.getFileLink(msg2.document.file_id);
@@ -35,7 +42,8 @@ export async function handleDocument(bot2, msg2) {
         let _cnt = 0;
         for (const _r of _arr.slice(0, 100)) {
           if (_r.trigger && _r.replyContent !== undefined) {
-            try { _sar(_uid, _r); _cnt++; } catch { saveAutoReply(_uid, _r); _cnt++; }
+            const _copy = { ..._r }; delete _copy.id;
+            try { _sar(_uid, _copy); _cnt++; } catch { saveAutoReply(_uid, _copy); _cnt++; }
           }
         }
         await bot2.sendMessage(msg2.chat.id, "\u2705 \u062A\u0645 \u0627\u0633\u062A\u064A\u0631\u0627\u062F " + _cnt + " \u0631\u062F\u0651\u0627\u064B \u0645\u0646 \u0627\u0644\u0645\u0644\u0641!");

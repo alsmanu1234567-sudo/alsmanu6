@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 // ═══════════════════════════════════════════════════════════════════
 // webapp.mjs — واجهة ويب داخلية لإدارة التحويلات
 // تعمل داخل نفس خادم البوت — لا تحتاج أي شيء خارجي
@@ -21,12 +23,22 @@ import {
   getWebGroupDetails,
   getWebGroupInvite,
   setWebGroupSetting,
+  saveWebGroupLinkWarningMessage,
+  saveWebGroupWordFilterSettings,
+  saveWebGroupMessageSettings,
+  saveWebGroupLockSchedule,
+  saveWebGroupReminder,
+  setWebGroupReminderEnabled,
+  deleteWebGroupReminder,
   saveWebGroupAutoPost,
   setWebGroupAutoPostEnabled,
   deleteWebGroupAutoPost,
   previewWebGroupAutoPost,
   publishWebGroupAutoPostNow,
 } from "./handlers/groups-handler.mjs";
+import {ludoEngine,loadLudoHtml} from "../services/ludo-game.mjs";
+import { getSharedState, joinShared, moveShared } from "../services/xo-shared.mjs";
+import { getMultiState, moveMulti, acceptMulti } from "../services/xo-multiplayer.mjs";
 import { registerGroupWorldWebApp } from "./group-world-web.mjs";
 
 // ─── مصادقة ────────────────────────────────────────────────────────
@@ -52,12 +64,12 @@ function guard(handler) {
 }
 
 // ─── التسجيل في تطبيق Express ──────────────────────────────────────
-export function registerWebApp(app) {
+export function registerWebApp(app, { replyService, aiService, myMsgsService, siteGenService, messagesService } = {}) {
   // JSON body parsing خاص بمسارات الويب آب فقط (لا يؤثر على بقية البوت)
   const parseJson = (req, res, next) => {
     if (req.headers["content-type"]?.includes("application/json") && !req.body) {
       let raw = "";
-      req.on("data", (c) => { raw += c; if (raw.length > 1e6) req.destroy(); });
+      req.on("data", (c) => { raw += c; if (raw.length > 6e6) req.destroy(); });
       req.on("end", () => {
         try { req.body = raw ? JSON.parse(raw) : {}; } catch { req.body = {}; }
         next();
@@ -67,9 +79,88 @@ export function registerWebApp(app) {
 
   app.get("/webapp", (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
     const navigation = '<a class="btn btn-s btn-sm" style="margin-top:10px;text-decoration:none" href="/group-world" onclick="location.href=\'/group-world\'+location.search;return false">🌍 عالم المجموعات</a>';
     res.end(HTML_PAGE.replace('<div class="hdr">', `<div class="hdr">\n  ${navigation}`));
   });
+
+  app.get("/steam-games/:name", async (req,res) => {res.setHeader("Cache-Control","no-store");res.setHeader("Referrer-Policy","no-referrer");try{const {loadSteamGame}=await import("../services/steam-games.mjs");res.type("html").send(await loadSteamGame(req.params.name));}catch{res.status(404).send("اللعبة غير موجودة");}});
+  app.get("/ludo", async (_req, res) => { res.setHeader("Content-Type", "text/html; charset=utf-8"); res.setHeader("Cache-Control", "no-store"); res.setHeader("Referrer-Policy", "no-referrer"); try {res.end(await loadLudoHtml());} catch {res.status(500).end("تعذر تحميل اللعبة");} });
+  // The embedded game may be hosted by WhatsApp at an opaque origin. Game/seat
+  // capability tokens, not browser cookies, authorize these isolated endpoints.
+  const ludoCors = (req,res,next) => {res.setHeader("Access-Control-Allow-Origin","*");res.setHeader("Access-Control-Allow-Methods","GET, POST, OPTIONS");res.setHeader("Access-Control-Allow-Headers","Content-Type, X-Ludo-Game, X-Ludo-Seat");res.setHeader("Cache-Control","no-store");if(req.method === "OPTIONS")return res.status(204).end();next();};
+  if (typeof app.options === "function") app.options("/api/ludo/:action",ludoCors);
+  const ludoGuard = fn => async(req,res) => {res.setHeader("Access-Control-Allow-Origin","*");res.setHeader("Cache-Control","no-store");try{res.json(await fn(req.headers["x-ludo-game"],req.headers["x-ludo-seat"],req));}catch(e){res.status(400).json({error:e?.message||"تعذر تنفيذ الحركة"});}};
+  app.get("/api/ludo/state",ludoGuard(async(id,seat)=>ludoEngine.state(id,seat)));
+  app.post("/api/ludo/join",parseJson,ludoGuard(async(id,seat,req)=>ludoEngine.join(id,seat,req.body?.name)));
+  app.post("/api/ludo/start",parseJson,ludoGuard(async(id,seat)=>ludoEngine.start(id,seat)));
+  app.post("/api/ludo/roll",parseJson,ludoGuard(async(id,seat)=>ludoEngine.roll(id,seat)));
+  app.post("/api/ludo/move",parseJson,ludoGuard(async(id,seat,req)=>ludoEngine.move(id,seat,req.body?.piece)));
+  app.post("/api/ludo/chat",parseJson,ludoGuard(async(id,seat,req)=>ludoEngine.chat(id,seat,req.body)));
+
+  app.get("/xo-shared", (_req, res) => { res.setHeader("Content-Type", "text/html; charset=utf-8"); res.setHeader("Cache-Control", "no-store"); res.setHeader("Referrer-Policy", "no-referrer"); res.end(readFileSync(fileURLToPath(new URL("../public/xo-shared.html", import.meta.url)))); });
+  const sharedGuard = fn => async(req,res) => { res.setHeader("Cache-Control","no-store"); try {res.json(await fn(req.headers["x-xo-game"],req.headers["x-xo-seat"],req));}catch(e){res.status(400).json({error:e?.message||"تعذر تنفيذ الحركة"});} };
+  app.get("/api/xo-shared/state",sharedGuard(async(id,seat)=>getSharedState(id,seat)));
+  app.post("/api/xo-shared/join",parseJson,sharedGuard(async(id,seat)=>joinShared(id,seat)));
+  app.post("/api/xo-shared/move",parseJson,sharedGuard(async(id,seat,req)=>moveShared(id,seat,req.body?.position)));
+
+  app.get("/xo-multi", (_req, res) => { res.setHeader("Content-Type", "text/html; charset=utf-8"); res.setHeader("Cache-Control", "no-store"); res.setHeader("Referrer-Policy", "no-referrer"); res.end(readFileSync(fileURLToPath(new URL("../public/xo-multi.html", import.meta.url)))); });
+  const xoGuard = fn => async (req,res) => { res.setHeader("Cache-Control","no-store"); try { res.json(await fn(req.headers["x-xo-token"],req)); } catch (e) {res.status(400).json({error:e?.message||"تعذر تنفيذ الحركة"});} };
+  app.get("/api/xo-multi/state", xoGuard(async t => getMultiState(t)));
+  app.post("/api/xo-multi/join", parseJson, xoGuard(async t => acceptMulti(t)));
+  app.post("/api/xo-multi/move", parseJson, xoGuard(async (t,req) => moveMulti(t,req.body?.position)));
+
+  app.get("/xo-ultra", (_req, res) => { res.setHeader("Content-Type", "text/html; charset=utf-8"); res.setHeader("Cache-Control", "no-store"); res.end(readFileSync(fileURLToPath(new URL("../public/xo-ultra.html", import.meta.url)))); });
+
+  const siteWeb = () => {if(!siteGenService)throw Error('الأداة غير جاهزة');return siteGenService;};
+  app.get('/sitegen-web.js',(_req,res)=>{res.setHeader('Content-Type','application/javascript; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(readFileSync(fileURLToPath(new URL('../public/sitegen-web.js',import.meta.url))));});
+  app.get('/api/sitegen/overview',guard(async uid=>siteWeb().overview(uid)));
+  app.post('/api/sitegen/start',parseJson,guard(async(uid,req)=>siteWeb().start(uid,req.body||{})));
+  app.post('/api/sitegen/stop',parseJson,guard(async(uid,req)=>siteWeb().stop(uid,req.body?.code)));
+
+  const messagesWeb = () => {if(!messagesService)throw Error('قسم الرسائل غير جاهز');return messagesService;};
+  app.get('/messages-web.js',(_req,res)=>{res.setHeader('Content-Type','application/javascript; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(readFileSync(fileURLToPath(new URL('../public/messages-web.js',import.meta.url))));});
+  app.get('/api/messages/overview',guard(async uid=>messagesWeb().overview(uid)));
+  app.post('/api/messages/settings',parseJson,guard(async(uid,req)=>messagesWeb().save(uid,req.body?.settings)));
+  app.post('/api/messages/list',parseJson,guard(async(uid,req)=>messagesWeb().list(uid,req.body?.type,req.body?.items)));
+  app.post('/api/messages/broadcast/preview',parseJson,guard(async(uid,req)=>messagesWeb().preview(uid,req.body)));
+  app.post('/api/messages/broadcast/send',parseJson,guard(async(uid,req)=>messagesWeb().send(uid,req.body?.id)));
+
+  const myMsgsWeb = () => {if(!myMsgsService)throw Error('قسم رسائلي غير جاهز');return myMsgsService;};
+  app.get('/my-msgs-web.js',(_req,res)=>{res.setHeader('Content-Type','application/javascript; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(readFileSync(fileURLToPath(new URL('../public/my-msgs-web.js',import.meta.url))));});
+  app.get('/api/my-msgs/overview',guard(async(uid,req)=>myMsgsWeb().overview(uid,req.query?.phone)));
+  app.post('/api/my-msgs/feature',parseJson,guard(async(uid,req)=>myMsgsWeb().feature(uid,req.body?.phone,req.body?.id,req.body||{})));
+  app.post('/api/my-msgs/custom',parseJson,guard(async(uid,req)=>myMsgsWeb().custom(uid,req.body?.phone,req.body||{})));
+  app.post('/api/my-msgs/delete',parseJson,guard(async(uid,req)=>myMsgsWeb().remove(uid,req.body?.phone,req.body?.id)));
+  app.post('/api/my-msgs/group',parseJson,guard(async(uid,req)=>myMsgsWeb().group(uid,req.body?.phone,req.body?.jid)));
+  app.post('/api/my-msgs/pair',parseJson,guard(async(uid,req)=>myMsgsWeb().pairing(uid,req.body?.phone)));
+
+  const aiWeb = () => { if (!aiService) throw Error("خدمة الذكاء غير جاهزة"); return aiService; };
+  app.get('/ai-web.js', (_req,res)=>{res.setHeader('Content-Type','application/javascript; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(readFileSync(fileURLToPath(new URL('../public/ai-web.js',import.meta.url))));});
+  app.get('/api/ai/overview',guard(async uid=>aiWeb().overview(uid)));
+  app.get('/api/ai/models',guard(async (uid,req)=>aiWeb().models(uid,{refresh:req.query?.refresh==='1'})));
+  app.get('/api/ai/scan-status',guard(async uid=>aiWeb().scanStatus(uid)));
+  app.post('/api/ai/scan',parseJson,guard(async uid=>aiWeb().scan(uid)));
+  app.post('/api/ai/key',parseJson,guard(async(uid,req)=>aiWeb().saveKey(uid,req.body?.key)));
+  app.post('/api/ai/key/delete',parseJson,guard(async uid=>aiWeb().deleteKey(uid)));
+  app.post('/api/ai/model',parseJson,guard(async(uid,req)=>aiWeb().select(uid,req.body?.id)));
+  app.post('/api/ai/settings',parseJson,guard(async(uid,req)=>aiWeb().settings(uid,req.body||{})));
+  app.post('/api/ai/number',parseJson,guard(async(uid,req)=>aiWeb().saveNumber(uid,req.body?.id,req.body||{})));
+  app.post('/api/ai/test',parseJson,guard(async(uid,req)=>aiWeb().test(uid,req.body?.text)));
+  app.post('/api/ai/memory/clear',parseJson,guard(async uid=>aiWeb().clear(uid)));
+
+  const reply = () => { if (!replyService) throw new Error('خدمة الردود غير جاهزة'); return replyService; };
+  app.get('/auto-replies.js', (_req, res) => { res.setHeader('Content-Type','application/javascript; charset=utf-8'); res.setHeader('Cache-Control','no-store'); res.end(readFileSync(fileURLToPath(new URL('../public/auto-replies.js', import.meta.url)))); });
+  app.get('/auto-replies.css', (_req, res) => { res.setHeader('Content-Type','text/css; charset=utf-8'); res.setHeader('Cache-Control','no-store'); res.end(readFileSync(fileURLToPath(new URL('../public/auto-replies.css', import.meta.url)))); });
+  app.get('/api/replies/list', guard(async uid => ({replies:reply().list(uid), numbers:reply().numbers(uid)})));
+  app.post('/api/replies/save', parseJson, guard(async (uid, req) => reply().save(uid, req.body || {})));
+  app.post('/api/replies/delete', parseJson, guard(async (uid, req) => reply().delete(uid, req.body?.id)));
+  app.post('/api/replies/toggle', parseJson, guard(async (uid, req) => reply().toggle(uid, req.body?.id, req.body?.enabled)));
+  app.post('/api/replies/all', parseJson, guard(async (uid, req) => reply().all(uid, req.body?.enabled)));
+  app.post('/api/replies/duplicate', parseJson, guard(async (uid, req) => reply().duplicate(uid, req.body?.id)));
+  app.post('/api/replies/import', parseJson, guard(async (uid, req) => reply().import(uid, req.body?.replies)));
+  app.post('/api/replies/upload', parseJson, guard(async (uid, req) => await reply().upload(uid, req.body || {})));
+  app.post('/api/replies/delay', parseJson, guard(async (uid, req) => reply().delay(uid, req.body?.id, req.body?.enabled)));
 
   app.get("/api/fw/overview", guard(async (uid) => webGetOverview(uid)));
 
@@ -111,6 +202,75 @@ export function registerWebApp(app) {
     );
   }));
 
+  app.post("/api/fw/groups/link-warning", parseJson, guard(async (uid, req) => {
+    return await saveWebGroupLinkWarningMessage(
+      uid,
+      req.body?.id,
+      req.body?.phoneNumber,
+      req.body?.message,
+    );
+  }));
+
+  app.post("/api/fw/groups/word-filter", parseJson, guard(async (uid, req) => {
+    return await saveWebGroupWordFilterSettings(
+      uid,
+      req.body?.id,
+      req.body?.phoneNumber,
+      req.body || {},
+    );
+  }));
+
+  app.post("/api/fw/groups/messages", parseJson, guard(async (uid, req) => {
+    return await saveWebGroupMessageSettings(
+      uid,
+      req.body?.id,
+      req.body?.phoneNumber,
+      req.body || {},
+    );
+  }));
+
+  app.post("/api/fw/groups/lock-schedule", parseJson, guard(async (uid, req) => {
+    return await saveWebGroupLockSchedule(
+      uid,
+      req.body?.id,
+      req.body?.phoneNumber,
+      req.body || {},
+    );
+  }));
+
+  app.post("/api/fw/groups/reminders/save", parseJson, guard(async (uid, req) => {
+    return await saveWebGroupReminder(
+      uid,
+      req.body?.id,
+      req.body?.phoneNumber,
+      {
+        reminderId: req.body?.reminderId,
+        message: req.body?.message,
+        time: req.body?.time,
+        days: req.body?.days,
+      },
+    );
+  }));
+
+  app.post("/api/fw/groups/reminders/toggle", parseJson, guard(async (uid, req) => {
+    return await setWebGroupReminderEnabled(
+      uid,
+      req.body?.id,
+      req.body?.phoneNumber,
+      req.body?.reminderId,
+      req.body?.enabled,
+    );
+  }));
+
+  app.post("/api/fw/groups/reminders/delete", parseJson, guard(async (uid, req) => {
+    return await deleteWebGroupReminder(
+      uid,
+      req.body?.id,
+      req.body?.phoneNumber,
+      req.body?.reminderId,
+    );
+  }));
+
   app.post("/api/fw/groups/action", parseJson, guard(async (uid, req) => {
     return await applyWebGroupAction(
       uid,
@@ -130,6 +290,9 @@ export function registerWebApp(app) {
         id: req.body?.autoPostId,
         topic: req.body?.topic,
         times: req.body?.times,
+        excerptLength: req.body?.excerptLength,
+        excerptMode: req.body?.excerptMode,
+        aiPrompt: req.body?.aiPrompt,
       },
     );
   }));
@@ -200,10 +363,16 @@ const HTML_PAGE = `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<meta name="theme-color" content="#0b1220">
-<title>إدارة التحويلات</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#171331">
+<title>لوحة البوت</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="/auto-replies.css">
+<script defer src="/sitegen-web.js"></script>
+<script defer src="/messages-web.js" onload="if (typeof TAB !== 'undefined' && TAB === 'messages') render()"></script>
+<script defer src="/my-msgs-web.js" onload="if (typeof TAB !== 'undefined' && TAB === 'mymsgs') render()"></script>
+<script defer src="/ai-web.js" onload="if (typeof TAB !== 'undefined' && TAB === 'ai') render()"></script>
+<script defer src="/auto-replies.js" onload="if (typeof TAB !== 'undefined' && TAB === 'replies') render()"></script>
 <style>
 :root{
   --bg:#0a0e1a;--card:#141927;--card2:#1c2436;--line:#252e45;
@@ -283,6 +452,7 @@ body{padding-bottom:88px;font-size:15px;line-height:1.5}
 .prev{border:1.5px dashed var(--acc);background:rgba(52,211,153,.05)}
 .spin{display:inline-block;width:15px;height:15px;border:2px solid rgba(148,163,192,.4);border-top-color:var(--acc);border-radius:50%;animation:sp .7s linear infinite;vertical-align:middle}
 @keyframes sp{to{transform:rotate(360deg)}}
+.group-message-toggle{display:flex;align-items:center;gap:9px;margin:12px 0;color:var(--txt);font-size:13px}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
 .chip{background:var(--card2);border:1px solid var(--line);border-radius:20px;padding:4px 11px;font-size:11.5px;color:var(--mut);font-weight:600}
 .hide{display:none!important}
@@ -305,23 +475,47 @@ body{padding-bottom:88px;font-size:15px;line-height:1.5}
 .auto-post-preview{font-size:12px;line-height:1.8;overflow-wrap:anywhere;margin-top:8px;color:var(--mut)}
 .auto-post-preview a{color:var(--acc);text-decoration:underline}
 .auto-post-error{color:var(--del);font-size:12px;margin-top:6px;overflow-wrap:anywhere}
+
+/* A calmer, brighter interface with comfortable touch targets. */
+:root{--bg:#100f23;--card:#1d1a38;--card2:#272341;--line:#40395d;--txt:#f8f5ff;--mut:#b6aecf;--acc:#b8a1ff;--accD:#211546;--ok:#65e0bd;--r:18px}
+html,body{background:var(--bg)}
+body{background:radial-gradient(ellipse at 5% 0%,rgba(192,141,255,.18),transparent 28rem),radial-gradient(ellipse at 95% 26%,rgba(65,196,191,.09),transparent 30rem),var(--bg);background-attachment:fixed}
+.hdr{background:rgba(25,20,48,.92);padding:15px 18px 12px;border-bottom:1px solid rgba(191,167,255,.18)}
+.brandline{display:flex;align-items:center;gap:11px}.brandicon{display:grid;place-items:center;width:43px;height:43px;border-radius:15px;background:linear-gradient(135deg,#f1b3dc,#a894ff);color:#28153e;font-size:24px;box-shadow:0 8px 28px #9c75ef4d}
+.brandeyebrow{font-size:11px;color:#d5b5ff;letter-spacing:.03em}.hdr h1{font-size:19px}.header-refresh{margin-inline-start:auto;border:1px solid var(--line);background:var(--card2);color:var(--txt);width:42px;height:42px;border-radius:14px;font-size:23px;cursor:pointer}
+.srch input{box-shadow:0 10px 28px #06041722}.tabs{gap:5px;background:#1d1936;border-radius:18px}.tab{min-height:46px}.tab.act{background:linear-gradient(135deg,#c2aaff,#9f8df3);color:#241642;box-shadow:0 4px 15px #9679ef55}
+.card{background:linear-gradient(135deg,#25203f,#1d1a36);box-shadow:0 10px 28px #08041336;transition:transform .18s,border-color .18s}.card:hover{border-color:#806fb5;transform:translateY(-2px)}
+.btn{min-height:44px}.btn-p{background:linear-gradient(135deg,#d3b3ff,#a894ff);color:#211438}.btn-s{background:#302a4d}.fab{max-width:620px;margin:auto}.fab .btn{box-shadow:0 10px 30px #9470ef55}
+.sheet{background:#1c1935;box-shadow:0 -18px 70px #05031099;scroll-behavior:smooth}.group-detail-block{background:#25213d;box-shadow:0 8px 22px #0603172b;scroll-margin-top:14px}.group-detail-title{color:#eee5ff}.auto-post-item{background:#1c1a34}
+.group-shortcuts{display:flex;gap:8px;overflow-x:auto;padding:6px 0 14px;scrollbar-width:thin}.group-shortcuts button{flex:none;min-height:38px;padding:8px 12px;background:#373052;color:#e9e0ff;border:1px solid #5a4e80;border-radius:999px;font-size:12px;cursor:pointer}.group-shortcuts button:focus-visible,.btn:focus-visible,.tab:focus-visible{outline:3px solid #efc7ff;outline-offset:2px}
+.group-description{white-space:pre-wrap}.group-detail-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}
+.fld select,.fld input[type=number]{width:100%;background:var(--card2);border:1.5px solid var(--line);border-radius:13px;padding:12px;color:var(--txt);font:inherit}
+@media(min-width:760px){.hdr,.srch,.tabs,.container{padding-left:max(24px,calc((100% - 1000px)/2));padding-right:max(24px,calc((100% - 1000px)/2))}.srch,.tabs{margin-left:0;margin-right:0}.sheet{left:50%;right:auto;width:min(760px,96vw);transform:translate(-50%,105%)}.sheet.open{transform:translate(-50%,0)}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation-duration:.01ms!important;transition-duration:.01ms!important}}
+
+.dash-card{text-align:right;color:var(--txt);cursor:pointer;font:inherit}.dash-card strong,.dash-card small{display:block}.dash-card small{margin-top:8px;opacity:.75}.msg-hero,.msg-links,.msg-actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin:14px 0}.msg-grid,.msg-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:14px}.msg-panel{background:var(--card,#1c2536);border:1px solid #ffffff22;border-radius:16px;padding:16px;margin:12px 0}.msg-panel h2{font-size:18px}.msg-field,.msg-toggle{display:flex;gap:8px;margin:12px 0}.msg-field{flex-direction:column}.msg-field textarea,.msg-field input,.msg-field select{width:100%;padding:10px;background:#101827;color:#fff;border:1px solid #ffffff33;border-radius:9px}.msg-toggle{justify-content:space-between}.msg-toggle small,.msg-list-item small{display:block;opacity:.7}.msg-list-item{display:flex;justify-content:space-between;gap:10px;padding:10px;border-bottom:1px solid #ffffff22;overflow-wrap:anywhere}
 </style>
 </head>
 <body>
 <div class="hdr">
-  <h1>📡 إدارة التحويلات <span class="dot off" id="waDot"></span></h1>
+  <div class="brandline"><span class="brandicon">✦</span><div><span class="brandeyebrow">لوحة البوت</span><h1>إدارة واتساب <span class="dot off" id="waDot"></span></h1></div><button class="header-refresh" type="button" onclick="load()" aria-label="تحديث البيانات">↻</button></div>
   <div class="sub" id="subTitle">جارٍ التحميل…</div>
 </div>
 
 <div class="srch">
-  <input id="srchIn" type="text" placeholder="ابحث بالاسم… أو الصق رابط قناة واتساب" autocomplete="off">
+  <input id="srchIn" type="text" placeholder="ابحث عن مجموعة أو قناة أو قاعدة…" autocomplete="off">
   <span class="ic">🔍</span>
 </div>
 
 <div class="tabs">
+  <button class="tab" data-tab="dashboard">🏠 الرئيسية</button>
   <button class="tab act" data-tab="rules">📋 القواعد</button>
   <button class="tab" data-tab="channels">📺 القنوات</button>
   <button class="tab" data-tab="groups">👥 المجموعات</button>
+  <button class="tab" data-tab="replies">💬 الردود</button>
+  <button class="tab" data-tab="ai">✦ الذكاء</button>
+  <button class="tab" data-tab="messages">💬 الرسائل</button>
+  <button class="tab" data-tab="mymsgs">📨 رسائلي</button>
 </div>
 
 <div class="container">
@@ -346,7 +540,7 @@ const TOKEN = qs.get("token") || localStorage.getItem("fw_token") || "";
 if (qs.get("token")) localStorage.setItem("fw_token", qs.get("token"));
 
 let ST = { numbers:[], channels:[], groups:[], rules:[], waConnected:false };
-let TAB = qs.get("section") === "groups" ? "groups" : "rules";
+let TAB = ["dashboard","messages","groups","replies","channels","ai","mymsgs"].includes(qs.get("section")) ? qs.get("section") : "rules";
 let Q = "";
 const picCache = {};
 
@@ -382,10 +576,11 @@ async function load(){
     document.getElementById("subTitle").textContent =
       (ST.waConnected ? "واتساب متصل" : "واتساب غير متصل") +
       " · " + ST.rules.length + " قاعدة · " + ST.channels.length + " قناة · " + ST.groups.length + " مجموعة";
-    render();
+    if(!(TAB === "messages" && document.getElementById("messagesForm")))render();
   } catch(e){
     document.getElementById("subTitle").textContent = "⚠️ " + e.message;
-    document.getElementById("view").innerHTML = '<div class="empty"><div class="big">🔒</div>' + esc(e.message) + '<br>افتح الرابط من داخل البوت مجدداً.</div>';
+    if (TAB === "replies" || TAB === "ai" || TAB === "mymsgs" || TAB === "messages") render();
+    else document.getElementById("view").innerHTML = '<div class="empty"><div class="big">🔒</div>' + esc(e.message) + '<br>افتح الرابط من داخل البوت مجدداً.</div>';
   }
 }
 
@@ -395,11 +590,11 @@ document.getElementById("srchIn").addEventListener("input", (e)=>{
   Q = e.target.value.trim();
   clearTimeout(srchTimer);
   const looksLikeChannel = Q.includes("whatsapp.com/channel/") || Q.endsWith("@newsletter");
-  if (looksLikeChannel) {
+  if (looksLikeChannel && TAB === "channels") {
     srchTimer = setTimeout(()=>previewChannel(Q), 450);
   } else {
     document.getElementById("chPreview").classList.add("hide");
-    render();
+    if(TAB!=="messages")render();
   }
 });
 
@@ -437,14 +632,14 @@ async function addChannel(jsonStr){
 
 // ─── التبويبات ──────────────────────────────────────────────────
 function selectTab(tab, shouldRender=true){
-  TAB = tab === "groups" || tab === "channels" ? tab : "rules";
+  TAB = ["dashboard", "messages", "groups", "channels", "replies", "ai", "mymsgs"].includes(tab) ? tab : "rules";
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("act", t.dataset.tab===TAB));
   document.getElementById("fab").style.display = TAB==="rules" ? "" : "none";
   document.getElementById("srchIn").placeholder = TAB==="groups"
     ? "ابحث باسم المجموعة أو معرّفها…"
-    : TAB==="channels" ? "ابحث بالاسم… أو الصق رابط قناة واتساب" : "ابحث باسم القاعدة…";
+    : TAB==="channels" ? "ابحث بالاسم… أو الصق رابط قناة واتساب" : TAB==="replies" ? "ابحث عن رد أو مفتاح…" : TAB==="ai" ? "ابحث عن نموذج أو رقم…" : TAB==="mymsgs" ? "ابحث عن ميزة…" : "ابحث باسم القاعدة…";
   const title = document.querySelector(".hdr h1");
-  if (title?.firstChild) title.firstChild.nodeValue = TAB==="groups" ? "👥 إدارة المجموعات " : "📡 إدارة التحويلات ";
+  if (title?.firstChild) title.firstChild.nodeValue = TAB==="groups" ? "👥 إدارة المجموعات " : TAB==="replies" ? "💬 الردود التلقائية " : TAB==="ai" ? "✦ الذكاء الاصطناعي " : TAB==="mymsgs" ? "📨 رسائلي " : "📡 إدارة التحويلات ";
   if (shouldRender) render();
 }
 
@@ -463,9 +658,22 @@ function filt(arr){
 
 function render(){
   const v = document.getElementById("view");
+  if (TAB === "dashboard") return renderDashboard(v);
   if (TAB === "rules") return renderRules(v);
   if (TAB === "channels") return renderChannels(v);
+  if (TAB === "messages") return window.MessagesUI ? window.MessagesUI.render(v) : (v.innerHTML = '<div class="empty">جارٍ تحميل الرسائل…</div>');
+  if (TAB === "mymsgs") return window.MyMsgsUI ? window.MyMsgsUI.render(v, Q) : (v.innerHTML = '<div class="empty">جارٍ تحميل رسائلي…</div>');
+  if (TAB === "ai") return window.AiUI ? window.AiUI.render(v, Q) : (v.innerHTML = '<div class="empty">جارٍ تحميل قسم الذكاء…</div>');
+  if (TAB === "replies") return window.RepliesUI ? window.RepliesUI.render(v, Q) : (v.innerHTML = '<div class="empty">جارٍ تحميل قسم الردود…</div>');
   renderGroups(v);
+}
+
+function renderDashboard(v){
+ const active=ST.rules.filter(r=>r.isActive!==false && r.enabled!==false).length;
+ const entries=[['rules','📋 قواعد التحويل',ST.rules.length+' قاعدة · '+active+' مفعلة تقريباً'],['channels','📺 القنوات',ST.channels.length+' قناة'],['groups','👥 المجموعات',ST.groups.length+' مجموعة'],['replies','💬 الردود التلقائية','إدارة الردود'],['messages','✉️ الرسائل','الإعدادات والإرسال الجماعي'],['mymsgs','📨 رسائلي','ميزات الرقم'],['ai','✦ الذكاء','النماذج والإعدادات']];
+ const q=Q.trim().toLowerCase(), visible=entries.filter(x=>!q||x.slice(1).join(' ').toLowerCase().includes(q));
+ v.innerHTML='<div class="msg-hero"><div><h2>لوحة التحكم</h2><p>حالة واتساب: '+(ST.waConnected?'متصل':'غير متصل')+' · ملخص البيانات المحمّلة</p></div><button class="btn btn-s" onclick="load()">↻ تحديث</button></div><div class="msg-grid">'+visible.map(x=>'<button type="button" class="msg-panel dash-card" data-go="'+x[0]+'"><strong>'+esc(x[1])+'</strong><small>'+esc(x[2])+'</small></button>').join('')+'</div>'+(visible.length?'':'<div class="empty">لا توجد أقسام مطابقة</div>');
+ v.querySelectorAll('[data-go]').forEach(button=>button.addEventListener('click',()=>{Q='';document.getElementById('srchIn').value='';selectTab(button.dataset.go)}));
 }
 
 // ─── القواعد ────────────────────────────────────────────────────
@@ -564,10 +772,12 @@ async function refreshGroups(btn){
 
 let GROUP_DETAIL = null;
 let AUTO_POST_EDIT_ID = null;
+let GROUP_REMINDER_EDIT_ID = null;
 async function openGroupDetails(groupId){
   const group = ST.groups.find(item=>item.id===groupId);
   if (!group) return toast("❌ المجموعة غير موجودة في قائمتك");
   AUTO_POST_EDIT_ID = null;
+  GROUP_REMINDER_EDIT_ID = null;
   GROUP_DETAIL = { ...group };
   const sh = document.getElementById("sheet");
   sh.innerHTML = '<div class="grip"></div><div class="empty"><span class="spin"></span><br>جارٍ جلب تفاصيل المجموعة…</div>';
@@ -594,6 +804,9 @@ function renderGroupDetails(){
   const members = Array.isArray(detail.members) ? detail.members : [];
   const autoPosts = Array.isArray(detail.autoPosts) ? detail.autoPosts : [];
   const editingAutoPost = autoPosts.find(item=>item.id===AUTO_POST_EDIT_ID) || null;
+  const reminders = Array.isArray(detail.reminders) ? detail.reminders : [];
+  const editingReminder = reminders.find(item=>item.id===GROUP_REMINDER_EDIT_ID) || null;
+  const reminderDayNames = ["الأحد","الإثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت"];
   const memberRows = members.length
     ? members.map(member =>
         '<div class="group-member"><span>'+esc(member.label)+'</span><span class="meta">'+esc(member.role)+'</span></div>'
@@ -601,7 +814,7 @@ function renderGroupDetails(){
     : '<div class="meta" style="white-space:normal">لا تتوفر بيانات الأعضاء حالياً.</div>';
   const settingRow = (key, label, enabled) =>
     '<div class="group-option"><div><div class="nm">'+label+'</div><div class="meta">'+(enabled?"مفعّل":"متوقف")+'</div></div>' +
-    '<button class="btn '+(enabled?"btn-p":"btn-s")+'" data-group-setting="'+key+'" '+(canManage?"":"disabled")+'>'+(enabled?"إيقاف":"تفعيل")+'</button></div>';
+    '<button class="btn '+(enabled?"btn-p":"btn-s")+'" data-group-setting="'+key+'">'+(enabled?"إيقاف":"تفعيل")+'</button></div>';
   const autoPostRows = autoPosts.length
     ? autoPosts.map(item =>
         '<div class="auto-post-item"><div class="row" style="align-items:flex-start">' +
@@ -623,6 +836,31 @@ function renderGroupDetails(){
         '</div><div class="auto-post-preview" data-auto-preview="'+esc(item.id)+'"></div></div>'
       ).join("")
     : '<div class="meta" style="white-space:normal">لا توجد جداول نشر لهذه المجموعة بعد.</div>';
+  const reminderRows = reminders.length
+    ? reminders.map(item => {
+        const dayLabels = (item.days||[]).map(Number)
+          .filter(day=>Number.isInteger(day)&&day>=0&&day<reminderDayNames.length)
+          .map(day=>reminderDayNames[day]);
+        return '<div class="auto-post-item"><div class="row" style="align-items:flex-start">' +
+          '<div class="grow"><div class="nm">'+esc(String(item.message||"").slice(0,90))+
+          (String(item.message||"").length>90?"…":"")+'</div>' +
+          '<div class="meta">🕒 '+esc(item.time)+' · '+esc(dayLabels.join("، "))+' · توقيت الخرطوم</div></div>' +
+          '<span class="badge '+(item.enabled?"on":"off")+'">'+(item.enabled?"مفعّل":"متوقف")+'</span></div>' +
+          (item.lastError?'<div class="auto-post-error">آخر خطأ: '+esc(item.lastError)+'</div>':
+            item.lastSentAt?'<div class="meta" style="white-space:normal;margin-top:5px">آخر إرسال: '+esc(new Date(item.lastSentAt).toLocaleString("ar"))+'</div>':
+            '<div class="meta" style="margin-top:5px">لم يُرسل بعد</div>') +
+          '<div class="auto-post-actions">' +
+          '<button class="btn btn-s btn-sm" data-reminder-edit="'+esc(item.id)+'" '+(canManage?"":"disabled")+'>تعديل</button>' +
+          '<button class="btn btn-s btn-sm" data-reminder-toggle="'+esc(item.id)+'" '+(canManage?"":"disabled")+'>'+
+          (item.enabled?"إيقاف":"استئناف")+'</button>' +
+          '<button class="btn btn-d btn-sm" data-reminder-delete="'+esc(item.id)+'" '+(canManage?"":"disabled")+'>حذف</button>' +
+          '</div></div>';
+      }).join("")
+    : '<div class="meta" style="white-space:normal">لا توجد تذكيرات لهذه المجموعة بعد.</div>';
+  const reminderDayInputs = reminderDayNames.map((day,index) =>
+    '<label style="display:flex;align-items:center;gap:4px"><input type="checkbox" name="groupReminderDay" value="'+index+'" style="width:16px;height:16px;margin:0" '+
+    ((editingReminder?.days||[]).includes(index)?"checked":"")+' '+(canManage?"":"disabled")+'><span>'+day+'</span></label>'
+  ).join("");
 
   sh.innerHTML =
     '<div class="grip"></div>' +
@@ -632,18 +870,42 @@ function renderGroupDetails(){
     ' · المشرفون: '+Number(detail.adminCount||0).toLocaleString("ar")+'</div>' +
     '<div class="group-detail-line">تاريخ الإنشاء: '+created+'</div>' +
     '<div class="group-detail-line">إرسال الأعضاء: '+(detail.locked?"للمشرفين فقط":"مفتوح للأعضاء")+'</div>' +
-    '<div class="group-detail-line">الوصف: '+esc(detail.description||"لا يوجد وصف")+'</div></div>' +
+    '<div class="group-detail-line group-description">الوصف: '+esc(detail.description||"لا يوجد وصف")+'</div>' +
+    '<div class="group-detail-actions"><button class="btn btn-s btn-sm" type="button" data-copy-description '+(detail.description?"":"disabled")+'>📋 نسخ الوصف</button></div></div>' +
     '<div class="group-detail-block"><div class="group-detail-title">الأعضاء ('+members.length+(detail.membersTruncated?"+":"")+')</div>' +
     '<div class="group-member-list">'+memberRows+'</div>' +
     (detail.membersTruncated?'<div class="meta" style="white-space:normal">تُعرض أول 500 عضوية فقط.</div>':"")+'</div>' +
     '<div class="group-detail-block"><div class="group-detail-title">إعدادات الروابط</div>' +
-    settingRow("antiLink","حذف الرسائل التي تحتوي روابط",detail.antiLinkEnabled) +
+    settingRow("antiLink","منع الروابط وحذفها عند توفر الصلاحية",detail.antiLinkEnabled) +
     settingRow("inspectInvite","فحص روابط دعوة واتساب",detail.inspectInviteEnabled) +
-    '<div class="meta" style="white-space:normal;margin-top:8px">'+
-    (canManage?"حذف الروابط يتطلب أن يكون رقم واتساب مشرفاً وله صلاحية حذف الرسائل.":"تفعيل إعدادات الحماية متاح عندما يكون رقم واتساب مشرفاً.")+
-    '</div></div>' +
+    '<div class="meta" style="white-space:normal;margin-top:8px">فحص روابط الدعوة يعمل دون صلاحية أدمن ما دام البوت عضواً في المجموعة. حذف رسالة شخص آخر يتطلب أن يكون البوت مشرفاً؛ إذا لم يكن مشرفاً، يحاول إرسال رسالة تنبيه مخصصة مع الإشارة إلى صاحب الرابط، بشرط أن تسمح المجموعة للأعضاء بالكتابة.</div>' +
+    '<div class="fld" style="margin-top:12px"><label for="antiLinkWarningMessage">رسالة التنبيه عند تعذّر الحذف</label>' +
+    '<textarea id="antiLinkWarningMessage" maxlength="1000" placeholder="مثال: الرجاء عدم إرسال الروابط هنا">'+
+    esc(detail.groupMessages?.antiLinkWarningMessage||"")+'</textarea>' +
+    '<div class="meta">إذا كان البوت مشرفاً وحذف الرابط بنجاح، لن يرسل تنبيهاً إضافياً.</div></div>' +
+    '<button class="btn btn-s btn-sm" data-link-warning-save>حفظ رسالة التنبيه</button></div>' +
+    '<div class="group-detail-block"><div class="group-detail-title">فلتر الكلمات الممنوعة</div>' +
+    '<label class="group-message-toggle"><input id="bannedWordsEnabled" type="checkbox" style="width:18px;height:18px;margin:0" '+
+    (detail.groupMessages?.bannedWordsEnabled?"checked":"")+'><span>تفعيل فلتر الكلمات</span></label>' +
+    '<div class="fld"><label for="bannedWords">الكلمات والعبارات الممنوعة</label><textarea id="bannedWords" maxlength="2000" placeholder="كلمة أو عبارة في كل سطر">'+
+    esc((detail.groupMessages?.bannedWords||[]).join("\\n"))+'</textarea><div class="meta">أدخل كلمة أو عبارة في كل سطر، حتى 50 بنداً. تتم المطابقة دون اعتبار للتشكيل أو اختلاف الهمزات.</div></div>' +
+    '<div class="fld"><label for="bannedWordWarningMessage">رسالة التنبيه عند تعذّر الحذف</label><textarea id="bannedWordWarningMessage" maxlength="1000" placeholder="مثال: الرجاء الالتزام بقواعد المجموعة">'+
+    esc(detail.groupMessages?.bannedWordWarningMessage||"")+'</textarea></div>' +
+    '<div class="meta" style="white-space:normal">إعداد الفلتر لا يتطلب أدمن. حذف رسالة عضو آخر يتطلب أن يكون البوت مشرفاً؛ وإلا يرسل التنبيه إذا سمحت المجموعة للأعضاء بالكتابة.</div>' +
+    '<button class="btn btn-s btn-sm" data-word-filter-save>حفظ فلتر الكلمات</button></div>' +
+    '<div class="group-detail-block"><div class="group-detail-title">رسائل الترحيب والوداع</div>' +
+    '<label class="group-message-toggle"><input id="welcomeEnabled" type="checkbox" style="width:18px;height:18px;margin:0" '+
+    (detail.groupMessages?.welcomeEnabled?"checked":"")+'><span>تفعيل رسالة الترحيب عند انضمام عضو</span></label>' +
+    '<div class="fld"><label for="welcomeMessage">نص الترحيب</label><textarea id="welcomeMessage" maxlength="1000">'+
+    esc(detail.groupMessages?.welcomeMessage||"")+'</textarea></div>' +
+    '<label class="group-message-toggle"><input id="goodbyeEnabled" type="checkbox" style="width:18px;height:18px;margin:0" '+
+    (detail.groupMessages?.goodbyeEnabled?"checked":"")+'><span>تفعيل رسالة الوداع عند مغادرة عضو</span></label>' +
+    '<div class="fld"><label for="goodbyeMessage">نص الوداع</label><textarea id="goodbyeMessage" maxlength="1000">'+
+    esc(detail.groupMessages?.goodbyeMessage||"")+'</textarea></div>' +
+    '<div class="meta" style="white-space:normal">المتغيرات: <code>_nem</code> اسم العضو، <code>_time</code> الوقت بتوقيت الخرطوم، <code>_nemgrob</code> اسم المجموعة. اكتب المتغير كما هو مع الشرطة السفلية.</div>' +
+    '<button class="btn btn-p btn-sm" data-group-messages-save>حفظ رسائل الترحيب والوداع</button></div>' +
     '<div class="group-detail-block"><div class="group-detail-title">🗓️ النشر التلقائي</div>' +
-    '<div class="meta" style="white-space:normal">ينشر عنوان المقال ورابطه فقط من قوائم موضوع العامة، ولا ينسخ نص المقال. الأوقات بتوقيت الخرطوم وسجل منع التكرار محفوظ للمجموعة.</div>' +
+    '<div class="meta" style="white-space:normal">ينشر مقالاً من موضوع كاملاً أو مقتطفاً بالطول المحدد أو بالذكاء الاصطناعي، بدون رابط أو اسم الكاتب. القصص تُنشر كاملة عند اختيار الذكاء. الأوقات بتوقيت الخرطوم وسجل منع التكرار محفوظ للمجموعة.</div>' +
     autoPostRows +
     '<div class="auto-post-form"><div class="fld"><label for="autoPostTopic">نوع المحتوى أو موضوع البحث</label>' +
     '<input type="text" id="autoPostTopic" list="autoPostTopics" maxlength="60" '+
@@ -653,11 +915,46 @@ function renderGroupDetails(){
     '<input type="text" id="autoPostTimes" maxlength="63" placeholder="08:30, 20:15" '+
     'value="'+esc((editingAutoPost?.times||[]).join(", "))+'" '+(canManage?"":"disabled")+'>' +
     '<div class="meta">أدخل حتى 8 أوقات بصيغة 24 ساعة، مفصولة بفواصل. الإعداد الجديد يبدأ متوقفاً.</div></div>' +
+    '<div class="fld"><label for="autoPostMode">طريقة اختيار المقتطف</label>' +
+    '<select id="autoPostMode" '+(canManage?"":"disabled")+'>' +
+    '<option value="length" '+(editingAutoPost?.excerptMode!=="ai"?"selected":"")+'>عدد أحرف محدد</option>' +
+    '<option value="ai" '+(editingAutoPost?.excerptMode==="ai"?"selected":"")+'>الذكاء الاصطناعي (النموذج المختار في قسم الذكاء)</option>' +
+    '<option value="full" '+(editingAutoPost?.excerptMode==="full"?"selected":"")+'>المقال كاملاً بدون اختصار</option></select></div>' +
+    '<div class="fld" id="autoPostAiFields" style="display:'+(editingAutoPost?.excerptMode==="ai"?"block":"none")+'"><label for="autoPostAiPrompt">تعليمات الذكاء للنشر (اختياري)</label>' +
+    '<textarea id="autoPostAiPrompt" maxlength="2000" placeholder="مثال: اختر أهم المعلومات ورتبها في نقاط" '+(canManage?"":"disabled")+'>'+esc(editingAutoPost?.aiPrompt||"")+'</textarea>' +
+    '<div class="meta">يُستخدم مع الذكاء للمقالات العادية. للقصص تُنشر كاملة كما هي دون برومبت حتى لا تُختصر.</div></div>' +
+    '<div class="fld" id="autoPostLengthFields" style="display:'+(editingAutoPost?.excerptMode && editingAutoPost?.excerptMode!=="length"?"none":"block")+'"><label for="autoPostLength">الحد الأقصى لأحرف المقتطف</label>' +
+    '<input type="number" id="autoPostLength" min="50" max="12000" step="1" value="'+esc(editingAutoPost?.excerptLength||500)+'" '+(canManage?"":"disabled")+'>' +
+    '<div class="meta">من 50 إلى 12000 حرف، الافتراضي 500 حرف.</div></div>' +
     '<button class="btn btn-p btn-sm" data-auto-save '+(canManage?"":"disabled")+'>' +
     (editingAutoPost?"حفظ التعديل":"إضافة جدول نشر")+'</button> '+
     (editingAutoPost?'<button class="btn btn-s btn-sm" data-auto-cancel-edit>إلغاء التعديل</button>':"")+
     (!canManage?'<div class="meta" style="white-space:normal;margin-top:8px">تتطلب إدارة النشر التلقائي أن يكون رقم واتساب المرتبط مشرفاً.</div>':"")+
     '</div></div>' +
+    '<div class="group-detail-block"><div class="group-detail-title">⏰ تذكيرات المجموعة</div>' +
+    '<div class="meta" style="white-space:normal">ترسل رسالة في الأيام والأوقات المحددة بتوقيت الخرطوم. يمكنك إيقافها أو استئنافها أو حذفها. يتطلب الإعداد أن يكون البوت مشرفاً.</div>' +
+    reminderRows +
+    '<div class="auto-post-form"><div class="fld"><label for="groupReminderMessage">رسالة التذكير</label>' +
+    '<textarea id="groupReminderMessage" maxlength="1000" '+(canManage?"":"disabled")+'>'+
+    esc(editingReminder?.message||"")+'</textarea><div class="meta">حتى 1000 حرف.</div></div>' +
+    '<div class="fld"><label for="groupReminderTime">وقت الإرسال</label><input id="groupReminderTime" type="time" value="'+
+    esc(editingReminder?.time||"09:00")+'" '+(canManage?"":"disabled")+'></div>' +
+    '<div class="fld"><div class="meta">أيام الإرسال</div><div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">'+reminderDayInputs+'</div></div>' +
+    '<button class="btn btn-p btn-sm" data-reminder-save '+(canManage?"":"disabled")+'>'+
+    (editingReminder?"حفظ التذكير":"إضافة وتفعيل التذكير")+'</button> '+
+    (editingReminder?'<button class="btn btn-s btn-sm" data-reminder-cancel>إلغاء التعديل</button>':"")+
+    (!canManage?'<div class="meta" style="white-space:normal;margin-top:8px">إدارة التذكيرات متاحة عندما يكون رقم واتساب المرتبط مشرفاً في المجموعة.</div>':"")+
+    '</div></div>' +
+    '<div class="group-detail-block"><div class="group-detail-title">جدولة فتح وإغلاق الكتابة</div>' +
+    '<label class="group-message-toggle"><input id="groupLockScheduleEnabled" type="checkbox" style="width:18px;height:18px;margin:0" '+
+    (detail.lockSchedule?.enabled?"checked":"")+'><span>تفعيل الجدولة اليومية</span></label>' +
+    '<div class="fld"><label for="groupLockCloseTime">وقت قفل الكتابة</label><input id="groupLockCloseTime" type="time" value="'+
+    esc(detail.lockSchedule?.closeTime||"22:00")+'"></div>' +
+    '<div class="fld"><label for="groupLockOpenTime">وقت فتح الكتابة</label><input id="groupLockOpenTime" type="time" value="'+
+    esc(detail.lockSchedule?.openTime||"07:00")+'"></div>' +
+    '<div class="meta" style="white-space:normal">الأوقات بتوقيت الخرطوم. يتطلب تفعيل الجدولة أن يكون البوت مشرفاً. يراجع البوت حالة المجموعة كل 30 ثانية، ويعيد ضبطها حسب الجدول حتى لو تغيرت يدوياً.</div>' +
+    (detail.lockSchedule?.lastError?'<div class="meta" style="white-space:normal;color:var(--danger);margin-top:8px">تعذّر تطبيق الجدولة: '+esc(detail.lockSchedule.lastError)+'</div>':"")+
+    '<button class="btn btn-p btn-sm" data-group-lock-schedule-save>حفظ جدول الفتح والإغلاق</button></div>' +
     '<div class="group-detail-block"><div class="group-detail-title">إدارة المجموعة</div>' +
     '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
     '<button class="btn btn-s btn-sm" data-group-action="rename" '+(canManage?"":"disabled")+'>تغيير الاسم</button>' +
@@ -676,6 +973,38 @@ function renderGroupDetails(){
   sh.querySelectorAll("[data-group-setting]").forEach(button=>{
     button.addEventListener("click", ()=>toggleGroupSetting(button.dataset.groupSetting));
   });
+  sh.querySelector("[data-link-warning-save]")?.addEventListener("click", saveGroupLinkWarningMessage);
+  sh.querySelector("[data-word-filter-save]")?.addEventListener("click", saveGroupWordFilterSettings);
+  sh.querySelector("[data-group-messages-save]")?.addEventListener("click", saveGroupMessageTemplates);
+  sh.querySelector("[data-group-lock-schedule-save]")?.addEventListener("click", saveGroupLockSchedule);
+  sh.querySelector("[data-reminder-save]")?.addEventListener("click", saveGroupReminder);
+  sh.querySelector("[data-reminder-cancel]")?.addEventListener("click", ()=>{
+    GROUP_REMINDER_EDIT_ID = null;
+    renderGroupDetails();
+  });
+  sh.querySelectorAll("[data-reminder-edit]").forEach(button=>
+    button.addEventListener("click", ()=>editGroupReminder(button.dataset.reminderEdit))
+  );
+  sh.querySelectorAll("[data-reminder-toggle]").forEach(button=>
+    button.addEventListener("click", ()=>toggleGroupReminder(button.dataset.reminderToggle))
+  );
+  sh.querySelectorAll("[data-reminder-delete]").forEach(button=>
+    button.addEventListener("click", ()=>deleteGroupReminder(button.dataset.reminderDelete))
+  );
+  const blocks = Array.from(sh.querySelectorAll('.group-detail-block'));
+  const shortcuts = document.createElement('nav');
+  shortcuts.className = 'group-shortcuts';
+  shortcuts.setAttribute('aria-label', 'الانتقال إلى إعدادات المجموعة');
+  blocks.forEach(block => {
+    const title = block.querySelector('.group-detail-title')?.textContent;
+    if (!title) return;
+    const button = document.createElement('button');
+    button.type = 'button'; button.textContent = title;
+    button.addEventListener('click', () => block.scrollIntoView({behavior:'smooth',block:'start'}));
+    shortcuts.appendChild(button);
+  });
+  if (blocks[0]) blocks[0].before(shortcuts);
+  sh.querySelector('[data-copy-description]')?.addEventListener('click', copyGroupDescription);
   sh.querySelectorAll("[data-group-action]").forEach(button=>{
     button.addEventListener("click", ()=>runGroupAdminAction(button.dataset.groupAction));
   });
@@ -693,6 +1022,11 @@ function renderGroupDetails(){
   sh.querySelectorAll("[data-auto-test]").forEach(button=>
     button.addEventListener("click", ()=>testGroupAutoPost(button.dataset.autoTest, button))
   );
+  sh.querySelector("#autoPostMode")?.addEventListener("change", (event) => {
+    const ai = event.target.value === "ai";
+    sh.querySelector("#autoPostAiFields").style.display = ai ? "block" : "none";
+    sh.querySelector("#autoPostLengthFields").style.display = event.target.value === "length" ? "block" : "none";
+  });
   sh.querySelectorAll("[data-auto-publish]").forEach(button=>
     button.addEventListener("click", ()=>publishGroupAutoPost(button.dataset.autoPublish, button))
   );
@@ -715,6 +1049,10 @@ async function saveGroupAutoPost(){
   if (!GROUP_DETAIL) return;
   const topic = String(document.getElementById("autoPostTopic")?.value||"").trim();
   const times = String(document.getElementById("autoPostTimes")?.value||"").trim();
+  const excerptMode = String(document.getElementById("autoPostMode")?.value || "length");
+  const aiPrompt = String(document.getElementById("autoPostAiPrompt")?.value || "").trim();
+  const excerptLength = Number(document.getElementById("autoPostLength")?.value);
+  if (!Number.isInteger(excerptLength) || excerptLength < 50 || excerptLength > 12000) return toast("⚠️ حدد طول المقتطف بين 50 و12000 حرف");
   if (!topic || !times) return toast("⚠️ أدخل نوع المحتوى ومواعيد النشر");
   const button = document.querySelector("[data-auto-save]");
   const editing = !!AUTO_POST_EDIT_ID;
@@ -725,7 +1063,10 @@ async function saveGroupAutoPost(){
       phoneNumber: GROUP_DETAIL.phoneNumber || "",
       autoPostId: AUTO_POST_EDIT_ID,
       topic,
-      times
+      times,
+      excerptLength,
+      excerptMode,
+      aiPrompt
     });
     AUTO_POST_EDIT_ID = null;
     toast(editing?"✅ تم تحديث الجدول":"✅ تمت إضافة الجدول وهو متوقف");
@@ -742,7 +1083,7 @@ async function toggleGroupAutoPost(autoPostId){
   if (!item) return toast("❌ إعداد النشر غير موجود");
   const enabled = !item.enabled;
   if (!confirm(enabled
-    ? "سيُنشر عنوان ورابط من موضوع في الأوقات المحددة. هل تريد التفعيل؟"
+    ? "سينشر البوت عنوان المقال ومقتطفه بدون رابط أو اسم الكاتب من موضوع في الأوقات المحددة. هل تريد التفعيل؟"
     : "إيقاف النشر التلقائي لهذا الجدول؟")) return;
   try {
     await api("/api/fw/groups/autopost/toggle", {
@@ -763,14 +1104,14 @@ async function testGroupAutoPost(autoPostId, button){
   button.textContent = "جارٍ اختبار المصدر…";
   const preview = Array.from(document.querySelectorAll("[data-auto-preview]"))
     .find(element=>element.dataset.autoPreview===autoPostId);
-  if (preview) preview.textContent = "جارٍ جلب عنوان ورابط من موضوع…";
+  if (preview) preview.textContent = "جارٍ جلب المقال ونصه من موضوع…";
   try {
     const item = await api("/api/fw/groups/autopost/test", {
       id: GROUP_DETAIL.id,
       phoneNumber: GROUP_DETAIL.phoneNumber || "",
       autoPostId
     });
-    if (preview) preview.innerHTML = '<div>'+esc(item.title)+'</div><a href="'+esc(item.url)+'" target="_blank" rel="noopener noreferrer">فتح المصدر في موضوع</a>';
+    if (preview) preview.innerHTML = '<div><strong>'+esc(item.title)+'</strong></div><div style="white-space:pre-wrap;margin:7px 0">'+esc(String(item.content||""))+'</div><a href="'+esc(item.url)+'" target="_blank" rel="noopener noreferrer">فتح المصدر في موضوع</a>';
     toast("✅ نجح اختبار الجلب؛ لم تُرسل رسالة للمجموعة");
   } catch(e) {
     if (preview) preview.innerHTML = '<div class="auto-post-error">'+esc(e.message)+'</div>';
@@ -783,7 +1124,7 @@ async function testGroupAutoPost(autoPostId, button){
 
 async function publishGroupAutoPost(autoPostId, button){
   if (!GROUP_DETAIL) return;
-  if (!confirm("سيتم نشر عنوان ورابط واحد الآن في المجموعة. هل تريد المتابعة؟")) return;
+  if (!confirm("سيتم نشر عنوان المقال ومقتطفه بدون رابط أو اسم الكاتب في المجموعة الآن. هل تريد المتابعة؟")) return;
   const original = button.textContent;
   button.disabled = true;
   button.textContent = "جارٍ النشر…";
@@ -793,7 +1134,7 @@ async function publishGroupAutoPost(autoPostId, button){
       phoneNumber: GROUP_DETAIL.phoneNumber || "",
       autoPostId
     });
-    toast("✅ تم نشر العنوان والرابط");
+    toast("✅ تم نشر عنوان المقال ومقتطفه");
     await openGroupDetails(GROUP_DETAIL.id);
   } catch(e) {
     toast("❌ "+e.message);
@@ -832,6 +1173,157 @@ async function toggleGroupSetting(setting){
   } catch(e) {
     toast("❌ " + e.message);
   }
+}
+
+async function saveGroupLinkWarningMessage(){
+  if (!GROUP_DETAIL) return;
+  try {
+    const result = await api("/api/fw/groups/link-warning", {
+      id: GROUP_DETAIL.id,
+      phoneNumber: GROUP_DETAIL.phoneNumber || "",
+      message: document.getElementById("antiLinkWarningMessage")?.value || ""
+    });
+    GROUP_DETAIL = {
+      ...GROUP_DETAIL,
+      groupMessages: { ...(GROUP_DETAIL.groupMessages||{}), ...result }
+    };
+    renderGroupDetails();
+    toast("✅ تم حفظ رسالة تنبيه الروابط");
+  } catch(e) {
+    toast("❌ "+e.message);
+  }
+}
+
+async function saveGroupWordFilterSettings(){
+  if (!GROUP_DETAIL) return;
+  try {
+    const result = await api("/api/fw/groups/word-filter", {
+      id: GROUP_DETAIL.id,
+      phoneNumber: GROUP_DETAIL.phoneNumber || "",
+      enabled: !!document.getElementById("bannedWordsEnabled")?.checked,
+      words: document.getElementById("bannedWords")?.value || "",
+      warningMessage: document.getElementById("bannedWordWarningMessage")?.value || ""
+    });
+    GROUP_DETAIL = {
+      ...GROUP_DETAIL,
+      groupMessages: { ...(GROUP_DETAIL.groupMessages||{}), ...result }
+    };
+    renderGroupDetails();
+    toast(result.bannedWordsEnabled ? "✅ تم تفعيل فلتر الكلمات" : "✅ تم إيقاف فلتر الكلمات");
+  } catch(e) {
+    toast("❌ "+e.message);
+  }
+}
+
+async function saveGroupMessageTemplates(){
+  if (!GROUP_DETAIL) return;
+  try {
+    const result = await api("/api/fw/groups/messages", {
+      id: GROUP_DETAIL.id,
+      phoneNumber: GROUP_DETAIL.phoneNumber || "",
+      welcomeEnabled: !!document.getElementById("welcomeEnabled")?.checked,
+      welcomeMessage: document.getElementById("welcomeMessage")?.value || "",
+      goodbyeEnabled: !!document.getElementById("goodbyeEnabled")?.checked,
+      goodbyeMessage: document.getElementById("goodbyeMessage")?.value || ""
+    });
+    GROUP_DETAIL = {
+      ...GROUP_DETAIL,
+      groupMessages: { ...(GROUP_DETAIL.groupMessages||{}), ...result }
+    };
+    renderGroupDetails();
+    toast("✅ تم حفظ رسائل الترحيب والوداع");
+  } catch(e) {
+    toast("❌ "+e.message);
+  }
+}
+
+async function saveGroupLockSchedule(){
+  if (!GROUP_DETAIL) return;
+  try {
+    const result = await api("/api/fw/groups/lock-schedule", {
+      id: GROUP_DETAIL.id,
+      phoneNumber: GROUP_DETAIL.phoneNumber || "",
+      enabled: !!document.getElementById("groupLockScheduleEnabled")?.checked,
+      closeTime: document.getElementById("groupLockCloseTime")?.value || "",
+      openTime: document.getElementById("groupLockOpenTime")?.value || ""
+    });
+    GROUP_DETAIL = { ...GROUP_DETAIL, lockSchedule: result };
+    renderGroupDetails();
+    toast(result.enabled ? "✅ تم تفعيل جدول فتح وإغلاق القروب" : "✅ تم إيقاف جدول المجموعة");
+  } catch(e) {
+    toast("❌ "+e.message);
+  }
+}
+
+function editGroupReminder(reminderId){
+  if (!GROUP_DETAIL) return;
+  GROUP_REMINDER_EDIT_ID = reminderId;
+  renderGroupDetails();
+  document.getElementById("groupReminderMessage")?.focus();
+}
+
+async function saveGroupReminder(){
+  if (!GROUP_DETAIL) return;
+  const message = String(document.getElementById("groupReminderMessage")?.value||"").trim();
+  const time = String(document.getElementById("groupReminderTime")?.value||"").trim();
+  const days = Array.from(document.querySelectorAll('input[name="groupReminderDay"]:checked'))
+    .map(input=>Number(input.value));
+  if (!message) return toast("⚠️ اكتب رسالة التذكير");
+  if (!days.length) return toast("⚠️ اختر يوماً واحداً على الأقل");
+  const button = document.querySelector("[data-reminder-save]");
+  const editing = !!GROUP_REMINDER_EDIT_ID;
+  if (button) { button.disabled = true; button.textContent = "جارٍ الحفظ…"; }
+  const groupId = GROUP_DETAIL.id;
+  try {
+    await api("/api/fw/groups/reminders/save", {
+      id: groupId,
+      phoneNumber: GROUP_DETAIL.phoneNumber || "",
+      reminderId: GROUP_REMINDER_EDIT_ID,
+      message,
+      time,
+      days
+    });
+    GROUP_REMINDER_EDIT_ID = null;
+    toast(editing?"✅ تم تحديث التذكير":"✅ تمت إضافة التذكير وتفعيله");
+    await openGroupDetails(groupId);
+  } catch(e) {
+    toast("❌ "+e.message);
+    if (button) { button.disabled = false; button.textContent = editing?"حفظ التذكير":"إضافة وتفعيل التذكير"; }
+  }
+}
+
+async function toggleGroupReminder(reminderId){
+  if (!GROUP_DETAIL) return;
+  const item = (GROUP_DETAIL.reminders||[]).find(entry=>entry.id===reminderId);
+  if (!item) return toast("❌ التذكير غير موجود");
+  const enabled = !item.enabled;
+  if (!confirm(enabled?"استئناف إرسال هذا التذكير؟":"إيقاف هذا التذكير؟")) return;
+  const groupId = GROUP_DETAIL.id;
+  try {
+    await api("/api/fw/groups/reminders/toggle", {
+      id: groupId,
+      phoneNumber: GROUP_DETAIL.phoneNumber || "",
+      reminderId,
+      enabled
+    });
+    toast(enabled?"✅ تم استئناف التذكير":"⏸️ تم إيقاف التذكير");
+    await openGroupDetails(groupId);
+  } catch(e) { toast("❌ "+e.message); }
+}
+
+async function deleteGroupReminder(reminderId){
+  if (!GROUP_DETAIL || !confirm("حذف هذا التذكير نهائياً؟")) return;
+  const groupId = GROUP_DETAIL.id;
+  try {
+    await api("/api/fw/groups/reminders/delete", {
+      id: groupId,
+      phoneNumber: GROUP_DETAIL.phoneNumber || "",
+      reminderId
+    });
+    if (GROUP_REMINDER_EDIT_ID === reminderId) GROUP_REMINDER_EDIT_ID = null;
+    toast("🗑 تم حذف التذكير");
+    await openGroupDetails(groupId);
+  } catch(e) { toast("❌ "+e.message); }
 }
 
 async function runGroupAdminAction(action){
@@ -882,6 +1374,21 @@ async function showGroupInvite(){
   } finally {
     if (button) { button.disabled = false; button.textContent = "عرض رابط الدعوة"; }
   }
+}
+
+async function copyGroupDescription(){
+  const text = GROUP_DETAIL?.description;
+  if (!text) return toast('لا يوجد وصف لنسخه');
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+    else {
+      const input = document.createElement('textarea'); input.value = text;
+      input.style.position = 'fixed'; input.style.opacity = '0'; document.body.appendChild(input);
+      input.select(); const ok = document.execCommand('copy'); input.remove();
+      if (!ok) throw new Error('copy failed');
+    }
+    toast('✅ تم نسخ وصف المجموعة');
+  } catch { toast('تعذّر النسخ من هذا المتصفح'); }
 }
 
 async function copyGroupInvite(){
@@ -1076,7 +1583,7 @@ async function delRule(){
 }
 
 load();
-setInterval(load, 30000);
+setInterval(()=>{if(!document.hidden)load()}, 30000);
 </script>
 </body>
 </html>`;

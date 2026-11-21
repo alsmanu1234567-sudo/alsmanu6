@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { listButton, quickReply, sendInteractive } from "../../services/interactive.js";
+import { listButton, quickReply, sendInteractive, extractInteractiveResponseId } from "../../services/interactive.js";
 import {
   groupWorldService as defaultGroupWorldService,
   groupWorldDayKey,
@@ -58,6 +58,8 @@ function unwrappedMessageContent(message) {
 
 function messageInteractionId(message) {
   const content = unwrappedMessageContent(message);
+  const extracted = extractInteractiveResponseId(message);
+  if (extracted?.startsWith("gw:")) return extracted;
   const direct = [
     content.buttonsResponseMessage?.selectedButtonId,
     content.listResponseMessage?.singleSelectReply?.selectedRowId,
@@ -330,10 +332,7 @@ async function sendInteractiveList(sock, groupId, text, title, rows, options = {
     text,
     footer: options.footer,
     imageMessage: options.imageMessage,
-    buttons: [listButton(title, [{
-      title: options.sectionTitle || "الخيارات",
-      rows,
-    }])],
+    buttons: [listButton(title, Array.from({length: Math.ceil(rows.length / 10)}, (_,i) => ({ title: i ? `الخيارات ${i+1}` : options.sectionTitle || "الخيارات", rows: rows.slice(i*10,i*10+10) })))],
   });
 }
 
@@ -421,20 +420,35 @@ function formatMemberLine(member, index) {
 }
 
 function xoBoardText(game) {
-  const cells = game.board.map((cell, index) => cell || String(index + 1));
+  const cells = game.board.map((cell, index) => cell === "X" ? "❌" : cell === "O" ? "⭕" : String(index + 1));
   return `${cells.slice(0, 3).join(" │ ")}\n───┼───┼───\n${cells.slice(3, 6).join(" │ ")}\n───┼───┼───\n${cells.slice(6, 9).join(" │ ")}`;
 }
 
 async function sendXoBoard(sock, groupId, game) {
   const playerName = (id) => game.names?.[id] || id?.split("@")[0] || "لاعب";
-  let text = `🎮 مباراة X و O\nX: ${playerName(game.xPlayer)}\nO: ${playerName(game.oPlayer)}\n\n${xoBoardText(game)}\n\n`;
+  let text = `🎮 *مباراة X و O*\n❌ ${playerName(game.xPlayer)}\n⭕ ${playerName(game.oPlayer)}\n\n${xoBoardText(game)}\n\n`;
   const buttons = [];
   if (game.status === "active") {
-    text += `الدور الآن: ${game.turn === game.xPlayer ? "X" : "O"} — ${playerName(game.turn)}`;
-    for (let index = 0; index < 9; index += 1) {
-      if (!game.board[index]) buttons.push({ id: `gw:xo:${game.id}:move:${index}`, title: `الخانة ${index + 1}` });
+    text += `الدور الآن: ${game.turn === game.xPlayer ? "X" : "O"} — ${playerName(game.turn)}\nاختر رقم الخانة الفارغة من الأزرار أدناه.`;
+    for (const [index, cell] of game.board.entries()) {
+      if (!cell) buttons.push({
+        id: `gw:xo:${game.id}:move:${index}`,
+        title: String(index + 1),
+      });
     }
-    buttons.push({ id: `gw:xo:${game.id}:cancel`, title: "إلغاء المباراة" });
+    buttons.push({
+      id: `gw:xo:${game.id}:cancel`,
+      title: "إلغاء",
+    });
+    let sentInteractive = false;
+    try {
+      await sendNativeInteractive(sock, groupId, { text, buttons, footer: "أزرار مباشرة — الحركة لصاحب الدور فقط." });
+      sentInteractive = true;
+    } catch (error) {
+      _deps.logger?.warn?.({err:String(error),groupId}, "XO interactive send failed; using text board");
+    }
+    // Some clients silently omit native-flow buttons even after a successful relay.
+    return sendText(sock, groupId, `${text}\n${sentInteractive ? "إذا لم تظهر الأزرار، " : ""}اكتب .اكس_او 5 ${game.id} للعب، أو .اكس_او الغاء ${game.id} للإلغاء.`);
   } else if (game.status === "draw") {
     text += "انتهت المباراة بالتعادل.";
     buttons.push({ id: `gw:xo:${game.id}:replay`, title: "إعادة اللعب" });
@@ -465,7 +479,7 @@ const HELP_SECTIONS = {
   },
   games: {
     title: "أوامر الألعاب",
-    text: "• .الألعاب — قائمة الألعاب\n• .اكس_او @الخصم — مباراة X و O\n• .تحدي @الخصم — تحدٍ آلي بين عضوين\n• .زعيم — حالة زعيم المجموعة\n• .صيد الكلمات — بدء صيد كلمة",
+    text: "• .الألعاب — قائمة الألعاب\n• .اكس_او — مباراة X و O للاعبين\n• .لودو — لعبة لودو للاعبين إلى أربعة\n• .شطرنج · .سنيك · .اركيد — ألعاب نافذة\n• .تحدي @الخصم — تحدٍ آلي بين عضوين\n• .زعيم — حالة زعيم المجموعة\n• .صيد الكلمات — بدء صيد كلمة",
   },
   challenges: {
     title: "أوامر التحديات",
@@ -492,6 +506,10 @@ async function sendHelpMenu(sock, groupId) {
 async function sendGamesMenu(sock, groupId) {
   return sendInteractiveList(sock, groupId, "اختر لعبة أو نشاطاً لمعرفة طريقة تشغيله.", "الألعاب والأنشطة", [
     { id: "gw:games:xo", title: "لعبة X و O", description: "مباراة مباشرة بين عضوين" },
+    { id: "gw:games:ludo", title: "لودو رويال", description: "لعبة من ٢ إلى ٤ لاعبين" },
+    { id: "gw:games:chess", title: "الشطرنج", description: "لعبة شطرنج" },
+    { id: "gw:games:snake", title: "الثعبان", description: "لعبة سنيك" },
+    { id: "gw:games:arcade", title: "سباق السيارات", description: "لعبة أركيد" },
     { id: "gw:games:challenges", title: "تحديات الأعضاء", description: "15 نوعاً من التحديات الآلية" },
     { id: "gw:games:boss", title: "زعيم المجموعة", description: "هجوم جماعي على الزعيم" },
     { id: "gw:games:treasure", title: "البحث عن الكنز", description: "حل الألغاز للفوز" },
@@ -537,7 +555,9 @@ async function handleGroupWorldInteraction(userId, sock, groupId, memberId, inte
   if (interactionId.startsWith("gw:games:")) {
     const action = interactionId.slice("gw:games:".length);
     const instructions = {
-      xo: "لبدء مباراة: .اكس_او @الخصم",
+      xo: "لبدء مباراة لاعبين: .اكس_او",
+      ludo: "لبدء طاولة لودو لاثنين إلى أربعة لاعبين: .لودو",
+      chess: "لبدء الشطرنج: .شطرنج", snake: "لبدء سنيك: .سنيك", arcade: "لبدء لعبة السيارات: .اركيد",
       challenges: "لبدء تحدٍ: .تحدي @الخصم — ثم يقبل الخصم باسم التحدي",
       boss: "عرض حالة الزعيم: .زعيم · المساهمة في الهجوم: .زعيم هجوم",
       treasure: "بدء البحث عن الكنز أو عرض التلميح: .كنز · أرسل الحل: .حل <الإجابة>",
@@ -574,7 +594,7 @@ async function handleGroupWorldInteraction(userId, sock, groupId, memberId, inte
   return null;
 }
 
-async function commandReply(sock, groupId, memberId, message, text, isBotOwner = false) {
+async function commandReply(sock, groupId, memberId, message, text, isBotOwner = false, ownerId = "") {
   const commandToken = text.trim().split(/\s+/)[0];
   const args = text.trim().slice(commandToken.length).trim();
   const name = message?.pushName || "";
@@ -590,20 +610,33 @@ async function commandReply(sock, groupId, memberId, message, text, isBotOwner =
     return sendHelpMenu(sock, groupId);
   }
 
+  const steamGame = ({'.شطرنج':'chess','.chess':'chess','.سنيك':'snake','.snake':'snake','.الثعبان':'snake','.اركيد':'arcade','.arcade':'arcade','.سيبر':'arcade'})[commandToken.toLowerCase()];
+  if (steamGame) { const {sendSteamGame}=await import("../../services/steam-games.mjs"); return sendSteamGame(sock,groupId,steamGame); }
+
+  if ([".لودو", ".ludo"].includes(commandToken.toLowerCase())) {
+    const {sendLudoGame}=await import("../../services/ludo-game.mjs");
+    return sendLudoGame({sock,chatId:groupId});
+  }
+
   if (commandToken === ".اكس_او") {
     const mentioned = message?.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-    if (!mentioned.length) return sendText(sock, groupId, "استخدم: .اكس_او @الخصم");
-    const metadata = await sock.groupMetadata(groupId);
-    const opponent = (metadata.participants || []).find((item) =>
-      [item.id, item.jid, item.pn, item.lid].some((value) => sameMember(value, mentioned[0]))
-    );
-    if (!opponent) return sendText(sock, groupId, "يجب أن يكون الخصم عضوًا حاليًا في المجموعة.");
-    const opponentId = opponent.id || opponent.jid || opponent.pn || opponent.lid;
-    const game = await groupWorldService.startTicTacToe(groupId, memberId, opponentId, {
-      x: profile.name || name,
-      o: opponent.notify || opponent.name || "",
-    });
-    return sendXoBoard(sock, groupId, game);
+    if (!mentioned.length && ["نافذة", "البوت", "ultra"].includes(args.toLowerCase())) {
+      const { sendXoUltra } = await import("../../services/xo-ultra.mjs");
+      return sendXoUltra(sock, groupId);
+    }
+    const xoAction = argsList[0] || "";
+    if (!mentioned.length && (/^[1-9]$/.test(xoAction) || ["لوحة", "الغاء", "إلغاء"].includes(xoAction))) {
+      const world = await groupWorldService.getGroup(groupId);
+      const games = (world.games || []).filter(g => g.kind === "xo" && g.status === "active" && (!argsList[1] || g.id === argsList[1]) && [g.xPlayer, g.oPlayer].some(id => sameMember(id, memberId)));
+      if (!games.length) return sendText(sock, groupId, "لا توجد لك مباراة XO نشطة. ابدأ مباراة بكتابة .اكس_او @الخصم");
+      if (games.length > 1) return sendText(sock, groupId, "لديك أكثر من مباراة نشطة؛ أعد إرسال .اكس_او مع منشن الخصم لعرض لوحتها.");
+      const game = games[0];
+      if (xoAction === "لوحة") return sendXoBoard(sock, groupId, game);
+      if (xoAction === "الغاء" || xoAction === "إلغاء") return sendXoBoard(sock, groupId, await groupWorldService.cancelTicTacToe(groupId, game.id, memberId));
+      return sendXoBoard(sock, groupId, await groupWorldService.moveTicTacToe(groupId, game.id, memberId, Number(xoAction)-1));
+    }
+    const {createSharedGame}=await import("../../services/xo-shared.mjs");
+    return createSharedGame({sock,chatId:groupId});
   }
 
   if (commandToken === ".نقاطي") {
@@ -1128,7 +1161,7 @@ export async function handleGroupWorldMessage(userId, sock, message, eventType =
   const text = messageText(message);
   const interactionId = messageInteractionId(message);
   const fromMe = message?.key?.fromMe === true;
-  if (fromMe && (eventType !== "notify" || !text.startsWith("."))) return null;
+  if (fromMe && (eventType !== "notify" || (!text.startsWith(".") && !interactionId))) return null;
   if (fromMe && !(await isCurrentSocketOwnerMessage(groupId, sock, message))) return null;
   const memberId = fromMe
     ? await ownerMemberId(groupId, sock, message)
@@ -1136,6 +1169,11 @@ export async function handleGroupWorldMessage(userId, sock, message, eventType =
   if (!memberId || (!text && !interactionId)) return null;
 
   try {
+    if ([".تفعيل العالم", ".تعطيل العالم"].includes(text.trim())) {
+      return await handleWorldToggle(userId, sock, message, groupId, memberId, text, fromMe);
+    }
+    const world = await groupWorldService.getGroup(groupId);
+    if (!world?.enabled) return null;
     if (interactionId) {
       const eventId = String(message?.key?.id || "");
       const dedupeKey = `${groupId}:${eventId}`;
@@ -1148,9 +1186,6 @@ export async function handleGroupWorldMessage(userId, sock, message, eventType =
         }
       }
       return await handleGroupWorldInteraction(String(userId), sock, groupId, memberId, interactionId);
-    }
-    if ([".تفعيل العالم", ".تعطيل العالم"].includes(text.trim())) {
-      return await handleWorldToggle(userId, sock, message, groupId, memberId, text, fromMe);
     }
     if (text.startsWith(".")) {
       const eventId = String(message?.key?.id || "");
@@ -1166,7 +1201,7 @@ export async function handleGroupWorldMessage(userId, sock, message, eventType =
           while (commandEvents.size > 10_000) commandEvents.delete(commandEvents.keys().next().value);
         }
       }
-      const group = await groupWorldService.getGroup(groupId);
+      const group = world;
       const commandParts = text.trim().split(/\s+/);
       const commandToken = commandParts[0];
       const commandName = commandParts.slice(0, 2).join(" ");
@@ -1174,7 +1209,7 @@ export async function handleGroupWorldMessage(userId, sock, message, eventType =
         return sendText(sock, groupId, `الأمر ${commandToken} متوقف لهذه المجموعة.`);
       }
       const botOwner = fromMe && await isGroupWorldOwner(groupId, userId, sock);
-      return await commandReply(sock, groupId, memberId, message, text, botOwner);
+      return await commandReply(sock, groupId, memberId, message, text, botOwner, String(userId));
     }
     const result = await groupWorldService.processMessage({
       groupId,

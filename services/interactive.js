@@ -1,4 +1,52 @@
-import { randomUUID } from "node:crypto";
+let baileysForTests = null;
+
+export function setInteractiveBaileysForTests(baileys) {
+  baileysForTests = baileys;
+}
+
+function unwrapMessage(rawMessage) {
+  let message = rawMessage?.message || rawMessage || {};
+  for (let depth = 0; depth < 8; depth += 1) {
+    const wrapped =
+      message.ephemeralMessage?.message ||
+      message.viewOnceMessage?.message ||
+      message.viewOnceMessageV2?.message ||
+      message.viewOnceMessageV2Extension?.message ||
+      message.documentWithCaptionMessage?.message;
+    if (!wrapped || wrapped === message) break;
+    message = wrapped;
+  }
+  return message;
+}
+
+export function extractInteractiveResponseId(rawMessage) {
+  const message = unwrapMessage(rawMessage);
+  const nativeFlow = message.interactiveResponseMessage?.nativeFlowResponseMessage;
+  let params = {};
+  if (typeof nativeFlow?.paramsJson === "string") {
+    try {
+      params = JSON.parse(nativeFlow.paramsJson);
+    } catch {
+      params = {};
+    }
+  } else if (nativeFlow?.paramsJson && typeof nativeFlow.paramsJson === "object") {
+    params = nativeFlow.paramsJson;
+  }
+
+  const candidates = [
+    params.id,
+    params.selectedRowId,
+    params.selected_id,
+    params.selectedId,
+    params.row_id,
+    params.button_id,
+    params.selection_id,
+    message.buttonsResponseMessage?.selectedButtonId,
+    message.templateButtonReplyMessage?.selectedId,
+    message.listResponseMessage?.singleSelectReply?.selectedRowId,
+  ];
+  return candidates.find((value) => typeof value === "string" && value.trim())?.trim() || "";
+}
 
 function shortText(value, maxLength, field) {
   const text = String(value || "").trim();
@@ -52,6 +100,7 @@ export function urlButton(displayText, url) {
     buttonParamsJson: JSON.stringify({
       display_text: label,
       url: parsed.toString(),
+      merchant_url: parsed.toString(),
     }),
   };
 }
@@ -70,6 +119,25 @@ async function prepareImage(sock, chatId, image) {
   return media.imageMessage;
 }
 
+function buildBizNode() {
+  return {
+    tag: "biz",
+    attrs: {
+      actual_actors: "2",
+      host_storage: "2",
+      privacy_mode_ts: String(Math.floor(Date.now() / 1_000)),
+    },
+    content: [{
+      tag: "interactive",
+      attrs: { type: "native_flow", v: "1" },
+      content: [{
+        tag: "native_flow",
+        attrs: { v: "9", name: "mixed" },
+      }],
+    }],
+  };
+}
+
 export async function sendInteractive(sock, chatId, options = {}) {
   if (typeof sock?.relayMessage !== "function") {
     throw new Error("This Baileys socket cannot send interactive messages");
@@ -85,32 +153,54 @@ export async function sendInteractive(sock, chatId, options = {}) {
     JSON.parse(button.buttonParamsJson);
   }
   const imageMessage = options.imageMessage || await prepareImage(sock, chatId, options.image);
-  const contextInfo = options.quoted?.key?.id
-    ? {
-        stanzaId: String(options.quoted.key.id),
-        participant: options.quoted.key.participant || undefined,
-        remoteJid: options.quoted.key.remoteJid || chatId,
-      }
-    : undefined;
-  const messageId = randomUUID().replaceAll("-", "").slice(0, 20);
-  const message = {
-    viewOnceMessage: {
-      message: {
-        messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
-        interactiveMessage: {
-          header: {
-            title: String(options.headerTitle || "عالم المجموعات").slice(0, 60),
-            hasMediaAttachment: Boolean(imageMessage),
-            ...(imageMessage ? { imageMessage } : {}),
-          },
-          body: { text: String(options.text || "اختر من الخيارات").slice(0, 3_500) },
-          footer: { text: String(options.footer || "عالم المجموعات").slice(0, 60) },
-          nativeFlowMessage: { buttons },
-          ...(contextInfo ? { contextInfo } : {}),
+  const { proto, generateWAMessageFromContent } = baileysForTests ||
+    await import("@whiskeysockets/baileys");
+  const interactiveMessage = proto.Message.InteractiveMessage.create({
+    header: proto.Message.InteractiveMessage.Header.create({
+      title: String(options.headerTitle || "عالم المجموعات").slice(0, 60),
+      hasMediaAttachment: Boolean(imageMessage),
+      ...(imageMessage ? { imageMessage } : {}),
+    }),
+    body: proto.Message.InteractiveMessage.Body.create({
+      text: String(options.text || "اختر من الخيارات").slice(0, 3_500),
+    }),
+    footer: proto.Message.InteractiveMessage.Footer.create({
+      text: String(options.footer || "عالم المجموعات").slice(0, 60),
+    }),
+    nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+      buttons: buttons.map((button) =>
+        proto.Message.InteractiveMessage.NativeFlowMessage.NativeFlowButton.create({
+          name: button.name,
+          buttonParamsJson: button.buttonParamsJson,
+        })
+      ),
+      messageParamsJson: "{}",
+      messageVersion: 1,
+    }),
+  });
+  const generated = generateWAMessageFromContent(
+    chatId,
+    {
+      viewOnceMessage: {
+        message: {
+          messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+          interactiveMessage,
         },
       },
     },
-  };
-  await sock.relayMessage(chatId, message, { messageId });
+    {
+      userJid: sock.user?.id,
+      quoted: options.quoted || undefined,
+    },
+  );
+  if (!generated?.message || !generated?.key?.id) {
+    throw new Error("Baileys could not generate the interactive message");
+  }
+  const additionalNodes = [buildBizNode()];
+  if (!String(chatId).endsWith("@g.us")) {
+    additionalNodes.unshift({ tag: "bot", attrs: { biz_bot: "1" } });
+  }
+  const messageId = generated.key.id;
+  await sock.relayMessage(chatId, generated.message, { messageId, additionalNodes });
   return { sent: true, interactive: true, messageId };
 }

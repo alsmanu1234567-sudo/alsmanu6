@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   clearMawdoo3Cache,
+  extractMawdoo3ArticleText,
+  fetchMawdoo3ArticleContent,
   findNextMawdoo3Article,
   matchesMawdoo3Topic,
   parseMawdoo3Listing,
@@ -20,6 +22,51 @@ test("Mawdoo3 listing parser keeps only unique same-site article links", () => {
     { title: "أجمل القصص القصيرة", url: "https://mawdoo3.com/%D8%A3%D8%AC%D9%85%D9%84_%D8%A7%D9%84%D9%82%D8%B5%D8%B5_%D8%A7%D9%84%D9%82%D8%B5%D9%8A%D8%B1%D8%A9" },
     { title: "نكتة مضحكة", url: "https://mawdoo3.com/%D9%86%D9%83%D8%AA%D8%A9_%D9%85%D8%B6%D8%AD%D9%83%D8%A9" },
   ]);
+});
+
+test("Mawdoo3 article extraction returns body paragraphs and skips page chrome", () => {
+  const html = `
+    <nav><p>روابط التنقل في الموقع</p></nav>
+    <main>
+      <div class="article-content">
+        <h1>عنوان المقال</h1>
+        <p>هذا هو النص الأول للمقال ويحتوي على تفاصيل مفيدة للقارئ.</p>
+        <p>وهذا هو النص الثاني الذي يجب أن يصل إلى المجموعة بدلاً من الرابط وحده.</p>
+        <ul>
+          <li>هذه أول نقطة مفيدة داخل قائمة المقال ويجب نشرها.</li>
+          <li>وهذه نقطة ثانية طويلة بما يكفي لاختبار استخراج عناصر القائمة.</li>
+        </ul>
+      </div>
+      <aside><p>مقالات ذات صلة لا يجب نشرها.</p></aside>
+    </main>
+  `;
+  const content = extractMawdoo3ArticleText(html);
+  assert.match(content, /النص الأول للمقال/);
+  assert.match(content, /النص الثاني/);
+  assert.match(content, /أول نقطة مفيدة/);
+  assert.match(content, /نقطة ثانية طويلة/);
+  assert.doesNotMatch(content, /روابط التنقل|مقالات ذات صلة/);
+});
+
+test("Mawdoo3 content fetching only accepts same-site article pages", async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return new Response(
+      "<article><p>هذا نص واضح للمقال ويتجاوز الحد الأدنى المطلوب حتى يتم إرساله للمجموعة.</p></article>",
+      { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }
+    );
+  };
+  const content = await fetchMawdoo3ArticleContent(
+    "https://mawdoo3.com/مقال_تجريبي",
+    { fetchImpl }
+  );
+  assert.match(content, /نص واضح للمقال/);
+  await assert.rejects(
+    fetchMawdoo3ArticleContent("https://evil.example/article", { fetchImpl }),
+    /روابط موضوع/
+  );
+  assert.equal(calls, 1);
 });
 
 test("Mawdoo3 accepts the public bedtime-story link format", () => {
@@ -63,4 +110,35 @@ test("Mawdoo3 fetch selects a fresh matching title and link only", async () => {
     /غير مكرر/
   );
   clearMawdoo3Cache();
+});
+
+test('love does not match prayer or a single ambiguous substring', () => {
+  assert.equal(matchesMawdoo3Topic('كيفية الصلاة في الإسلام', 'حب'), false);
+  assert.equal(matchesMawdoo3Topic('قصة عيد الحب', 'قصص حب'), false);
+  assert.equal(matchesMawdoo3Topic('قصة رومانسية', 'قصص حب'), true);
+  assert.equal(matchesMawdoo3Topic('قصص عن الصلاة', 'قصص حب'), false);
+  assert.equal(matchesMawdoo3Topic('أجمل قصص الحب', 'قصص حب'), true);
+});
+
+test('targeted article and its related articles can be discovered outside generic listings', async () => {
+  clearMawdoo3Cache();
+  const fake = async url => {
+    if (decodeURIComponent(String(url)).includes('قصة_حب_رومانسية')) return new Response('<h1>قصة حب رومانسية</h1><a href="/قصص_حب_مؤلمة">قصة</a>', {status:200});
+    if (String(url).includes('خاص')) return new Response('<a href="/كيفية_الصلاة">صلاة</a>', {status:200});
+    return new Response('missing', {status:404});
+  };
+  const first = await findNextMawdoo3Article('قصص حب',{fetchImpl:fake});
+  assert.match(first.title,/حب/);
+  const second = await findNextMawdoo3Article('قصص حب',{fetchImpl:fake,seenUrls:[first.url]});
+  assert.notEqual(first.url,second.url);
+  assert.doesNotMatch(first.title,/الصلاة/);
+  clearMawdoo3Cache();
+});
+
+test('long stories retain the end and short dialogue in extracted content', () => {
+  const text = 'بداية '.repeat(2200);
+  const result = extractMawdoo3ArticleText(`<article><p>${text}</p><p>نعم!</p><p>وهكذا انتهت القصة بنهاية سعيدة.</p></article>`);
+  assert.ok(result.length > 12000);
+  assert.match(result,/نعم!/);
+  assert.match(result,/انتهت القصة بنهاية سعيدة/);
 });

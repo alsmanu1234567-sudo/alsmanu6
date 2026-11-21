@@ -117,3 +117,29 @@ test("WhatsApp command controls are wired into the registered message patch for 
     /handleMyMsgsCommandControl\(userId, _selfNumForSettings, trimmed, myS\)/u,
   );
 });
+
+test('socket identity resolves the correct stored phone and never uses LID as a number', async()=>{
+  const {resolveMyMsgsSocketNumber}=await import('../../dist/my-msgs.mjs');
+  const user={whatsappNumbers:[{number:'+249111'},{number:'249222'}]};
+  assert.equal(resolveMyMsgsSocketNumber(user,{user:{id:'991234@lid',pn:'249111:3@s.whatsapp.net'}}),'+249111');
+  assert.equal(resolveMyMsgsSocketNumber(user,{user:{id:'249222:1@s.whatsapp.net'}}),'249222');
+  assert.equal(resolveMyMsgsSocketNumber(user,{user:{id:'249111@lid'}}),null);
+});
+
+test('status autosave uses the current socket and WhatsApp number, not telegram id', async()=>{
+ const bundle=await readFile(new URL('../../dist/index.mjs',import.meta.url),'utf8');
+ const section=bundle.slice(bundle.indexOf('// [STATUS-AUTO-SAVE]'),bundle.indexOf('return; // [DISPATCH-FIX]',bundle.indexOf('// [STATUS-AUTO-SAVE]')));
+ assert.match(section,/resolveMyMsgsSocketNumber\(_statusUser, sock\)/);assert.match(section,/await sock\.sendMessage\(_selfJid/);assert.doesNotMatch(section,/\$\{userId\}@s\.whatsapp\.net/);assert.doesNotMatch(section,/activeSock/);
+});
+
+test('custom codes button reaches its own menu rather than generic feature handler',async()=>{
+ const user=setupUser('codes-menu','+249900000115');const sent=[];
+ await handleMyMsgsCallback({sendMessage:async(...args)=>sent.push(args)},123,'codes-menu','mymsgs_show_codes');
+ assert.match(sent[0][1],/الأكواد الخاصة/u);assert.ok(sent[0][2].reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='mymsgs_codes_add'));
+});
+
+test('custom image codes use the repaired image pipeline and rotating codes advance in order',async()=>{
+ const bundle=await readFile(new URL('../../dist/index.mjs',import.meta.url),'utf8');
+ const section=bundle.slice(bundle.indexOf('// ── أكواد خاصة (Code Triggers)'),bundle.indexOf('cachePush(cacheKey, msg);',bundle.indexOf('// ── أكواد خاصة (Code Triggers)')));
+ assert.match(section,/searchAndSendTextImages/);assert.match(section,/mymsgs_rot_/);assert.doesNotMatch(section,/searchImgCC/);
+});

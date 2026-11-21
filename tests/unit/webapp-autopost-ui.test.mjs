@@ -17,6 +17,12 @@ test("group web app exposes auto-post routes and valid Arabic UI script", () => 
     "/api/fw/groups/autopost/delete",
     "/api/fw/groups/autopost/test",
     "/api/fw/groups/autopost/publish",
+    "/api/fw/groups/link-warning",
+    "/api/fw/groups/word-filter",
+    "/api/fw/groups/messages",
+    "/api/fw/groups/reminders/save",
+    "/api/fw/groups/reminders/toggle",
+    "/api/fw/groups/reminders/delete",
   ]) {
     assert.equal(routes.post.has(route), true, `missing ${route}`);
   }
@@ -31,6 +37,16 @@ test("group web app exposes auto-post routes and valid Arabic UI script", () => 
   assert.match(html, /موضوع/);
   assert.match(html, /اختبار الجلب/);
   assert.match(html, /نشر الآن/);
+  assert.match(html, /رسائل الترحيب والوداع/);
+  assert.match(html, /فلتر الكلمات الممنوعة/);
+  assert.match(html, /الكلمات والعبارات الممنوعة/);
+  assert.match(html, /_nemgrob/);
+  assert.match(html, /رسالة التنبيه عند تعذّر الحذف/);
+  assert.match(html, /الحد الأقصى لأحرف المقتطف/);
+  assert.match(html, /بدون رابط أو اسم الكاتب/);
+  assert.match(html, /تذكيرات المجموعة/);
+  assert.match(html, /إضافة وتفعيل التذكير/);
+  assert.match(html, /توقيت الخرطوم/);
 
   const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
     .filter((match) => !/\bsrc\s*=/.test(match[1]) && match[2].trim());

@@ -11,7 +11,7 @@ const GUARD = "PATCH_FIX_TOKEN_APPLIED";
 let c = readFileSync(DIST, "utf8");
 if (c.includes(GUARD)) { console.log("ℹ️  باتش (مطبّق سابقاً): إصلاح ${token} الحرفية"); process.exit(0); }
 
-const REAL_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "8648687130:AAHjEUZibwFPlToGwS65bHRGnwzPOQ91CDY";
+const REAL_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const REAL_DEV   = process.env.DEVELOPER_ID       || "7428421245";
 
 let fixes = 0;

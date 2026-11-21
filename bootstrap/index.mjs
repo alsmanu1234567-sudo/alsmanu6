@@ -10,12 +10,19 @@ import { fileURLToPath } from "url";
 import { banner, ok, wrn } from "../core/logger.mjs";
 import { runAllChecks } from "../core/health.mjs";
 import { loadConfig, applyDefaults } from "../core/config.mjs";
-import { ensure as ensurePackages } from "../infrastructure/package-manager.mjs";
+import { ensure as ensurePackages, missingDeclaredPackages } from "../infrastructure/package-manager.mjs";
 import { ensureYtDlp, ensureFfmpegStatic } from "../infrastructure/binary-manager.mjs";
 import { spawnBot } from "../infrastructure/process-manager.mjs";
-import { startEngine } from "../engine/index.mjs";
+import {
+  getExternalDepsDir,
+  prepareExternalNodeModules,
+  prepareExternalSessionStorage,
+} from "./external-deps.mjs";
 
 const BASE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const EXTERNAL_DEPS_DIR = getExternalDepsDir(BASE_DIR);
+const EXTERNAL_NODE_MODULES_DIR = join(EXTERNAL_DEPS_DIR, "node_modules");
+const NO_INSTALL = process.argv.includes("--no-install");
 const RUNTIME_DIR = join(BASE_DIR, ".runtime");
 const PID_FILE = join(RUNTIME_DIR, "bootstrap.pid");
 const DEPS_STAMP = join(RUNTIME_DIR, "dependencies.sha256");
@@ -59,7 +66,7 @@ function dependencyFingerprint() {
 
 function readPackageVersion(packageName) {
   try {
-    const packageJson = join(BASE_DIR, "node_modules", packageName, "package.json");
+    const packageJson = join(EXTERNAL_NODE_MODULES_DIR, packageName, "package.json");
     return JSON.parse(readFileSync(packageJson, "utf8")).version;
   } catch {
     return null;
@@ -86,14 +93,14 @@ function dependencyProblems() {
 async function ensureDependenciesOnce() {
   const fingerprint = dependencyFingerprint();
   const previous = existsSync(DEPS_STAMP) ? readFileSync(DEPS_STAMP, "utf8").trim() : "";
-  const problems = dependencyProblems();
+  const problems = [...dependencyProblems(), ...missingDeclaredPackages(BASE_DIR, EXTERNAL_DEPS_DIR)];
   if (problems.length === 0 && previous === fingerprint) {
-    ok("التبعيات ثابتة — لا حاجة لإعادة التثبيت");
+    ok("التبعيات الخارجية ثابتة — لا حاجة لإعادة التثبيت");
     return;
   }
   if (problems.length > 0) wrn(`تبعيات تحتاج تحديثاً: ${problems.join("، ")}`);
-  await ensurePackages(BASE_DIR);
-  const remaining = dependencyProblems();
+  await ensurePackages(BASE_DIR, EXTERNAL_DEPS_DIR);
+  const remaining = [...dependencyProblems(), ...missingDeclaredPackages(BASE_DIR, EXTERNAL_DEPS_DIR)];
   if (remaining.length > 0) {
     throw new Error(`تعذر تجهيز التبعيات: ${remaining.join("، ")}`);
   }
@@ -183,20 +190,37 @@ async function main() {
   process.once("exit", () => rmSync(PID_FILE, { force: true }));
 
   banner("WhatsApp Bot Pro — Safe Bootstrap");
+  prepareExternalNodeModules(BASE_DIR, EXTERNAL_DEPS_DIR);
+  const sessionStorage = prepareExternalSessionStorage(BASE_DIR, EXTERNAL_DEPS_DIR);
+  ok(`جلسات واتساب محفوظة خارج المشروع: ${sessionStorage.externalSessions}`);
   runAllChecks({ minNode: 18, minRAM: 150 });
   loadConfig(BASE_DIR);
   applyDefaults();
   cleanBotTemp();
-  await ensureDependenciesOnce();
+  if (NO_INSTALL) {
+    const missing = [
+      ...missingDeclaredPackages(BASE_DIR, EXTERNAL_DEPS_DIR),
+      ...dependencyProblems(),
+    ];
+    if (missing.length > 0) {
+      throw new Error(
+        `حزم خارجية ناقصة أو غير مطابقة: ${[...new Set(missing)].join("، ")}. شغّل npm start أولاً لتجهيزها.`
+      );
+    }
+    ok(`استخدام الحزم من ${EXTERNAL_NODE_MODULES_DIR} دون تثبيت`);
+  } else {
+    await ensureDependenciesOnce();
+  }
   ensureBundleUsesInstalledBaileys();
   if (process.argv.includes("--check-only")) {
     ok("فحص bootstrap اكتمل دون تشغيل البوت");
     return;
   }
   await ensureYtDlp(BASE_DIR);
-  await ensureFfmpegStatic(BASE_DIR);
+  await ensureFfmpegStatic(BASE_DIR, { allowDownload: !NO_INSTALL });
 
   const port = Number.parseInt(process.env.PORT ?? "5000", 10);
+  const { startEngine } = await import("../engine/index.mjs");
   runner = spawnBot(BASE_DIR, {
     autoRestart: true,
     onSpawn: (child) => engine?.setChildProcess?.(child),

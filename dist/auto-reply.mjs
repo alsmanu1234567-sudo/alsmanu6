@@ -1,3 +1,4 @@
+import { parseInteractiveConfig } from "../services/auto-reply-interactive.mjs";
 // ============================================================
 // dist/auto-reply.mjs — قسم الردود التلقائية (ملف مستقل)
 // WhatsApp Bot Pro — فُصل عن dist/index.mjs للتطوير المستقل
@@ -40,7 +41,8 @@ async function handleLongTextDoneInternal(bot2, chatId, userId) {
 
 async function handleReplyTypeCallbackInternal(bot2, chatId, userId, data) {
   const { getState, setState, saveAutoReply, addPoints, getUser, clearState,
-          mainMenuKeyboard, cancelKeyboard, longTextDoneKeyboard, DEVELOPER_ID } = _deps;
+          mainMenuKeyboard, cancelKeyboard, longTextDoneKeyboard,
+          replyTargetKeyboard, DEVELOPER_ID } = _deps;
 
   if (data === "rtype_ai") {
     const aiMgr = await _deps.getAiManager();
@@ -102,6 +104,42 @@ async function handleReplyTypeCallbackInternal(bot2, chatId, userId, data) {
         parse_mode: "Markdown",
         reply_markup: mainMenuKeyboard(freshUser.points || 0, freshUser.tier, userId === DEVELOPER_ID)
       }
+    );
+    return;
+  }
+
+  if (['rtype_button_quick','rtype_button_url','rtype_button_list'].includes(data)) {
+    const replyType = data.slice(6);
+    setState(userId, 'awaiting_button_config', { replyType });
+    const details = replyType === 'button_url' ? 'عنوان الزر|https://example.com' : 'عنوان الزر|النص الذي سيرسله البوت عند الضغط';
+    await bot2.sendMessage(chatId, `🔘 إعداد الأزرار\n\nأرسل نص الرسالة في السطر الأول، ثم كل خيار في سطر بالشكل:\n${details}\n\nمثال:\nأهلاً بك، اختر خياراً:\nالخيار الأول|${replyType === 'button_url' ? 'https://example.com' : 'هذا هو الرد الأول'}\n\nمن 1 إلى 9 خيارات.`);
+    return;
+  }
+  if (data === "rtype_xo_ultra" || data === "rtype_xo_multi" || data === "rtype_ludo") {
+    const replyType = data === "rtype_ludo" ? "ludo" : data === "rtype_xo_multi" ? "xo_multi" : "xo_ultra";
+    setState(userId, "awaiting_xo_fallback_choice", {replyType, replyContent:replyType === "ludo" ? "__ludo__" : replyType === "xo_multi" ? "__xo_multi__" : "__xo_ultra__"});
+    await bot2.sendMessage(chatId, "🎮 إعداد رسالة الرابط البديل. اختر الافتراضية أو أوقفها أو اكتب رسالة خاصة؛ _get يوضع مكان الرابط.", {reply_markup:{inline_keyboard:[[{text:"✅ الافتراضية",callback_data:"rtype_xosetting_default"},{text:"🚫 إيقاف الرسالة",callback_data:"rtype_xosetting_off"}],[{text:"✍️ رسالة خاصة",callback_data:"rtype_xosetting_custom"}]]}});
+    return;
+  }
+  if (["rtype_xosetting_default","rtype_xosetting_off","rtype_xosetting_custom"].includes(data)) {
+    if(getState(userId)?.state !== "awaiting_xo_fallback_choice") return;
+    if(data === "rtype_xosetting_custom") { setState(userId,"awaiting_xo_fallback_text",{}); await bot2.sendMessage(chatId,"أرسل رسالة الرابط وضع _get في مكان الرابط."); return; }
+    setState(userId,"awaiting_reply_target",{xoFallbackEnabled:data !== "rtype_xosetting_off",xoFallbackText:""});
+    await bot2.sendMessage(chatId,"اختر هدف الرد:",{reply_markup:replyTargetKeyboard()});
+    return;
+  }
+
+  if (data === "rtype_xo") {
+    const state = getState(userId);
+    setState(userId, "awaiting_reply_target", {
+      ...state.data,
+      replyType: "xo",
+      replyContent: "__xo_game__",
+    });
+    await bot2.sendMessage(
+      chatId,
+      "🎮 *لعبة X و O ضد البوت*\n\nاختر الآن من يستلم اللعبة عند إرسال الكلمة المفتاحية:",
+      { parse_mode: "Markdown", reply_markup: replyTargetKeyboard() },
     );
     return;
   }
@@ -208,7 +246,8 @@ async function handleScopeCallbackInternal(bot2, chatId, userId, data) {
     replyContent: replyContent || getMergedText(userId) || "",
     target: target || "all",
     targetNumbers: targetNumbers || [],
-    scope
+    scope,
+    ...(["xo_ultra","xo_multi","ludo"].includes(replyType) ? {xoFallbackEnabled:state.data.xoFallbackEnabled !== false,xoFallbackText:state.data.xoFallbackText||""} : {})
   };
   clearTextParts(userId);
   saveAutoReply(userId, newReply);
@@ -1297,11 +1336,7 @@ export async function handleAutoReplyCallback(bot2, chatId, userId, data) {
       return true;
     }
     const exported = JSON.stringify(replies, null, 2);
-    if (exported.length < 4000) {
-      await bot2.sendMessage(chatId, `\`\`\`json\n${exported.slice(0, 3900)}\n\`\`\``, { parse_mode: "Markdown" });
-    } else {
-      await bot2.sendMessage(chatId, `✅ لديك ${replies.length} رد. حجم البيانات: ${(exported.length / 1024).toFixed(1)} KB`);
-    }
+    await bot2.sendDocument(chatId, Buffer.from(exported, 'utf8'), {caption:`✅ تصدير ${replies.length} رد`, contentType:'application/json'}, {filename:'auto-replies.json',contentType:'application/json'});
     return true;
   }
   if (data === "reply_import") {
@@ -1331,6 +1366,12 @@ export async function handleAutoReplyCallback(bot2, chatId, userId, data) {
       replyContent: "أنت مساعد ودي. أجب باختصار.",
       target: "all", scope: "private", isActive: true, dailyLimit: 10, perUserLimit: 2
     }, null, 2);
+    const buttonEx = JSON.stringify({
+      trigger: 'قائمة', triggerType: 'exact', caseSensitive: false,
+      replyType: 'button_quick',
+      replyContent: JSON.stringify({text:'أهلاً! اختر:', entries:[{label:'الخدمات', value:'إليك خدماتنا'}]}),
+      target: 'all', targetNumbers: [], scope: 'both', isActive: true,
+    }, null, 2);
     const guide = [
       "🤖 *دليل الذكاء الاصطناعي — بوت واتسآب*",
       "أرسل هذا لأي AI ليفهم هيكل البوت ويبني ردوداً جاهزة.",
@@ -1339,12 +1380,17 @@ export async function handleAutoReplyCallback(bot2, chatId, userId, data) {
       "## 2. هيكل ملف الرد (JSON)",
       "```json\n" + sampleJson + "\n```",
       "## 3. شرح الحقول",
-      "- **trigger**: الكلمة المفتاحية\n- **triggerType**: [exact | contains | starts | ends | regex]\n- **replyType**: [text | ai | reaction | morphing | rotating | image | audio | video | document | sticker]\n- **replyContent**: نص أو URL أو \"__ai_default__\" للذكاء\n- **target**: [all | specific | multiple] | **scope**: [both | private | group]\n- **dailyLimit**: حد يومي (0 = بلا حد) | **perUserLimit**: حد لكل شخص كل 8ساعات",
+      "- **trigger**: الكلمة المفتاحية\n- **triggerType**: [exact | contains | starts | ends | regex]\n- **replyType**: [text | ai | reaction | morphing | rotating | image | audio | video | document | sticker | xo | xo_ultra | xo_multi | ludo | button_quick | button_url | button_list]\n- **replyContent**: نص أو URL أو \"__ai_default__\" للذكاء\n- **target**: [all | specific | multiple | self] | **scope**: [both | private | groups]\n- **dailyLimit**: حد يومي (0 = بلا حد) | **perUserLimit**: حد لكل شخص كل 8ساعات",
       "## 4. مثال رد دوري",
       "```json\n" + rotEx + "\n```",
       "## 5. مثال رد بالذكاء الاصطناعي",
       "```json\n" + aiEx + "\n```",
-      "## 6. طريقة الاستيراد",
+      "ألعاب النافذة: xo_ultra ضد الجهاز، وxo_multi لشخصين في المجموعة دون منشن. يمكن استخدام xoFallbackEnabled وxoFallbackText مع _get مكان الرابط.",
+      "## 6. أنواع الأزرار (replyContent سلسلة JSON)",
+      'أنواع الأزرار: button_quick (يرد بالنص عند الضغط)، button_url (رابط)، button_list (قائمة ترد بالنص). في replyContent ضع نص JSON كسلسلة: {"text":"اختر","entries":[{"label":"نعم","value":"تم الاختيار"}]}. في زر الرابط تكون value رابط http أو https. كل عنوان 24 حرفاً كحد أقصى و1–9 خيارات. هدف self لرسائلك أنت. لا تستخدم group؛ استخدم groups.',
+      "مثال رد بأزرار صالح للاستيراد:",
+      "```json\n" + buttonEx + "\n```",
+      "## 7. طريقة الاستيراد",
       "أرسل ملف .json بهيكل [{...}] — أو الصق النص — في زر \"استيراد الردود\"."
     ].join("\n");
     const chunks = [];
@@ -1592,6 +1638,12 @@ export async function handleAutoReplyTextInput(bot2, chatId, userId, text, state
   const user = getUser(userId);
   const isDev2 = userId === DEVELOPER_ID;
 
+  if (state.state === "awaiting_xo_fallback_text") {
+    if (text.length > 2000) { await bot2.sendMessage(chatId,"النص طويل جداً؛ الحد 2000 حرف."); return true; }
+    setState(userId,"awaiting_reply_target",{xoFallbackEnabled:true,xoFallbackText:text});
+    await bot2.sendMessage(chatId,"✅ تم حفظ نص الرابط. اختر هدف الرد:",{reply_markup:_deps.replyTargetKeyboard()});
+    return true;
+  }
   if (state.state === "awaiting_trigger") {
     setState(userId, "awaiting_trigger_type", { trigger: text });
     await bot2.sendMessage(
@@ -1618,6 +1670,15 @@ export async function handleAutoReplyTextInput(bot2, chatId, userId, text, state
         }
       }
     );
+    return true;
+  }
+  if (state.state === 'awaiting_button_config') {
+    const current = getState(userId);
+    try {
+      const config = parseInteractiveConfig(current.data.replyType, text);
+      setState(userId, 'awaiting_reply_target', { replyContent: JSON.stringify(config) });
+      await bot2.sendMessage(chatId, '✅ تم إعداد الأزرار. اختر هدف الرد:', {reply_markup:_deps.replyTargetKeyboard()});
+    } catch (error) { await bot2.sendMessage(chatId, `❌ ${error.message}`); }
     return true;
   }
   if (state.state === "awaiting_specific_numbers") {
@@ -1817,7 +1878,7 @@ export async function handleAutoReplyTextInput(bot2, chatId, userId, text, state
       const arr = Array.isArray(imported) ? imported : [imported];
       let count = 0;
       for (const r of arr) {
-        if (r.trigger) { saveAutoReply(userId, r); count++; }
+        if (r.trigger) { const copy = { ...r }; delete copy.id; saveAutoReply(userId, copy); count++; }
       }
       clearState(userId);
       await bot2.sendMessage(chatId, `✅ تم استيراد ${count} رد بنجاح!`);

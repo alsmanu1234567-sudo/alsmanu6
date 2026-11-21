@@ -10,6 +10,9 @@ import {
   getWebGroupInvite,
   handleCallback,
   handleText,
+  saveWebGroupLinkWarningMessage,
+  saveWebGroupWordFilterSettings,
+  saveWebGroupMessageSettings,
   setWebGroupSetting,
   setDeps,
   stopModerationListenerRecovery
@@ -100,7 +103,7 @@ test("group message uses the connected socket that belongs to the selected group
   stopModerationListenerRecovery();
 });
 
-test("web group details mask member numbers and allow admin-only link controls", async () => {
+test("web group details mask member numbers and keep group edits admin-only", async () => {
   const groupId = "120363123456789012@g.us";
   const user = { antiLinkGroups: [], inspectInviteGroups: [] };
   const adminActions = [];
@@ -159,6 +162,176 @@ test("web group details mask member numbers and allow admin-only link controls",
   stopModerationListenerRecovery();
 });
 
+test("non-admin members can enable invite checks and send a custom anti-link warning", async () => {
+  const groupId = "120363123456789012@g.us";
+  const user = { antiLinkGroups: [], inspectInviteGroups: [], groupMessageSettings: [] };
+  const sent = [];
+  const sock = {
+    user: { id: "249960506662@s.whatsapp.net" },
+    ev: new EventEmitter(),
+    groupMetadata: async (id) => ({
+      id,
+      subject: "مجموعة عامة",
+      participants: [{ id: "249960506662@s.whatsapp.net" }],
+    }),
+    groupGetInviteInfo: async () => ({ subject: "معاينة مجموعة دعوة", size: 7 }),
+    sendMessage: async (jid, payload) => sent.push({ jid, payload }),
+  };
+  setDeps({
+    inMemoryDB: { sessions: new Map([["123", sock]]), users: new Map([["123", user]]) },
+    getUser: () => user,
+    saveUser: (_id, patch) => Object.assign(user, patch),
+  });
+
+  try {
+    const antiLink = await setWebGroupSetting("123", groupId, "+249960506662", "antiLink", true);
+    const inspectInvite = await setWebGroupSetting("123", groupId, "+249960506662", "inspectInvite", true);
+    assert.equal(antiLink.antiLinkEnabled, true);
+    assert.equal(inspectInvite.inspectInviteEnabled, true);
+    const saved = await saveWebGroupLinkWarningMessage(
+      "123", groupId, "+249960506662", "رسالة مخصصة للرابط"
+    );
+    assert.equal(saved.antiLinkWarningMessage, "رسالة مخصصة للرابط");
+
+    const key = {
+      remoteJid: groupId,
+      id: "message-non-admin",
+      participant: "249123456789@s.whatsapp.net",
+    };
+    sock.ev.emit("messages.upsert", {
+      messages: [{
+        key,
+        message: { conversation: "رابط المجموعة https://chat.whatsapp.com/InviteCode123456" },
+      }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(sent.some((entry) => entry.payload.delete), false);
+    const warning = sent.find((entry) => entry.payload.text?.includes("رسالة مخصصة للرابط"));
+    assert.ok(warning, "the saved warning should be sent when deletion is unavailable");
+    assert.deepEqual(warning.payload.mentions, ["249123456789@s.whatsapp.net"]);
+    assert.ok(sent.some((entry) => entry.payload.text?.includes("معاينة مجموعة دعوة")));
+  } finally {
+    stopModerationListenerRecovery();
+  }
+});
+
+test("group word filters normalize Arabic, match full terms, and warn or delete by bot permissions", async () => {
+  const groupId = "120363123456789012@g.us";
+  let isAdmin = false;
+  const user = { antiLinkGroups: [], inspectInviteGroups: [], groupMessageSettings: [] };
+  const sent = [];
+  const sock = {
+    user: { id: "249960506662@s.whatsapp.net" },
+    ev: new EventEmitter(),
+    groupMetadata: async (id) => ({
+      id,
+      participants: [{
+        id: "249960506662@s.whatsapp.net",
+        admin: isAdmin ? "superadmin" : null,
+      }],
+    }),
+    sendMessage: async (jid, payload) => sent.push({ jid, payload }),
+  };
+  setDeps({
+    inMemoryDB: { sessions: new Map([["123", sock]]), users: new Map([["123", user]]) },
+    getUser: () => user,
+    saveUser: (_id, patch) => Object.assign(user, patch),
+  });
+
+  try {
+    const saved = await saveWebGroupWordFilterSettings(
+      "123",
+      groupId,
+      "+249960506662",
+      {
+        enabled: true,
+        words: "كَلِمَة\nspam\nكلمة",
+        warningMessage: "هذه العبارة غير مسموحة",
+      },
+    );
+    assert.equal(saved.bannedWordsEnabled, true);
+    assert.deepEqual(saved.bannedWords, ["كَلِمَة", "spam"], "Arabic-equivalent terms are de-duplicated");
+
+    const emitMessage = (id, text) => sock.ev.emit("messages.upsert", {
+      messages: [{
+        key: {
+          remoteJid: groupId,
+          id,
+          participant: "249123456789@s.whatsapp.net",
+        },
+        message: { conversation: text },
+      }],
+    });
+
+    emitMessage("banned-arabic", "هذه كلمة ممنوعة");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const warning = sent.find((entry) => entry.payload.text?.includes("هذه العبارة غير مسموحة"));
+    assert.ok(warning, "non-admin bot should send the configured warning");
+    assert.deepEqual(warning.payload.mentions, ["249123456789@s.whatsapp.net"]);
+    assert.equal(sent.some((entry) => entry.payload.delete), false);
+
+    sent.length = 0;
+    emitMessage("not-a-full-term", "spammer");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(sent.length, 0, "a blocked word should not match as part of a longer word");
+
+    isAdmin = true;
+    emitMessage("admin-deletes", "spam");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(sent.some((entry) => entry.payload.delete), "admin bot should delete a matching message");
+    assert.equal(sent.some((entry) => entry.payload.text), false);
+  } finally {
+    stopModerationListenerRecovery();
+  }
+});
+
+test("group welcome and goodbye messages replace the documented placeholders", async () => {
+  const groupId = "120363123456789012@g.us";
+  const user = { antiLinkGroups: [], inspectInviteGroups: [], groupMessageSettings: [] };
+  const sent = [];
+  const sock = {
+    user: { id: "249960506662@s.whatsapp.net" },
+    ev: new EventEmitter(),
+    groupMetadata: async (id) => ({ id, subject: "مجموعة التجربة", participants: [] }),
+    sendMessage: async (jid, payload) => sent.push({ jid, payload }),
+  };
+  setDeps({
+    inMemoryDB: { sessions: new Map([["123", sock]]), users: new Map([["123", user]]) },
+    getUser: () => user,
+    saveUser: (_id, patch) => Object.assign(user, patch),
+  });
+
+  try {
+    await saveWebGroupMessageSettings("123", groupId, "+249960506662", {
+      welcomeEnabled: true,
+      welcomeMessage: "أهلاً _nem في _nemgrob الساعة _time",
+      goodbyeEnabled: true,
+      goodbyeMessage: "وداعاً _nem من _nemgrob الساعة _time",
+    });
+    sock.ev.emit("group-participants.update", {
+      id: groupId,
+      action: "add",
+      participants: [{ id: "249123456789@s.whatsapp.net", notify: "سارة" }],
+    });
+    sock.ev.emit("group-participants.update", {
+      id: groupId,
+      action: "remove",
+      participants: [{ id: "249123456789@s.whatsapp.net", notify: "سارة" }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(sent.length, 2);
+    const welcome = sent.find((entry) => entry.payload.text.startsWith("أهلاً"));
+    const goodbye = sent.find((entry) => entry.payload.text.startsWith("وداعاً"));
+    assert.match(welcome?.payload.text || "", /أهلاً سارة في مجموعة التجربة الساعة/);
+    assert.match(goodbye?.payload.text || "", /وداعاً سارة من مجموعة التجربة الساعة/);
+    assert.doesNotMatch(sent.map((entry) => entry.payload.text).join(" "), /_nem|_time|_nemgrob/);
+  } finally {
+    stopModerationListenerRecovery();
+  }
+});
+
 test("group repeat accepts a trailing count and sends at most five times", async () => {
   const groupId = "120363123456789012@g.us";
   const user = { antiLinkGroups: [], inspectInviteGroups: [] };
@@ -182,4 +355,17 @@ test("group repeat accepts a trailing count and sends at most five times", async
   assert.deepEqual(sent.map((entry) => entry.payload.text), ["هلا", "هلا", "هلا"]);
   assert.equal(state, null);
   stopModerationListenerRecovery();
+});
+
+test("welcome and goodbye use WhatsApp display names from metadata, contacts and messages, not numbers", async () => {
+  const groupId="120363123456789012@g.us", user={groupMessageSettings:[]}, sent=[];
+  const sock={user:{id:"249960506662@s.whatsapp.net"},ev:new EventEmitter(),contacts:{"249333@s.whatsapp.net":{notify:"أحمد"}},groupMetadata:async id=>({id,subject:"التجربة",participants:[{id:"249222@s.whatsapp.net",notify:"سارة"}]}),sendMessage:async(_jid,payload)=>sent.push(payload.text)};
+  setDeps({inMemoryDB:{sessions:new Map([["321",sock]]),users:new Map([["321",user]])},getUser:()=>user,saveUser:(_id,patch)=>Object.assign(user,patch)});
+  try {
+    await saveWebGroupMessageSettings("321",groupId,"+249960506662",{welcomeEnabled:true,welcomeMessage:"مرحباً _nem",goodbyeEnabled:true,goodbyeMessage:"وداعاً _nem"});
+    sock.ev.emit('messages.upsert',{messages:[{key:{remoteJid:groupId,participant:'249444@s.whatsapp.net',fromMe:false},pushName:'منى',message:{conversation:'أهلاً'}}]});
+    for(const id of ['249222@s.whatsapp.net','249333@s.whatsapp.net','249444@s.whatsapp.net','249555@s.whatsapp.net']) sock.ev.emit('group-participants.update',{id:groupId,action:'remove',participants:[id]});
+    await new Promise(resolve=>setTimeout(resolve,20));
+    assert(sent.includes('وداعاً سارة'));assert(sent.includes('وداعاً أحمد'));assert(sent.includes('وداعاً منى'));assert(sent.includes('وداعاً عضو'));assert(!sent.some(x=>/249555/.test(x)));
+  } finally {stopModerationListenerRecovery()}
 });

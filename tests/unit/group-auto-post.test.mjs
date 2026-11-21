@@ -25,10 +25,16 @@ test("group auto-post validates, previews, publishes without repeats, and schedu
     <a href="/قصة_حب_الأولى">قصة حب أولى</a>
     <a href="/قصة_حب_الثانية">قصة حب ثانية</a>
   `;
-  globalThis.fetch = async () => new Response(html, {
-    status: 200,
-    headers: { "content-type": "text/html; charset=utf-8" },
-  });
+  const articleContent = "هذا نص المقال الكامل الذي يجب أن يظهر في المجموعة، وليس عنواناً ورابطاً فقط. يحتوي على عدة جمل ليكون مثالاً واقعياً للمحتوى الذي يستخرجه البوت من صفحة موضوع.";
+  globalThis.fetch = async (url) => new Response(
+    String(url).includes("/خاص:")
+      ? html
+      : `<article><div class="article-content"><p>${articleContent}</p></div></article>`,
+    {
+      status: 200,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    }
+  );
   clearMawdoo3Cache();
 
   const sock = {
@@ -56,14 +62,16 @@ test("group auto-post validates, previews, publishes without repeats, and schedu
     );
 
     const clock = getKhartoumClock(new Date("2026-11-10T00:30:00.000Z"));
-    assert.deepEqual(clock, { date: "2026-11-10", time: "02:30" });
+    assert.deepEqual(clock, { date: "2026-11-10", time: "02:30", weekday: "Tue" });
 
     const item = await saveWebGroupAutoPost(userId, groupId, "+249960506662", {
       topic: "قصص حب",
       times: getKhartoumClock().time,
+      excerptLength: 80,
     });
     assert.equal(item.enabled, false);
     assert.equal(item.topic, "قصص حب");
+    assert.equal(item.excerptLength, 80);
 
     const enabled = await setWebGroupAutoPostEnabled(
       userId, groupId, "+249960506662", item.id, true
@@ -75,7 +83,9 @@ test("group auto-post validates, previews, publishes without repeats, and schedu
     );
     assert.match(preview.title, /قصة حب/);
     assert.match(preview.url, /^https:\/\/mawdoo3\.com\//);
-    assert.deepEqual(Object.keys(preview).sort(), ["title", "url"]);
+    assert.ok(preview.content.length <= 80);
+    assert.ok(articleContent.startsWith(preview.content.replace(/…$/, "")));
+    assert.deepEqual(Object.keys(preview).sort(), ["content", "title", "url"]);
     assert.equal(sent.length, 0, "preview must not send to the group");
 
     const manual = await publishWebGroupAutoPostNow(
@@ -84,12 +94,8 @@ test("group auto-post validates, previews, publishes without repeats, and schedu
     assert.equal(manual.ok, true);
     assert.equal(sent.length, 1);
     assert.equal(sent[0].jid, groupId);
-    assert.equal(
-      sent[0].payload.text,
-      `📖 ${manual.title}\n${manual.url}\nالمصدر: موضوع`
-    );
-    assert.match(sent[0].payload.text, /المصدر: موضوع/);
-    assert.doesNotMatch(sent[0].payload.text, /مقتطف|ملخص/);
+    assert.equal(sent[0].payload.text, `📖 ${manual.title}\n\n${preview.content}`);
+    assert.doesNotMatch(sent[0].payload.text, /المصدر:|https?:|الكاتب/);
 
     await runScheduledGroupAutoPosts();
     await runScheduledGroupAutoPosts();
@@ -125,4 +131,63 @@ test("group auto-post validates, previews, publishes without repeats, and schedu
     clearMawdoo3Cache();
     stopModerationListenerRecovery();
   }
+});
+
+test('excerpt removes author and links and respects the requested size', async () => {
+  const { articleExcerpt } = await import('../../dist/handlers/groups-handler.mjs');
+  const text = 'تمت الكتابة بواسطة: شخص\nهذا نص مفيد يحتوي تفاصيل كثيرة عن الموضوع حتى يكفي للاقتطاع بشكل صحيح وآمن ومناسب. https://example.com/a\nالمصدر: رابط';
+  const result = articleExcerpt(text, 50);
+  assert.ok(result.length <= 50);
+  assert.doesNotMatch(result, /الكتابة بواسطة|شخص|https?:|المصدر/);
+});
+
+test('AI auto-post uses stored key, selected model, prompt and never repeats article', async () => {
+  const originalFetch = globalThis.fetch;
+  const groupId = '120363123456789012@g.us', userId = 'ai-user';
+  const user = {nvidiaKey:'test-key',nvidiaModel:'test/selected',groupAutoPosts:[]};
+  const sent=[], requests=[];
+  const longText='هذا مقال عربي يتضمن معلومات مفيدة للمجموعة ويحتوي على تفاصيل كثيرة ومهمة في الموضوع.';
+  globalThis.fetch=async (url,opts={})=>{
+    if (String(url).includes('/chat/completions')) {
+      requests.push(JSON.parse(opts.body));
+      return new Response(JSON.stringify({choices:[{message:{content:'هذا مقتطف المقال المفيد.'}}]}),{status:200});
+    }
+    return new Response(String(url).includes('/خاص:') ? '<a href="/قصة_حب_واحدة">قصة حب واحدة</a>' : `<article><p>${longText}</p></article>`,{status:200});
+  };
+  clearMawdoo3Cache();
+  const sock={user:{id:'249960506662@s.whatsapp.net'},groupMetadata:async()=>({participants:[{id:'249960506662@s.whatsapp.net',admin:'admin'}]}),sendMessage:async(id,payload)=>sent.push({id,payload})};
+  setDeps({inMemoryDB:{sessions:new Map([[userId,sock]]),users:new Map([[userId,user]])},getUser:()=>user,saveUser:(_id,patch)=>Object.assign(user,patch)});
+  try {
+    const item=await saveWebGroupAutoPost(userId,groupId,'+249960506662',{topic:'حب',times:'10:00',excerptMode:'ai',aiPrompt:'رتبه في نقاط'});
+    assert.equal(item.excerptMode,'ai'); assert.equal(item.aiPrompt,'رتبه في نقاط');
+    const preview=await previewWebGroupAutoPost(userId,groupId,'+249960506662',item.id);
+    assert.equal(preview.content,'هذا مقتطف المقال المفيد.'); assert.equal(requests[0].model,'test/selected'); assert.match(requests[0].messages[1].content,/رتبه في نقاط/);
+    await publishWebGroupAutoPostNow(userId,groupId,'+249960506662',item.id);
+    assert.match(sent[0].payload.text,/هذا مقتطف المقال المفيد/); assert.doesNotMatch(sent[0].payload.text,/https?:|المصدر|الكاتب/);
+    await assert.rejects(publishWebGroupAutoPostNow(userId,groupId,'+249960506662',item.id),/غير مكرر/);
+  } finally {globalThis.fetch=originalFetch;clearMawdoo3Cache();stopModerationListenerRecovery();}
+});
+
+test('AI story publishes the complete source in ordered parts without consuming tokens', async () => {
+  const originalFetch=globalThis.fetch;
+  const groupId='120363123456789012@g.us', userId='story-user';
+  const user={nvidiaKey:'test-key',nvidiaModel:'test/model',groupAutoPosts:[]};
+  const sent=[]; let aiCalls=0;
+  const story=('هذه فقرة من القصة وتفاصيلها كاملة دون حذف. '.repeat(460))+'النهاية السعيدة للقصة.';
+  globalThis.fetch=async (url)=>{
+    if(String(url).includes('/chat/completions')){aiCalls++;throw Error('AI must not rewrite story');}
+    if(String(url).includes('خاص')) return new Response('<a href="/قصة_حب_رومانسية">قصة</a>');
+    return new Response(`<article><p>${story}</p></article>`);
+  };
+  clearMawdoo3Cache();
+  const sock={user:{id:'249960506662@s.whatsapp.net'},groupMetadata:async()=>({participants:[{id:'249960506662@s.whatsapp.net',admin:'admin'}]}),sendMessage:async(_id,payload)=>sent.push(payload.text)};
+  setDeps({inMemoryDB:{sessions:new Map([[userId,sock]]),users:new Map([[userId,user]])},getUser:()=>user,saveUser:(_id,patch)=>Object.assign(user,patch)});
+  try {
+    const item=await saveWebGroupAutoPost(userId,groupId,'+249960506662',{topic:'قصص حب',times:'10:00',excerptMode:'ai'});
+    const result=await publishWebGroupAutoPostNow(userId,groupId,'+249960506662',item.id);
+    assert.ok(sent.length>1); assert.equal(aiCalls,0);
+    const combined=sent.map(s=>s.replace(/^\(\d+\/\d+\)\n/, '')).join('');
+    assert.equal(combined, `📖 ${result.title}\n\n${story}`);
+    assert.ok(sent.every(s=>s.length<=3500));
+  } finally {globalThis.fetch=originalFetch;clearMawdoo3Cache();stopModerationListenerRecovery();}
 });

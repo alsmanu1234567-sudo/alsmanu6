@@ -1,3 +1,8 @@
+import {evaluateIncoming} from '../services/messages-settings.mjs';
+import {webappUrlFor} from './webapp-auth.mjs';
+import { sendInteractiveAutoReply, resolveInteractiveAnswer, formatInteractiveFallback } from '../services/auto-reply-interactive.mjs';
+import { setMessageCutoff, advanceMessageCutoff } from "../engine/message-cutoff.mjs";
+import { isGeneratedAutoReply, protectAutoReplySocket, matchesReplyTarget } from '../services/auto-reply-routing.mjs';
 // PATCH_MASTER_FIX_APPLIED
 // PATCH_FIXES_V3_APPLIED
 // RUNTIME_BAILEYS_EXTERNAL_PATCH_V3
@@ -7,6 +12,7 @@ import * as _reportsMod from './reports.mjs';
 import * as _personsMod from './persons.mjs';
 import * as _aiMod from './ai.mjs';
 import * as _groupsMod from './groups.mjs';
+import { extractInteractiveResponseId } from '../services/interactive.js';
 import * as _scheduleMod from './schedule.mjs';
 
 import * as _securityMod from './security.mjs';
@@ -124190,7 +124196,7 @@ var init_database = __esm({
       trigger: { type: String, required: true },
       triggerType: { type: String, default: "exact", enum: ["exact", "contains", "starts", "ends", "regex"] },
       caseSensitive: { type: Boolean, default: false },
-      replyType: { type: String, default: "text", enum: ["text", "image", "audio", "video", "document", "sticker", "location", "contact", "poll", "list", "buttons"] },
+      replyType: { type: String, default: "text", enum: ["text", "image", "audio", "video", "document", "sticker", "location", "contact", "poll", "list", "buttons", "xo"] },
       replyContent: String,
       replyButtons: [{ text: String, response: String }],
       target: { type: String, default: "all" },
@@ -124587,6 +124593,15 @@ function connectMenuKeyboard(numbers = [], maxNumbers = 1, cleanHours = 0) {
   };
 }
 // ── جدولة التنظيف التلقائي — Map لتتبع المؤقتات النشطة ──────────────────
+function _discardOldMessages(userId) {
+  const cutoff = advanceMessageCutoff(userId);
+  saveUser(userId, { messageCutoffAt: cutoff });
+  try { _pipelineTeardown?.(userId); } catch {}
+  for (const cache of [msgCache, userSentMsgCache, userSentMsgIdSet]) {
+    if (!cache) continue;
+    for (const key of cache.keys()) if (String(key).startsWith(`${userId}:`)) cache.delete(key);
+  }
+}
 var _cleanScheduleTimers = new Map();
 function _startCleanSchedule(userId2, hours, bot2, reconnectFn) {
   // ألغِ المؤقت القديم إن وُجد
@@ -124600,24 +124615,10 @@ function _startCleanSchedule(userId2, hours, bot2, reconnectFn) {
     try {
       const _user = getUser(userId2);
       const _chatId = _user.telegramChatId;
-      if (_chatId && bot2) {
-        await bot2.sendMessage(_chatId, `🧹 تشغيل نظيف تلقائي (كل ${hours} ساعة)...\nسيُنفَّذ 3 مرات لضمان تنظيف كامل.`).catch(() => {});
-      }
-      // [FIX-CLEAN-TRIPLE] تشغيل التنظيف 3 مرات: فوراً، ثم بعد دقيقة، ثم بعد دقيقتين
-      for (let _run = 1; _run <= 3; _run++) {
-        if (_run > 1) await new Promise((r) => setTimeout(r, 60 * 1000));
-        try {
-          if (typeof reconnectFn === 'function') await reconnectFn(userId2, _chatId);
-          if (_chatId && bot2 && _run < 3) {
-            await bot2.sendMessage(_chatId, `🧹 تنظيف ${_run}/3 اكتمل — التالي بعد دقيقة...`).catch(() => {});
-          }
-        } catch (_runErr) {
-          logger.warn({ _runErr, userId2, _run }, "[clean-schedule] run error");
-        }
-      }
-      if (_chatId && bot2) {
-        await bot2.sendMessage(_chatId, `✅ التنظيف التلقائي الكامل اكتمل (3 مرات).`).catch(() => {});
-      }
+      _discardOldMessages(userId2);
+      if (_chatId && bot2) await bot2.sendMessage(_chatId, "🧹 تم تجاهل الرسائل القديمة، وجارٍ إعادة الاتصال.").catch(() => {});
+      if (typeof reconnectFn === 'function') await reconnectFn(userId2, _chatId);
+      if (_chatId && bot2) await bot2.sendMessage(_chatId, "✅ اكتمل التنظيف التلقائي.").catch(() => {});
     } catch (_e) { logger.warn({ _e, userId2 }, "[clean-schedule] error"); }
   }, ms);
   _cleanScheduleTimers.set(userId2, timer);
@@ -124698,6 +124699,7 @@ function aiModelsKeyboard(models, currentModel) {
 function devMenuKeyboard(totalUsers, running, stopped) {
   return {
     inline_keyboard: [
+      [{ text: "🌐 فتح لوحة المطوّر", callback_data: "dev_open_web" }],
       [{ text: "\u{1F4CA} \u0625\u062D\u0635\u0627\u0626\u064A\u0627\u062A \u0627\u0644\u0646\u0638\u0627\u0645", callback_data: "dev_stats" }, { text: "\u{1F465} \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645\u0648\u0646", callback_data: "dev_users" }],
       [{ text: "\u26A0\uFE0F \u0627\u0644\u0623\u062E\u0637\u0627\u0621", callback_data: "dev_errors" }, { text: "\u{1F48E} \u0625\u0631\u0633\u0627\u0644 \u0646\u0642\u0627\u0637 + \u0631\u0633\u0627\u0644\u0629", callback_data: "dev_points" }],
       [{ text: "\u{1F504} \u0625\u0639\u0627\u062F\u0629 \u062A\u0634\u063A\u064A\u0644 Workers", callback_data: "dev_restart" }, { text: "\u{1F527} \u0648\u0636\u0639 \u0627\u0644\u0635\u064A\u0627\u0646\u0629", callback_data: "dev_maintenance" }],
@@ -124760,6 +124762,11 @@ function replyTypeKeyboard() {
       [{ text: "\u{1F4AC} \u0646\u0635", callback_data: "rtype_text" }, { text: "\u{1F5BC}\uFE0F \u0635\u0648\u0631\u0629 (\u0631\u0627\u0628\u0637)", callback_data: "rtype_image" }, { text: "\u{1F3B5} \u0635\u0648\u062A", callback_data: "rtype_audio" }],
       [{ text: "\u{1F3AC} \u0641\u064A\u062F\u064A\u0648", callback_data: "rtype_video" }, { text: "\u{1F4C4} \u0645\u0644\u0641", callback_data: "rtype_document" }, { text: "\u{1F60A} \u0645\u0644\u0635\u0642", callback_data: "rtype_sticker" }],
       [{ text: "\u{1F916} \u0631\u062F \u0628\u0627\u0644\u0630\u0643\u0627\u0621 \u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064A (NVIDIA)", callback_data: "rtype_ai" }],
+      [{ text: "\u{1F3AE} \u0644\u0639\u0628\u0629 X \u0648 O \u0636\u062F \u0627\u0644\u0628\u0648\u062A", callback_data: "rtype_xo" }],
+      [{ text: "🎲 لودو رويال جماعية", callback_data: "rtype_ludo" }],
+      [{ text: "🎮 XO نافذة ضد البوت", callback_data: "rtype_xo_ultra" }, { text: "👥 XO نافذة شخصين", callback_data: "rtype_xo_multi" }],
+      [{ text: "🔘 أزرار رد سريع", callback_data: "rtype_button_quick" }, { text: "🔗 أزرار روابط", callback_data: "rtype_button_url" }],
+      [{ text: "📋 قائمة خيارات", callback_data: "rtype_button_list" }],
       backAndHome()
     ]
   };
@@ -124781,6 +124788,7 @@ function replyTargetKeyboard() {
       [{ text: "\u{1F30D} \u0627\u0644\u062C\u0645\u064A\u0639", callback_data: "target_all" }],
       [{ text: "\u{1F464} \u0634\u062E\u0635 \u0645\u062D\u062F\u062F (\u0623\u062F\u062E\u0644 \u0631\u0642\u0645\u0647)", callback_data: "target_specific" }],
       [{ text: "\u{1F4CB} \u0639\u062F\u0629 \u0623\u0634\u062E\u0627\u0635 (\u0623\u0631\u0642\u0627\u0645 \u0645\u062A\u0639\u062F\u062F\u0629)", callback_data: "target_multiple" }],
+      [{ text: "🔄 رسائلي أنا (الرد في نفس المحادثة)", callback_data: "target_self" }],
       backAndHome()
     ]
   };
@@ -293214,7 +293222,7 @@ async function _connectCodSession(userId, waSock, waJid, cleanPhone, key, isFirs
           ? `\u2705 *\u062A\u0645 \u0627\u0644\u0631\u0628\u0637 \u0628\u0646\u062C\u0627\u062D!*\n\n\u{1F4F1} \u0627\u0644\u0631\u0642\u0645: \`${numFull}\`\n\u{1F50B} \u0627\u0644\u062D\u0627\u0644\u0629: \u0646\u0634\u0637\n\u{1F4B0} +500 \u0646\u0642\u0637\u0629 \u0645\u0643\u0627\u0641\u0623\u0629 \u0627\u0644\u0631\u0628\u0637!`
           : `\u{1F504} *\u062A\u0645\u062A \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644 \u0628\u0646\u062C\u0627\u062D!*\n\n\u{1F4F1} \u0627\u0644\u0631\u0642\u0645: \`${numFull}\`\n\u{1F50B} \u0627\u0644\u062D\u0627\u0644\u0629: \u0646\u0634\u0637`;
         try { await waSock.sendMessage(waJid, { text: "\u2705 *+" + cleanPhone + "* \u062A\u0645 \u0631\u0628\u0637\u0647 \u0628\u0646\u062C\u0627\u062D!" }); } catch {}
-        if (botRef) { try { await botRef.sendMessage(Number(userId), _connMsgCod, { parse_mode: "Markdown" }); } catch {} }
+        if (botRef) { try { init_text_editor();const custom=_isFirstEverCod && texts.link_success!==undefined;await botRef.sendMessage(Number(userId),custom?getText('link_success',{number:numFull}):_connMsgCod, custom?{}:{parse_mode:'Markdown'}); } catch {} }
         // HOTFIX-004: مزامنة جهات الاتصال والمجموعات في الخلفية لجلسة COD
         setTimeout(async () => {
           try {
@@ -293495,7 +293503,9 @@ async function _handleConnected(sock, userId, chatId, qrMsgId, isAutoRestore = f
     const _connMsg = _isFirstEver
       ? `\u2705 *\u062A\u0645 \u0627\u0644\u0631\u0628\u0637 \u0628\u0646\u062C\u0627\u062D!*\n\n\u{1F4F1} \u0627\u0644\u0631\u0642\u0645: \`${numberFull}\`\n\u{1F50B} \u0627\u0644\u062D\u0627\u0644\u0629: \u0646\u0634\u0637\n\u{1F4B0} +500 \u0646\u0642\u0637\u0629 \u0645\u0643\u0627\u0641\u0623\u0629 \u0627\u0644\u0631\u0628\u0637!\n\n\u064A\u0645\u0643\u0646\u0643 \u0627\u0644\u0622\u0646 \u0625\u062F\u0627\u0631\u0629 \u0627\u0644\u0631\u062F\u0648\u062F \u0627\u0644\u062A\u0644\u0642\u0627\u0626\u064A\u0629 \u0648\u0627\u0644\u0630\u0643\u0627\u0621 \u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064A.`
       : `\u{1F504} *\u062A\u0645\u062A \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644 \u0628\u0646\u062C\u0627\u062D!*\n\n\u{1F4F1} \u0627\u0644\u0631\u0642\u0645: \`${numberFull}\`\n\u{1F50B} \u0627\u0644\u062D\u0627\u0644\u0629: \u0646\u0634\u0637`;
-    await botRef.sendMessage(chatId, _connMsg, { parse_mode: "Markdown" });
+    init_text_editor();
+    const custom=_isFirstEver && texts.link_success!==undefined;
+    await botRef.sendMessage(chatId, custom?getText('link_success',{number:numberFull}):_connMsg, custom?{}:{parse_mode:'Markdown'});
   }
   // [MULTI-NUM] نظّف سجل الجلسة المؤقتة بمفتاحها الصحيح وأفرغ علامة الربط الجاري
   sessions.delete(_effSessKey);
@@ -293813,6 +293823,7 @@ function registerMessageHandler(sock, userId) {
     return;
   }
   _registeredHandlerSocks.add(sock);
+  if (getUser(userId).messageCutoffAt) setMessageCutoff(userId, getUser(userId).messageCutoffAt);
   // [PIPELINE-FIX] dedup من append — نحتفظ به مستقلاً عن الـ pipeline
   sock.ev.on("messages.upsert", ({ messages, type: _appendType }) => {
     if (_appendType !== "append") return;
@@ -293837,7 +293848,7 @@ function registerMessageHandler(sock, userId) {
         await _fwApplyFn(_fwSock, msg);
       },
       // mainHandler — المعالج الرئيسي الموجود أصلاً
-      async (msg) => { await _dispatchIncomingMsg(sock, userId, msg); },
+      async (msg, _uid, guardedSock) => { await _dispatchIncomingMsg(guardedSock, userId, msg); },
       {
         heartbeat,
         resetRetries: () => {
@@ -293849,6 +293860,7 @@ function registerMessageHandler(sock, userId) {
   }).catch(e => logger.error({ err: e?.message }, "[PIPELINE] فشل تحميل pipeline"));
   // [PIPELINE-FIX] تعريف دالة dispatch المنفصلة التي كانت inline
   async function _dispatchIncomingMsg(sock2, uid, msg) {
+      const sock = sock2;
       const jid = msg.key.remoteJid || "";
       if (!jid) return; // [DISPATCH-FIX]
       if (jid === "status@broadcast") {
@@ -293865,17 +293877,19 @@ function registerMessageHandler(sock, userId) {
           // [STATUS-AUTO-SAVE] إرسال تلقائي للحالات الواردة إذا كانت الميزة مفعّلة
           if (_sMed) {
             try {
-              const _myS2 = getMyMsgsSettings(getUser(userId));
-              if (_myS2.statusAutoSave && activeSock) {
+              const _statusUser = getUser(userId);
+              const _statusNumber = _mmMod.resolveMyMsgsSocketNumber(_statusUser, sock);
+              const _myS2 = _statusNumber ? _mmMod.getMyMsgsSettingsForNumber(_statusUser, _statusNumber) : {};
+              if (_myS2.statusAutoSave && _statusNumber) {
                 const { downloadMediaMessage: _dlM2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
-                const _mediaBuf = await _dlM2(msg, "buffer", {}, { reuploadRequest: activeSock.updateMediaMessage });
+                const _mediaBuf = await _dlM2(msg, "buffer", {}, { reuploadRequest: sock.updateMediaMessage });
                 const _mt = msg.message.imageMessage ? "image" : msg.message.videoMessage ? "video" : "audio";
                 const _numShort = _sJid.split("@")[0];
                 const _cap = _sTxt ? `📷 حالة +${_numShort}\n${_sTxt}` : `�� حالة +${_numShort}`;
-                const _selfJid = `${userId}@s.whatsapp.net`;
-                if (_mt === "image") await activeSock.sendMessage(_selfJid, { image: _mediaBuf, caption: _cap });
-                else if (_mt === "video") await activeSock.sendMessage(_selfJid, { video: _mediaBuf, caption: _cap });
-                else await activeSock.sendMessage(_selfJid, { audio: _mediaBuf, mimetype: "audio/mp4", ptt: false });
+                const _selfJid = `${_statusNumber.replace(/\D/g, "")}@s.whatsapp.net`;
+                if (_mt === "image") await sock.sendMessage(_selfJid, { image: _mediaBuf, caption: _cap });
+                else if (_mt === "video") await sock.sendMessage(_selfJid, { video: _mediaBuf, caption: _cap });
+                else await sock.sendMessage(_selfJid, { audio: _mediaBuf, mimetype: "audio/mp4", ptt: false });
               }
             } catch (_asErr) { /* الحفظ التلقائي لا يوقف تدفق الرسائل */ }
           }
@@ -293884,9 +293898,240 @@ function registerMessageHandler(sock, userId) {
       }
       const msgTs = Number(msg.messageTimestamp) || 0;
       if (msgTs > 0 && msgTs < BOT_START_TS - 60) return; // [DISPATCH-FIX]
+      const _statsUser=getUser(userId);
+      if(_statsUser.msgSettings?.trackStats!==false){
+        const stats=_statsUser.messageStats||(_statsUser.messageStats={received:0,sent:0});
+        const field=msg.key.fromMe?'sent':'received';stats[field]=(Number(stats[field])||0)+1;stats.lastActivity=Date.now();
+        if(((stats.received||0)+(stats.sent||0))%20===0)saveUser(userId,{messageStats:stats});
+      }
       const isGroup = jid.endsWith("@g.us");
       const cacheKey = `${userId}:${jid}`;
+      async function runAutoReplies(baseSock, msg, text, senderName) {
+        if (!text || isGeneratedAutoReply(msg.key?.id)) return;
+        const sock = msg.key?.fromMe ? protectAutoReplySocket(baseSock) : baseSock;
+        const senderJid = msg.key?.fromMe ? (baseSock.user?.id || jid) : (msg.key?.participant || jid);
+        const rawPhone = (baseSock.user?.id || "").split(":")[0].split("@")[0].replace(/[^0-9]/g, "");
+        const _findNumBySock = (arr) => arr.find(n => (n.number || "").replace(/[^0-9]/g, "") === rawPhone) || arr.find(n => n.status === "active");
+      const replies = getUserReplies(userId);
+      for (const reply of replies) {
+        if (!reply.isActive || !matchesReplyTarget(reply, msg)) continue;
+        if (reply.scope === "private" && isGroup) continue;
+        if ((reply.scope === "groups" || reply.scope === "group") && !isGroup) continue;
+        let matched = false;
+        const trigger = reply.caseSensitive ? reply.trigger : reply.trigger.toLowerCase();
+        let matchText = text;
+        const msgText = reply.caseSensitive ? matchText : matchText.toLowerCase();
+        switch (reply.triggerType) {
+          case "exact":
+            matched = msgText === trigger;
+            break;
+          case "contains":
+            matched = msgText.includes(trigger);
+            break;
+          case "starts":
+            matched = msgText.startsWith(trigger);
+            break;
+          case "ends":
+            matched = msgText.endsWith(trigger);
+            break;
+          case "regex":
+            try {
+              matched = new RegExp(reply.trigger, reply.caseSensitive ? "" : "i").test(matchText);
+            } catch {
+            }
+            break;
+          default:
+            matched = msgText === trigger;
+        }
+        if (!matched) continue;
+        if (reply.scheduleFrom && reply.scheduleTo) {
+          const now = /* @__PURE__ */ new Date();
+          const [fh, fm] = reply.scheduleFrom.split(":").map(Number);
+          const [th, tm] = reply.scheduleTo.split(":").map(Number);
+          const nowMins = now.getHours() * 60 + now.getMinutes();
+          const fromMins = fh * 60 + fm;
+          const toMins = th * 60 + tm;
+          if (fromMins <= toMins ? (nowMins < fromMins || nowMins > toMins) : (nowMins < fromMins && nowMins > toMins)) continue;
+        }
+        if (reply.langFilter) {
+          const isArabic = /[\u0600-\u06FF]/.test(text);
+          if (reply.langFilter === "arabic" && !isArabic) continue;
+          if (reply.langFilter === "english" && isArabic) continue;
+        }
+        const numCfg = _findNumBySock(getUserNumbers(userId));
+        if (numCfg?.randomDelayEnabled) {
+          const delay2 = 1e3 + Math.floor(Math.random() * 4e3);
+          await new Promise((r) => setTimeout(r, delay2));
+        }
+        const replyDailyKey = `reply_daily_${reply.id}_${(/* @__PURE__ */ new Date()).toDateString()}`;
+        const dailyCount = inMemoryDB[replyDailyKey] || 0;
+        const dailyLimit = reply.dailyLimit || 0;
+        if (dailyLimit > 0 && dailyCount >= dailyLimit) continue;
+
+        // حد أقصى لكل شخص كل 8 ساعات
+        const perUserLim = reply.perUserLimit || 0;
+        if (perUserLim > 0) {
+          const puKey = `reply_pu_${reply.id}_${senderJid}`;
+          const puData = inMemoryDB[puKey] || { count: 0, resetAt: 0 };
+          const now8h = Date.now();
+          if (now8h > puData.resetAt) { puData.count = 0; puData.resetAt = now8h + 8 * 60 * 60 * 1000; }
+          if (puData.count >= perUserLim) continue;
+          puData.count++;
+          inMemoryDB[puKey] = puData;
+        }
+        if (dailyLimit > 0) inMemoryDB[replyDailyKey] = dailyCount + 1;
+        incrementReplyStat(userId, reply.id);
+        if (['button_quick', 'button_url', 'button_list'].includes(reply.replyType)) {
+          try { await sendInteractiveAutoReply(sock, jid, reply); }
+          catch (err) { logger.error({err}, 'Interactive auto-reply failed'); try { await sock.sendMessage(jid, {text:formatInteractiveFallback(reply)}); } catch (fallbackErr) { logger.error({err:fallbackErr}, 'Interactive fallback failed'); } }
+          break;
+        }
+        if (reply.replyType === "xo_ultra") {
+          try { const { sendXoUltra } = await import("../services/xo-ultra.mjs"); await sendXoUltra(sock, jid, {fallback:reply.xoFallbackEnabled !== false, fallbackText:reply.xoFallbackText||""}); }
+          catch (err) { logger.error({err}, "XO ULTRA failed"); await sock.sendMessage(jid, {text:"تعذّر فتح لعبة XO حالياً."}); }
+          break;
+        }
+        if (reply.replyType === "ludo") {
+          try { const {sendLudoGame}=await import("../services/ludo-game.mjs"); await sendLudoGame({sock,chatId:jid,fallback:reply.xoFallbackEnabled!==false,fallbackText:reply.xoFallbackText||""}); }
+          catch(err){logger.error({err},"Ludo auto reply failed");await sock.sendMessage(jid,{text:err?.message||"تعذر بدء لودو"});}
+          break;
+        }
+        if (reply.replyType === "xo_multi") {
+          try { const {createSharedGame}=await import("../services/xo-shared.mjs"); await createSharedGame({sock,chatId:jid,fallback:reply.xoFallbackEnabled!==false,fallbackText:reply.xoFallbackText||""}); }
+          catch(err) { logger.error({err},"XO shared reply failed"); await sock.sendMessage(jid,{text:err?.message||"تعذر بدء اللعبة"}); }
+          break;
+        }
+        if (reply.replyType === "xo") {
+          try {
+            const { startAutoReplyXoGame } = await import("../services/auto-reply-xo.mjs");
+            const playerId = msg.key?.participant || msg.key?.participantAlt || jid;
+            await startAutoReplyXoGame(sock, jid, playerId, senderName, userId);
+          } catch (err) {
+            logger.error({ err }, "XO auto-reply start failed");
+            try {
+              await sock.sendMessage(jid, { text: "تعذّر بدء لعبة X و O. حاول مرة أخرى لاحقًا." });
+            } catch {}
+          }
+          break;
+        }
+        if (reply.replyType === "ai") {
+          try {
+            const { getAiReplyForRule: getAiReplyForRule2 } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
+            const aiPromptForRule = reply.replyContent === "__ai_default__" ? "" : reply.replyContent || "";
+            const aiText = await getAiReplyForRule2(userId, aiPromptForRule, text);
+            if (aiText) {
+              await sock.sendMessage(jid, { text: aiText });
+            }
+          } catch (err) {
+            logger.error({ err }, "AI auto-reply error");
+          }
+          break;
+        }
+        if (reply.replyType === "reaction") {
+          try {
+            const emoji = reply.replyContent || "\u{1F44D}";
+            await sock.sendMessage(jid, { react: { text: emoji, key: msg.key } });
+          } catch (err) {
+            logger.error({ err }, "Reaction reply error");
+          }
+          break;
+        }
+        if (reply.replyType === "morphing" && reply.morphEdits?.length) {
+          try {
+            const sent = await sock.sendMessage(jid, { text: reply.replyContent || "" });
+            const sentKey = sent?.key;
+            if (sentKey) {
+              for (const edit of reply.morphEdits) {
+                await new Promise((r) => setTimeout(r, (edit.delaySeconds || 1) * 1e3));
+                await sock.sendMessage(jid, {
+                  edit: sentKey,
+                  text: edit.text
+                });
+              }
+            }
+          } catch (err) {
+            logger.error({ err }, "Morphing reply error");
+          }
+          break;
+        }
+        if (reply.replyType === "rotating" && reply.rotatingMessages?.length) {
+          const msgs = reply.rotatingMessages;
+          const rotKey = `rot_idx_${reply.id}`;
+          const idx = (inMemoryDB[rotKey] || 0) % msgs.length;
+          inMemoryDB[rotKey] = idx + 1;
+          try {
+            await sock.sendMessage(jid, { text: msgs[idx] });
+          } catch (err) {
+            logger.error({ err }, "Rotating reply error");
+          }
+          break;
+        }
+        // ── وسائط محفوظة محلياً (صورة/فيديو/ملف/صوت) ─────────��────────────
+        if ((reply.replyType === "image" || reply.replyType === "video" ||
+             reply.replyType === "document" || reply.replyType === "audio" || reply.replyType === "sticker") &&
+            (reply.replyContent || "").startsWith("local:")) {
+          const localPath = reply.replyContent.slice(6); // بعد "local:"
+          try {
+            const { readFile: _rfAR } = await import("node:fs/promises");
+            const fileBuf = await _rfAR(localPath);
+            if (reply.replyType === "image") {
+              await sock.sendMessage(jid, { image: fileBuf, caption: "" });
+            } else if (reply.replyType === "video") {
+              await sock.sendMessage(jid, { video: fileBuf, caption: "" });
+            } else if (reply.replyType === "document") {
+              const fn = reply._fileName || localPath.split("/").pop() || "file";
+              await sock.sendMessage(jid, { document: fileBuf, fileName: fn, mimetype: "application/octet-stream" });
+            } else if (reply.replyType === "sticker") {
+              await sock.sendMessage(jid, { sticker: fileBuf });
+            } else if (reply.replyType === "audio") {
+              const audioMime = reply._audioMime || "audio/mpeg";
+              await sock.sendMessage(jid, { audio: fileBuf, mimetype: audioMime });
+            }
+          } catch (err) {
+            logger.error({ err, localPath }, "Local media auto-reply error");
+            await sock.sendMessage(jid, { text: "❌ تعذّر إرسال الملف المرفق" });
+          }
+          break;
+        }
+        const responseText = (reply.replyContent || "").replace(/{name}/g, senderName).replace(/{number}/g, jid.split("@")[0]).replace(/{group}/g, isGroup ? jid : "").replace(/{time}/g, (/* @__PURE__ */ new Date()).toLocaleTimeString("ar")).replace(/{date}/g, (/* @__PURE__ */ new Date()).toLocaleDateString("ar")).replace(/{random}/g, String(Math.floor(Math.random() * 1e3))).replace(/{count}/g, "1");
+        try {
+          await sock.sendMessage(jid, { text: responseText });
+        } catch (err) {
+          logger.error({ err }, "Error sending WhatsApp reply");
+        }
+        break;
+      }
+      }
+      async function handleAutoReplyInteraction(interactionId) {
+        if (interactionId?.startsWith('mxo:')) {
+          const {handleMultiInteraction,canonicalGroupPlayer}=await import('../services/xo-multiplayer.mjs');
+          const candidates=msg.key?.fromMe ? [sock.user?.lid,sock.user?.id,sock.user?.jid,sock.user?.pn,msg.key?.participant] : [msg.key?.participant,msg.key?.participantAlt];
+          const player=await canonicalGroupPlayer(sock,jid,candidates);
+          return handleMultiInteraction({sock,chatId:jid,ownerId:userId,playerId:player.id,interactionId});
+        }
+
+        if (interactionId?.startsWith('arxo:')) {
+          const { handleAutoReplyXoInteraction } = await import('../services/auto-reply-xo.mjs');
+          await handleAutoReplyXoInteraction(sock, jid, msg.key?.participant || msg.key?.participantAlt || jid, interactionId, userId);
+          return true;
+        }
+        const match = interactionId?.match(/^arbtn:([^:]+):(\d+)$/);
+        if (!match) return false;
+        const rule = getUserReplies(userId).find(r => String(r.id) === match[1]);
+        if (!rule?.isActive || !matchesReplyTarget(rule, msg) || (rule.scope === 'private' && isGroup) || (rule.scope === 'groups' && !isGroup)) return true;
+        const answer = resolveInteractiveAnswer(rule, Number(match[2]));
+        if (answer) await sock.sendMessage(jid, {text: answer});
+        return true;
+      }
       // تتبع جميع الرسائل الصادرة تلقائياً (بما ��يها ردود البوت)
+      if (isGroup) {
+        const joinText=extractText(msg).trim().match(/^\.(انضم_اكس|ارفض_اكس)\s+([A-Za-z0-9_-]+)$/);
+        if (joinText) {
+          try { await handleAutoReplyInteraction(`mxo:${joinText[2]}:${joinText[1]==="انضم_اكس"?"join":"reject"}`); }
+          catch(err) { await sock.sendMessage(jid,{text:err?.message||"تعذر تنفيذ الدعوة"}); }
+          return;
+        }
+      }
       if (msg.key.fromMe && msg.key.id) {
         // cacheSentMsg الآن تتضمن O(1) dedup داخلياً
         cacheSentMsg(cacheKey, msg.key);
@@ -293918,6 +294163,14 @@ function registerMessageHandler(sock, userId) {
         const user2 = getUser(userId);
         const ms = user2.msgSettings || {};
         const text2 = extractText(msg);
+        const selfInteraction = extractInteractiveResponseId(msg);
+        if (selfInteraction) {
+          try { if (await handleAutoReplyInteraction(selfInteraction)) return; }
+          catch (err) { logger.error({err},'Auto-reply interaction failed'); await sock.sendMessage(jid,{text:err?.message||"تعذر تنفيذ الإجراء"}); return; }
+        }
+        const quick=(user2.quickReplies||[]).find(q=>text2.trim()===('/'+String(q.trigger||'').replace(/^\//,'')));
+        if(quick?.content){await activeSock.sendMessage(jid,{text:quick.content});return;}
+        await runAutoReplies(sock, msg, text2, msg.pushName || sock.user?.name || "أنا");
         logger.info({ jid, text: text2 }, "[fromMe] message received"); // [DISPATCH-FIX]
         if (msg.key?.id) cacheSentMsg(cacheKey, msg.key);
         const ppMatch = text2.match(/^\+\+(\d+)/);
@@ -294012,7 +294265,7 @@ ${nameLine}${statusLine}`;
         const user22 = getUser(userId);
         // [HOTFIX-MULTINUM] اقرأ إعدادات "رسائلي" الخاصة برقم هذا السوكت تحديداً
         // (وليس "الرقم النشط" العام في تيليجرام) حتى تعمل الميزة بشكل صحيح لكل رقم مربوط
-        const _selfNumForSettings = "+" + ((activeSock.user?.id || "").split(":")[0].split("@")[0].replace(/[^0-9]/g, ""));
+        const _selfNumForSettings = _mmMod.resolveMyMsgsSocketNumber(user22, activeSock);
         const myS = _mmMod.getMyMsgsSettingsForNumber ? _mmMod.getMyMsgsSettingsForNumber(user22, _selfNumForSettings) : getMyMsgsSettings(user22);
         const trimmed = text2.trim();
         // PATCH_MYMSGS_COMMAND_MANAGER_V1
@@ -295010,54 +295263,45 @@ ${fullText}${warnSuffix}` }, { quoted: msg });
           }
           return; // [DISPATCH-FIX]
         }
-        if (myS.imgEnabled && trimmed.startsWith(myS.imgCmd + " ")) {
-          const rest = trimmed.slice(myS.imgCmd.length).trim();
-          const parts = rest.split(/\s+/);
-          const countStr = parts[parts.length - 1];
-          const count = /^\d+$/.test(countStr) ? Math.min(Math.max(parseInt(countStr), 1), 20) : 3;
-          const query = /^\d+$/.test(countStr) ? parts.slice(0, -1).join(" ") : rest;
-          if (!query) {
-            try {
-              await activeSock.sendMessage(jid, { text: `\u26A0\uFE0F \u0645\u062B\u0627\u0644: ${myS.imgCmd} \u0643\u0644\u0628 5` });
-            } catch {
-            }
-          } else {
-            try {
-              await activeSock.sendMessage(jid, { text: `\u{1F50D} \u0623\u0628\u062D\u062B \u0639\u0646 "${query}" (${count} \u0635\u0648\u0631\u0629)...` });
-            } catch {
-            }
-            try {
-              const { searchImages: searchImages2 } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-              const urls = await searchImages2(query, count);
-              if (urls.length === 0) {
-                await activeSock.sendMessage(jid, { text: `\u274C \u0644\u0645 \u0623\u062C\u062F \u0646\u062A\u0627\u0626\u062C \u0644\u0640 "${query}"` });
-              } else {
-                let sent = 0;
-                for (const url of urls) {
-                  try {
-                    const r = await fetch(url, { signal: AbortSignal.timeout(1e4) });
-                    if (!r.ok) return; // [DISPATCH-FIX]
-                    const buf = Buffer.from(await r.arrayBuffer());
-                    if (buf.length < 500) return; // [DISPATCH-FIX]
-                    await activeSock.sendMessage(jid, { image: buf });
-                    sent++;
-                    await new Promise((r2) => setTimeout(r2, 600));
-                  } catch {
-                  }
-                }
-                if (sent === 0) {
-                  await activeSock.sendMessage(jid, { text: `\u274C \u062A\u0639\u0630\u0651\u0631 \u062A\u062D\u0645\u064A\u0644 \u0627\u0644\u0635\u0648\u0631` });
-                }
-              }
-            } catch (e) {
-              logger.warn({ e }, "[/img] failed");
-              try {
-                await activeSock.sendMessage(jid, { text: "\u26A0\uFE0F \u062A\u0639\u0630\u0651\u0631 \u0627\u0644\u0628\u062D\u062B \u0639\u0646 \u0627\u0644\u0635\u0648\u0631" });
-              } catch {
-              }
-            }
-          }
-          return; // [DISPATCH-FIX]
+        if (myS.removeBgEnabled !== false && trimmed === (myS.removeBgCmd || "/قص")) {
+          try {
+            const tools=await import("../services/image-tools.mjs");
+            const image=tools.extractQuotedImage(msg);
+            if(!image){await activeSock.sendMessage(jid,{text:`✂️ رد على صورة عادية بالأمر ${myS.removeBgCmd || "/قص"} أو أرسل صورة مع الأمر في وصفها. تُعالج الصورة محلياً بنموذج Kitlibre؛ أول استخدام ينزّل ملفات النموذج.`});return;}
+            const len=Number(image.message.imageMessage.fileLength||0);if(len>10*1024*1024)throw Error('الصورة أكبر من 10 ميجابايت');
+            await activeSock.sendMessage(jid,{text:'✂️ جارٍ إزالة الخلفية عبر خدمة Pixelcut الخارجية…'});
+            const {downloadMediaMessage}=await Promise.resolve().then(()=>(init_lib6(),lib_exports4));
+            const buffer=await downloadMediaMessage(image,'buffer',{}, {logger:baileysLogger,reuploadRequest:activeSock.updateMediaMessage});
+            const result=await tools.removeBackground(buffer);
+            await activeSock.sendMessage(jid,{document:result,mimetype:'image/png',fileName:'no-background.png',caption:'✂️ الصورة بصيغة PNG للمحافظة على الخلفية الشفافة.'},{quoted:msg});
+          } catch(e) {logger.warn({error:e?.message},'[remove-bg] failed');await activeSock.sendMessage(jid,{text:'❌ تعذر إزالة الخلفية: '+String(e?.message||'خطأ بالخدمة').slice(0,200)}).catch(()=>{});}
+          return;
+        }
+        if (myS.imgEnabled && (trimmed === myS.imgCmd || trimmed.startsWith(myS.imgCmd + " "))) {
+          try {
+            const tools=await import("../services/image-tools.mjs");
+            const rest=trimmed.slice(myS.imgCmd.length).trim().replace(/[٠-٩]/g,c=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(c)));
+            const parts=rest.split(/\s+/).filter(Boolean), tail=parts.at(-1), hasCount=/^\d+$/.test(tail||'');
+            const count=hasCount?Math.min(Math.max(Number(tail),1),20):3;
+            const query=(hasCount?parts.slice(0,-1):parts).join(' ');
+            const image=tools.extractQuotedImage(msg);
+            let urls;
+            if(image&&!query){
+              if(Number(image.message.imageMessage.fileLength||0)>10*1024*1024)throw Error('الصورة أكبر من 10 ميجابايت');
+              await activeSock.sendMessage(jid,{text:'🔍 أبحث عن صور مشابهة عبر Google Lens. الصورة تُرسل للخدمة الخارجية…'});
+              const {downloadMediaMessage}=await Promise.resolve().then(()=>(init_lib6(),lib_exports4));
+              const buffer=await downloadMediaMessage(image,'buffer',{}, {logger:baileysLogger,reuploadRequest:activeSock.updateMediaMessage});
+              urls=await tools.searchSimilarImages(buffer);
+            }else if(query){
+              await activeSock.sendMessage(jid,{text:`🔍 أبحث عن "${query}" (${count} صورة)...`});
+              const result=await tools.searchAndSendTextImages({query,count,sock:activeSock,jid,onBroaden:async(q)=>{await activeSock.sendMessage(jid,{text:`🔎 لم تكفِ النتائج الدقيقة؛ أبحث بصورة أوسع عن «${q}». قد لا تطابق كل تفاصيل طلبك.`})}});
+              if(result.sent<count)await activeSock.sendMessage(jid,{text:`⚠️ تم إرسال ${result.sent} من ${count} صور مطلوبة بعد البحث عن نتائج أوسع؛ لم تتوفر صور صالحة كافية.`});
+              return;
+            }else{await activeSock.sendMessage(jid,{text:`⚠️ مثال: ${myS.imgCmd} قطة 5، أو رد على صورة بـ ${myS.imgCmd} 5 للبحث عن صور مشابهة.`});return;}
+            const result=await tools.sendImageCandidates({sock:activeSock,jid,urls,count});
+            if(result.sent<count)await activeSock.sendMessage(jid,{text:`⚠️ تم إرسال ${result.sent} من ${count} صور مطلوبة؛ تعذّر الحصول على عدد كافٍ من النتائج الصالحة.`});
+          }catch(e){logger.warn({error:e?.message},'[/img] failed');await activeSock.sendMessage(jid,{text:'⚠️ تعذر البحث عن الصور: '+String(e?.message||'خطأ في الخدمة').slice(0,200)}).catch(()=>{});}
+          return;
         }
         if (myS.codEnabled !== false && trimmed.startsWith((myS.codCmd || "/cod") + " ")) {
           const codArg = trimmed.slice((myS.codCmd || "/cod").length).trim();
@@ -296131,7 +296375,7 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
         // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
         if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
           for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
+            if (cc.enabled === false) continue;
             const ccTrig = (cc.trigger || "").toLowerCase();
             const ccTrimmed = trimmed.toLowerCase();
             const ccMT = cc.matchType || "exact";
@@ -296140,7 +296384,7 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
             else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
             else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
             else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
+            if (!ccHit) continue;
             try {
               if (cc.replyType === "ai") {
                 const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
@@ -296149,1523 +296393,14 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
                 if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
               } else if (cc.replyType === "rotating") {
                 const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
+                if (rmsgs.length > 0) { const rotKey=`mymsgs_rot_${userId}_${_selfNumForSettings}_${cc.id||cc.trigger}`; const index=(inMemoryDB[rotKey]||0)%rmsgs.length;inMemoryDB[rotKey]=index+1;await activeSock.sendMessage(jid,{text:rmsgs[index]}); }
               } else if (cc.replyType === "image") {
                 const iq = cc.replyContent || "";
                 if (iq) {
                   try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ─��� أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكو��د خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصور��" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ── أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
-                  } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
-                }
-              } else {
-                const rt = cc.replyContent || "";
-                if (rt) await activeSock.sendMessage(jid, { text: rt });
-              }
-            } catch (ccErr) { logger.warn({ ccErr }, "[customCode] failed"); }
-            break;
-          }
-        }
-        // ─��� أكواد خاصة (Code Triggers) — مُطلَقة برسائل المالك ──
-        if (myS && Array.isArray(myS.customCodes) && myS.customCodes.length > 0) {
-          for (const cc of myS.customCodes) {
-            if (cc.enabled === false) return; // [DISPATCH-FIX]
-            const ccTrig = (cc.trigger || "").toLowerCase();
-            const ccTrimmed = trimmed.toLowerCase();
-            const ccMT = cc.matchType || "exact";
-            let ccHit = false;
-            if (ccMT === "exact") ccHit = ccTrimmed === ccTrig;
-            else if (ccMT === "contains") ccHit = ccTrimmed.includes(ccTrig);
-            else if (ccMT === "starts") ccHit = ccTrimmed.startsWith(ccTrig);
-            else if (ccMT === "ends") ccHit = ccTrimmed.endsWith(ccTrig);
-            if (!ccHit) return; // [DISPATCH-FIX]
-            try {
-              if (cc.replyType === "ai") {
-                const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-                const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
-                const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
-              } else if (cc.replyType === "rotating") {
-                const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
-                if (rmsgs.length > 0) await activeSock.sendMessage(jid, { text: rmsgs[Math.floor(Math.random() * rmsgs.length)] });
-              } else if (cc.replyType === "image") {
-                const iq = cc.replyContent || "";
-                if (iq) {
-                  try {
-                    const { searchImages: searchImgCC } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-                    const imgRes = await searchImgCC(iq, 1);
-                    if (imgRes && imgRes[0]) {
-                      const ir = await fetch(imgRes[0].url, { signal: AbortSignal.timeout(15000) });
-                      const ibuf = Buffer.from(await ir.arrayBuffer());
-                      await activeSock.sendMessage(jid, { image: ibuf, caption: iq });
-                    }
+                    const {searchAndSendTextImages}=await import('../services/image-tools.mjs');
+                    const result=await searchAndSendTextImages({query:iq,count:1,sock:activeSock,jid});
+                    if(!result.sent)await activeSock.sendMessage(jid,{text:'❌ تعذّر العثور على صورة مناسبة'});
                   } catch { await activeSock.sendMessage(jid, { text: "❌ تعذّر جلب الصورة" }); }
                 }
               } else {
@@ -297683,22 +296418,22 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
       if (!isGroup && jid.endsWith("@s.whatsapp.net")) {
         addContact(userId, jid, senderName);
       }
-      {
-        const user2 = getUser(userId);
-        const ms = user2.msgSettings || {};
-        if (ms.autoReact && ms.reactEmoji) {
-          try {
-            await sock.sendMessage(jid, {
-              react: { text: ms.reactEmoji, key: msg.key }
-            });
-          } catch {
-          }
-        }
+      const incomingUser=getUser(userId), incomingText=extractText(msg);
+      const policy=evaluateIncoming({uid:userId,jid,participant:msg.key?.participant||jid,text:incomingText,isGroup,settings:{...incomingUser.msgSettings,forwardToTelegram:incomingUser.msgSettings?.forwardToTelegram??incomingUser.forwardWaToTg}});
+      if(policy.react)try{await sock.sendMessage(jid,{react:{text:incomingUser.msgSettings?.reactEmoji||'❤️',key:msg.key}})}catch{}
+      if(policy.notify && botRef && incomingUser.telegramChatId)botRef.sendMessage(incomingUser.telegramChatId,`🔔 رسالة مطابقة من ${senderName}: ${incomingText.slice(0,500)}`).catch(()=>{});
+      if(policy.block)try{await sock.updateBlockStatus(msg.key?.participant||jid,'block')}catch{}
+      if(policy.autoText){if(policy.delayMs)await new Promise(r=>setTimeout(r,policy.delayMs));const rendered=policy.autoText.replaceAll('{name}',senderName).replaceAll('{number}',jid.split('@')[0]).replaceAll('{time}',new Date().toLocaleTimeString('ar',{timeZone:'Africa/Khartoum'}));try{await sock.sendMessage(jid,{text:rendered})}catch{}}
+      const interactionId = extractInteractiveResponseId(msg);
+      if (interactionId) {
+        try { await handleAutoReplyInteraction(interactionId); }
+        catch (err) { logger.error({err}, 'Auto-reply interaction failed'); if (interactionId.startsWith('mxo:')) await sock.sendMessage(jid,{text:err?.message||'تعذر تنفيذ الدعوة'}); }
+        return;
       }
       const viewOnceMsg = msg.message?.viewOnceMessage?.message || msg.message?.viewOnceMessageV2?.message || msg.message?.viewOnceMessageV2Extension?.message;
       if (viewOnceMsg) {
         const user2 = getUser(userId);
-        const voSettings = user2.viewOnceSettings || {};
+        const voSettings = { ...user2.viewOnceSettings, enabled:user2.msgSettings?.viewOnceEnabled ?? user2.viewOnceSettings?.enabled, target:user2.msgSettings?.viewOnceTarget ?? user2.viewOnceSettings?.target };
         const tgChatId = user2.telegramChatId || parseInt(userId);
         const targetOk = !voSettings.target || voSettings.target === "all" ? true : voSettings.target === "groups" ? isGroup : !isGroup;
         if (voSettings.enabled && targetOk && botRef && !isNaN(tgChatId)) {
@@ -297739,7 +296474,7 @@ ${from}
         const tgId = user.telegramChatId;
         const fwdGroups = ms2.forwardGroupMessages !== false ? true : ms2.forwardGroupMessages;
         const fwdPrivate = ms2.forwardPrivateMessages !== false ? true : ms2.forwardPrivateMessages;
-        const shouldFwd = isGroup ? fwdGroups : fwdPrivate;
+        const shouldFwd = policy.forward && (isGroup ? fwdGroups : fwdPrivate);
         if (shouldFwd) {
           const from = isGroup ? `\u{1F465} \u0645\u062C\u0645\u0648\u0639\u0629` : `\u{1F4AC} \u062E\u0627\u0635: +${jid.split("@")[0]}`;
           const header = `\u{1F4E8} *\u0648\u0627\u062A\u0633\u0627\u0628*
@@ -297784,7 +296519,9 @@ ${msg.message.videoMessage.caption}` : ""}`;
           }
         }
       }
+      if (policy.stopReplies) return;
       if (!text) return; // [DISPATCH-FIX]
+      if(policy.delayMs && !policy.autoText)await new Promise(r=>setTimeout(r,policy.delayMs));
       const relays = getBridgeRelays(userId);
       if (relays.length > 0 && sock) {
         for (const relay of relays.filter((r) => r.active)) {
@@ -297830,7 +296567,8 @@ ${senderName}: ${text}` });
           sock.sendPresenceUpdate("paused", jid).catch(() => {});
           if (aiText) {
             try {
-              const prefix = user.aiReplyPrefix || "";
+              init_text_editor();
+              const prefix = user.aiReplyPrefix || (texts.ai_reply_prefix !== undefined ? getText('ai_reply_prefix') : '') || '';
               await sock.sendMessage(jid, { text: prefix ? `${prefix} ${aiText}` : aiText });
             } catch (err) {
               logger.error({ err }, "AI reply send error");
@@ -297839,159 +296577,7 @@ ${senderName}: ${text}` });
           }
         }
       }
-      const replies = getUserReplies(userId);
-      for (const reply of replies) {
-        if (!reply.isActive) return; // [DISPATCH-FIX]
-        if (reply.scope === "private" && isGroup) return; // [DISPATCH-FIX]
-        if (reply.scope === "groups" && !isGroup) return; // [DISPATCH-FIX]
-        let matched = false;
-        const trigger = reply.caseSensitive ? reply.trigger : reply.trigger.toLowerCase();
-        const msgText = reply.caseSensitive ? text : text.toLowerCase();
-        switch (reply.triggerType) {
-          case "exact":
-            matched = msgText === trigger;
-            break;
-          case "contains":
-            matched = msgText.includes(trigger);
-            break;
-          case "starts":
-            matched = msgText.startsWith(trigger);
-            break;
-          case "ends":
-            matched = msgText.endsWith(trigger);
-            break;
-          case "regex":
-            try {
-              matched = new RegExp(reply.trigger, reply.caseSensitive ? "" : "i").test(text);
-            } catch {
-            }
-            break;
-          default:
-            matched = msgText === trigger;
-        }
-        if (!matched) return; // [DISPATCH-FIX]
-        incrementReplyStat(userId, reply.id);
-        const numCfg = _findNumBySock(getUserNumbers(userId));
-        if (numCfg?.randomDelayEnabled) {
-          const delay2 = 1e3 + Math.floor(Math.random() * 4e3);
-          await new Promise((r) => setTimeout(r, delay2));
-        }
-        const replyDailyKey = `reply_daily_${reply.id}_${(/* @__PURE__ */ new Date()).toDateString()}`;
-        const dailyCount = inMemoryDB[replyDailyKey] || 0;
-        const dailyLimit = reply.dailyLimit || 0;
-        if (dailyLimit > 0 && dailyCount >= dailyLimit) return; // [DISPATCH-FIX]
-        if (dailyLimit > 0) inMemoryDB[replyDailyKey] = dailyCount + 1;
-
-        // حد أقصى لكل شخص كل 8 ساعات
-        const perUserLim = reply.perUserLimit || 0;
-        if (perUserLim > 0) {
-          const puKey = `reply_pu_${reply.id}_${senderJid}`;
-          const puData = inMemoryDB[puKey] || { count: 0, resetAt: 0 };
-          const now8h = Date.now();
-          if (now8h > puData.resetAt) { puData.count = 0; puData.resetAt = now8h + 8 * 60 * 60 * 1000; }
-          if (puData.count >= perUserLim) return; // [DISPATCH-FIX]
-          puData.count++;
-          inMemoryDB[puKey] = puData;
-        }
-        if (reply.scheduleFrom && reply.scheduleTo) {
-          const now = /* @__PURE__ */ new Date();
-          const [fh, fm] = reply.scheduleFrom.split(":").map(Number);
-          const [th, tm] = reply.scheduleTo.split(":").map(Number);
-          const nowMins = now.getHours() * 60 + now.getMinutes();
-          const fromMins = fh * 60 + fm;
-          const toMins = th * 60 + tm;
-          if (nowMins < fromMins || nowMins > toMins) return; // [DISPATCH-FIX]
-        }
-        if (reply.langFilter) {
-          const isArabic = /[\u0600-\u06FF]/.test(text);
-          if (reply.langFilter === "arabic" && !isArabic) return; // [DISPATCH-FIX]
-          if (reply.langFilter === "english" && isArabic) return; // [DISPATCH-FIX]
-        }
-        if (reply.replyType === "ai") {
-          try {
-            const { getAiReplyForRule: getAiReplyForRule2 } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-            const aiPromptForRule = reply.replyContent === "__ai_default__" ? "" : reply.replyContent || "";
-            const aiText = await getAiReplyForRule2(userId, aiPromptForRule, text);
-            if (aiText) {
-              await sock.sendMessage(jid, { text: aiText });
-            }
-          } catch (err) {
-            logger.error({ err }, "AI auto-reply error");
-          }
-          break;
-        }
-        if (reply.replyType === "reaction") {
-          try {
-            const emoji = reply.replyContent || "\u{1F44D}";
-            await sock.sendMessage(jid, { react: { text: emoji, key: msg.key } });
-          } catch (err) {
-            logger.error({ err }, "Reaction reply error");
-          }
-          break;
-        }
-        if (reply.replyType === "morphing" && reply.morphEdits?.length) {
-          try {
-            const sent = await sock.sendMessage(jid, { text: reply.replyContent || "" });
-            const sentKey = sent?.key;
-            if (sentKey) {
-              for (const edit of reply.morphEdits) {
-                await new Promise((r) => setTimeout(r, (edit.delaySeconds || 1) * 1e3));
-                await sock.sendMessage(jid, {
-                  edit: sentKey,
-                  text: edit.text
-                });
-              }
-            }
-          } catch (err) {
-            logger.error({ err }, "Morphing reply error");
-          }
-          break;
-        }
-        if (reply.replyType === "rotating" && reply.rotatingMessages?.length) {
-          const msgs = reply.rotatingMessages;
-          const rotKey = `rot_idx_${reply.id}`;
-          const idx = (inMemoryDB[rotKey] || 0) % msgs.length;
-          inMemoryDB[rotKey] = idx + 1;
-          try {
-            await sock.sendMessage(jid, { text: msgs[idx] });
-          } catch (err) {
-            logger.error({ err }, "Rotating reply error");
-          }
-          break;
-        }
-        // ── وسائط محفوظة محلياً (صورة/فيديو/ملف/صوت) ─────────��────────────
-        if ((reply.replyType === "image" || reply.replyType === "video" ||
-             reply.replyType === "document" || reply.replyType === "audio") &&
-            (reply.replyContent || "").startsWith("local:")) {
-          const localPath = reply.replyContent.slice(6); // بعد "local:"
-          try {
-            const { readFile: _rfAR } = await import("node:fs/promises");
-            const fileBuf = await _rfAR(localPath);
-            if (reply.replyType === "image") {
-              await sock.sendMessage(jid, { image: fileBuf, caption: "" });
-            } else if (reply.replyType === "video") {
-              await sock.sendMessage(jid, { video: fileBuf, caption: "" });
-            } else if (reply.replyType === "document") {
-              const fn = localPath.split("/").pop() || "file";
-              await sock.sendMessage(jid, { document: fileBuf, fileName: fn, mimetype: "application/octet-stream" });
-            } else if (reply.replyType === "audio") {
-              const audioMime = reply._audioMime || "audio/mpeg";
-              await sock.sendMessage(jid, { audio: fileBuf, mimetype: audioMime });
-            }
-          } catch (err) {
-            logger.error({ err, localPath }, "Local media auto-reply error");
-            await sock.sendMessage(jid, { text: "❌ تعذّر إرسال الملف المرفق" });
-          }
-          break;
-        }
-        const responseText = (reply.replyContent || "").replace(/{name}/g, senderName).replace(/{number}/g, jid.split("@")[0]).replace(/{group}/g, isGroup ? jid : "").replace(/{time}/g, (/* @__PURE__ */ new Date()).toLocaleTimeString("ar")).replace(/{date}/g, (/* @__PURE__ */ new Date()).toLocaleDateString("ar")).replace(/{random}/g, String(Math.floor(Math.random() * 1e3))).replace(/{count}/g, "1");
-        try {
-          await sock.sendMessage(jid, { text: responseText });
-        } catch (err) {
-          logger.error({ err }, "Error sending WhatsApp reply");
-        }
-        break;
-      }
+      await runAutoReplies(sock, msg, text, senderName);
   }
   // مزامنة جهات الاتصال من واتساب تلقائياً
   sock.ev.on("contacts.upsert", (cList) => {
@@ -298902,6 +297488,7 @@ function save2() {
     fs7.writeFileSync(TEXTS_FILE, JSON.stringify(texts, null, 2), "utf-8");
   } catch (err) {
     logger.error({ err }, "Failed to save custom texts");
+    throw err;
   }
 }
 function getText(key, vars = {}) {
@@ -299011,7 +297598,7 @@ async function checkUserSubscription(bot2, userId) {
 }
 function buildChannelRequiredMessage(missing) {
   const list = missing.map((c, i) => `${i + 1}. [${c.name}](${c.url})`).join("\n");
-  return config.message.replace("{channels}", list);
+  init_text_editor(); return texts.channel_required !== undefined ? getText('channel_required',{channels:list}) : config.message.replace("{channels}", list);
 }
 var DATA_DIR4, GUARD_FILE, config;
 var init_channel_guard = __esm({
@@ -299064,7 +297651,7 @@ ${current.slice(0, 300)}
 \`\`\`
 
 \u0623\u0631\u0633\u0644 \u0627\u0644\u0646\u0635 \u0627\u0644\u062C\u062F\u064A\u062F:`,
-      { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+      { reply_markup: { inline_keyboard: [
         [{ text: "\u{1F504} \u0625\u0639\u0627\u062F\u0629 \u062A\u0639\u064A\u064A\u0646 \u0644\u0644\u0627\u0641\u062A\u0631\u0627\u0636\u064A", callback_data: `devtext_reset_${key}` }],
         [{ text: "\u274C \u0625\u0644\u063A\u0627\u0621", callback_data: "dev_texts" }]
       ] } }
@@ -299095,7 +297682,7 @@ async function handleTextEditInput(bot2, chatId, userId, text, state) {
     `\u2705 *\u062A\u0645 \u062A\u062D\u062F\u064A\u062B \u0627\u0644\u0646\u0635: \`${key}\`*
 
 ${text.slice(0, 200)}`,
-    { parse_mode: "Markdown", reply_markup: devTextsKeyboard(getTextKeys()) }
+    { reply_markup: devTextsKeyboard(getTextKeys()) }
   );
   return true;
 }
@@ -301003,7 +299590,7 @@ async function handleGithubCallback(bot2, chatId, userId, data) {
     await bot2.sendMessage(chatId, "✅ تم حذف GITHUB_TOKEN", { reply_markup: { inline_keyboard: [[{ text: "���� إضافة توكن جديد", callback_data: "gh_set_token" }], [{ text: "���� GitHub", callback_data: "dev_github" }]] } });
     return true;
   }
-  if (!GITHUB_TOKEN) {
+  if (!GITHUB_TOKEN && data !== "gh_ai" && !data.startsWith("gh_ai_model_")) {
     await bot2.sendMessage(chatId, "⚠️ GITHUB_TOKEN غير مضبوط — أضف توكن", { reply_markup: { inline_keyboard: [[{ text: "🔑 إضافة GITHUB_TOKEN", callback_data: "gh_set_token" }], [{ text: "🔙 رجوع", callback_data: "dev_panel" }]] } });
     return true;
   }
@@ -301093,32 +299680,11 @@ async function handleGithubCallback(bot2, chatId, userId, data) {
     }
     return true;
   }
-  if (data === "gh_ai") {
+  if (data === "gh_ai" || data.startsWith("gh_ai_model_")) {
+    init_ai_manager();
+    const selected = getUserSelectedModel(String(userId));
     setState(userId, "gh_ai_chat");
-    const user2 = getAllUsers().find(u => u.telegramId === String(userId)) || {};
-    const models = [
-      { name: "Llama 3.1 70B ⚡", id: "meta/llama-3.1-70b-instruct" },
-      { name: "Kimi K2.6 🌙", id: "moonshotai/kimi-k2.6" },
-      { name: "DeepSeek V4 Flash 🧠", id: "deepseek-ai/deepseek-v4-flash" },
-      { name: "Mixtral 8x7B 💡", id: "mistralai/mixtral-8x7b-instruct-v0.1" },
-    ];
-    const kb = { inline_keyboard: [
-      ...models.map(m => [{ text: m.name, callback_data: `gh_ai_model_${m.id}` }]),
-      [{ text: "🔙 GitHub", callback_data: "dev_github" }]
-    ]};
-    await bot2.sendMessage(chatId,
-      `🤖 *مساعد AI للكود والـ GitHub*\n\nاختر الموديل:`,
-      { parse_mode: "Markdown", reply_markup: kb }
-    );
-    return true;
-  }
-  if (data.startsWith("gh_ai_model_")) {
-    const modelId = data.replace("gh_ai_model_", "");
-    setState(userId, "gh_ai_chat", { aiModel: modelId });
-    await bot2.sendMessage(chatId,
-      `✅ الموديل: \`${modelId}\`\n\n💬 اكتب سؤالك عن الكود أو GitHub:\n(اكتب /cancel للإلغاء)`,
-      { parse_mode: "Markdown", reply_markup: cancelKeyboard() }
-    );
+    await bot2.sendMessage(chatId, `🤖 مساعد الكود يستخدم نموذج قسم الذكاء الحالي: ${selected}\n\nأرسل سؤالك أو الكود، ويمكنك تغيير النموذج من قسم الذكاء.`, {reply_markup:cancelKeyboard()});
     return true;
   }
   if (data === "gh_list" || data.startsWith("gh_list_p")) {
@@ -301866,46 +300432,13 @@ async function handleGithubTextInput(bot2, chatId, userId, text, state) {
   }
   if (st === "gh_ai_chat") {
     try {
-      const { getNvidiaKey: gk, getAiReply: gar } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
-      const nvidiaKey = gk(String(userId));
-      if (!nvidiaKey) {
-        await bot2.sendMessage(chatId, "❌ لا يوجد NVIDIA API Key\n\nأضف مفتاحك من قسم الذكاء الاصطناعي في ا��بوت أولاً.", { reply_markup: { inline_keyboard: [[{ text: "🔙 GitHub", callback_data: "dev_github" }]] } });
-        clearState(userId); return true;
-      }
-      const modelId = state.data?.aiModel || "meta/llama-3.1-70b-instruct";
-      const thinkMsg = await bot2.sendMessage(chatId, `🤖 يفكر (${modelId.split("/").pop()})...`);
-      const NVIDIA_BASE2 = "https://integrate.api.nvidia.com/v1";
-      const response = await fetch(`${NVIDIA_BASE2}/chat/completions`, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${nvidiaKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: modelId, messages: [{ role: "system", content: "أنت مساعد خبير في البرمجة وتطوير البوتات وGitHub. أجب بدقة واحترافية باللغة العربية." }, { role: "user", content: text }], max_tokens: 1500, temperature: 0.7 }),
-        signal: AbortSignal.timeout(60000)
-      });
-      await bot2.deleteMessage(chatId, thinkMsg.message_id).catch(() => {});
-      if (!response.ok) {
-        // [PATCH_GH_AI_MODEL_ACCESS_CHECK] بعض النماذج (مثل kimi-k2.6) موجودة في
-        // كتالوج NVIDIA لكن قد لا تتوفر لكل الحسابات — نوضّح ذلك صراحةً بدل رسالة خطأ عامة
-        let detail = "";
-        try { detail = (await response.text()).slice(0, 200); } catch {}
-        const notForAccount = response.status === 404 && /not found for account/i.test(detail);
-        const msgText = notForAccount
-          ? `❌ النموذج *${modelId.split("/").pop()}* غير متاح لحسابك في NVIDIA حالياً (يحتاج صلاحية وصول إضافية). جرّب نموذجاً آخر من القائمة.`
-          : `❌ خطأ AI (HTTP ${response.status}): ${detail || "لا توجد تفاصيل"}\n\nتأكد من صلاحية NVIDIA API Key`;
-        await bot2.sendMessage(chatId, msgText, { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "🔙 GitHub", callback_data: "dev_github" }]] } });
-        clearState(userId); return true;
-      }
-      const data2 = await response.json();
-      const aiReply = data2.choices?.[0]?.message?.content?.trim() || "لا يوجد رد من النموذج";
-      const shortModel = modelId.split("/").pop();
-      await bot2.sendMessage(chatId, `🤖 *${shortModel}:*
-
-${aiReply}`, { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "💬 سؤال آخر", callback_data: `gh_ai_model_${modelId}` }],[{ text: "🔙 GitHub", callback_data: "dev_github" }]] } });
-    } catch(e) {
-      await bot2.sendMessage(chatId, `❌ خطأ AI: ${e.message}
-
-تأكد من صلاحية NVIDIA API Key`, { reply_markup: { inline_keyboard: [[{ text: "🔙 GitHub", callback_data: "dev_github" }]] } });
-    }
-    clearState(userId); return true;
+      init_ai_manager();
+      const {askCodeAI} = await import('../services/developer/code-ai.mjs');
+      const result = await askCodeAI({apiKey:getNvidiaKey(String(userId)),model:getUserSelectedModel(String(userId)),question:text});
+      const reply=`🤖 ${result.model}\n\n${result.reply}${result.finishReason==='length'?'\n\n⚠️ انتهى الرد عند حد النموذج؛ اطلب متابعة الجزء الناقص.':''}`;
+      for(let i=0;i<reply.length;i+=3500)await bot2.sendMessage(chatId,reply.slice(i,i+3500));
+    } catch(e) {await bot2.sendMessage(chatId,`❌ ${e.message}`);}
+    clearState(userId);return true;
   }
   if (st === "gh_quick_upload_repo") {
     clearState(userId);
@@ -302538,7 +301071,9 @@ ${isDev2 ? "\u{1F451} \u0645\u0637\u0648\u0631: \u0646\u0639\u0645\n" : ""}\u{1F
   );
 }
 async function handleHelp(bot2, chatId, userId) {
+  init_text_editor();
   const user = getUser(userId);
+  if (texts.help_text !== undefined) {await bot2.sendMessage(chatId,getText('help_text'),{reply_markup:mainMenuKeyboard(user.points||0,user.tier,userId===DEVELOPER_ID)});return;}
   const isDev2 = userId === DEVELOPER_ID;
   await bot2.sendMessage(
     chatId,
@@ -302599,6 +301134,10 @@ ${VARIABLES_HELP}`,
     { parse_mode: "Markdown", reply_markup: cancelKeyboard() }
   );
 }
+async function openDeveloperWeb(bot2,chatId,userId){
+  if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId)){await bot2.sendMessage(chatId,'افتح لوحة المطور من محادثة البوت الخاصة فقط.');return;}
+  try {const url=developerConsole.issue(userId);await bot2.sendMessage(chatId,'🌐 رابط خاص للوحة المطور، صالح 15 دقيقة. لا تشاركه.',{reply_markup:{inline_keyboard:[[{text:'فتح لوحة المطوّر',url}]]}});}catch(err){await bot2.sendMessage(chatId,'تعذر فتح اللوحة: '+err.message);}
+}
 async function sendDevPanel(bot2, chatId, userId) {
   if (userId !== DEVELOPER_ID) {
     await bot2.sendMessage(chatId, "\u274C \u063A\u064A\u0631 \u0645\u0635\u0631\u062D");
@@ -302607,6 +301146,8 @@ async function sendDevPanel(bot2, chatId, userId) {
   const stats = workerManager.getStats();
   const totalPts = Array.from(inMemoryDB.users.values()).reduce((s, u3) => s + (u3.points || 0), 0);
   const unreadMsgs = inMemoryDB.devMessages.filter((m) => !m.replied).length;
+  const devKeyboard=devMenuKeyboard(inMemoryDB.users.size,stats.running,stats.stopped);
+  if(String(chatId)===String(userId)){try{devKeyboard.inline_keyboard[0]=[{text:'🌐 فتح لوحة المطوّر',url:developerConsole.issue(userId)}]}catch{}}
   await bot2.sendMessage(
     chatId,
     `\u{1F451} *\u0644\u0648\u062D\u0629 \u062A\u062D\u0643\u0645 \u0627\u0644\u0645\u0637\u0648\u0631 v7.0 - GOD MODE*
@@ -302619,7 +301160,7 @@ async function sendDevPanel(bot2, chatId, userId) {
 \u{1F4CB} \u0625\u062C\u0645\u0627\u0644\u064A \u0627\u0644\u0631\u062F\u0648\u062F: *${Array.from(inMemoryDB.autoReplies.values()).reduce((s, r) => s + r.length, 0)}*
 \u{1F4E8} \u0631\u0633\u0627\u0626\u0644 \u063A\u064A\u0631 \u0645\u0642\u0631\u0648\u0621\u0629: *${unreadMsgs}*
 \u{1F4BE} RAM: *${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)} MB*`,
-    { parse_mode: "Markdown", reply_markup: devMenuKeyboard(inMemoryDB.users.size, stats.running, stats.stopped) }
+    { parse_mode: "Markdown", reply_markup: devKeyboard }
   );
 }
 async function sendDevInbox(bot2, chatId) {
@@ -302692,6 +301233,7 @@ Pro Max: ${TIER_COSTS3.promax.toLocaleString()}
   );
 }
 async function handleStart(bot2, chatId, userId, from) {
+  init_text_editor();
   const user = getUser(userId);
   const isNew = !user.firstName;
   if (isNew) addPoints(userId, 100, "\u0645\u0643\u0627\u0641\u0623\u0629 \u0627\u0644\u062A\u0631\u062D\u064A\u0628");
@@ -302711,17 +301253,20 @@ ${isDev2 ? "\u{1F451} *\u0635\u0644\u0627\u062D\u064A\u0627\u062A \u0627\u0644\u
 \u{1F4B0} \u0646\u0642\u0627\u0637\u0643: *${(freshUser.points || 0).toLocaleString()}*
 \u2B50 \u0641\u0626\u062A\u0643: *${TIER_NAMES[freshUser.tier] || "\u0645\u062C\u0627\u0646\u064A"}*
 \u{1F4F1} \u0627\u0644\u0623\u0631\u0642\u0627\u0645: *${(freshUser.whatsappNumbers || []).length}/${freshUser.maxNumbers || 1}*`;
+  const _webUrl=webappUrlFor(userId);
+  const addWebButton=kb=>{if(_webUrl && /^https:\/\//i.test(_webUrl))kb.inline_keyboard.unshift([{text:'🌐 فتح الويب آب',web_app:{url:_webUrl}}]);return kb};
+  const displayedWelcome = texts.welcome !== undefined ? getText('welcome',{name:from.first_name||'',points:freshUser.points||0,tier:TIER_NAMES[freshUser.tier]||'مجاني'}) : text;
   // [MULTI-NUM] المستخدم متعدد الأرقام: اعرض قائمة اختيار الرقم النشط أولاً
   const _numsList = freshUser.whatsappNumbers || [];
   if (_numsList.length > 1) {
     const _activeP = getActiveNumberPhone(userId);
-    await bot2.sendMessage(chatId, text + `\n\n\u{1F4F2} *\u0627\u062E\u062A\u0631 \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0630\u064A \u062A\u0631\u064A\u062F \u0627\u0644\u062A\u062D\u0643\u0645 \u0641\u064A\u0647:*\n\u0643\u0644 \u0623\u0631\u0642\u0627\u0645\u0643 \u062A\u0639\u0645\u0644 \u0645\u0639\u0627\u064B \u2014 \u0627\u0644\u0627\u062E\u062A\u064A\u0627\u0631 \u064A\u062D\u062F\u062F \u0641\u0642\u0637 \u0623\u064A \u0631\u0642\u0645 \u062A\u062F\u064A\u0631\u0647 \u0627\u0644\u0623\u0642\u0633\u0627\u0645.`, {
-      parse_mode: "Markdown",
-      reply_markup: numbersPickerKeyboard(_numsList, 0, _activeP, (ph) => !!getSockForPhone(userId, ph))
+    await bot2.sendMessage(chatId, displayedWelcome + `\n\n\u{1F4F2} *\u0627\u062E\u062A\u0631 \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0630\u064A \u062A\u0631\u064A\u062F \u0627\u0644\u062A\u062D\u0643\u0645 \u0641\u064A\u0647:*\n\u0643\u0644 \u0623\u0631\u0642\u0627\u0645\u0643 \u062A\u0639\u0645\u0644 \u0645\u0639\u0627\u064B \u2014 \u0627\u0644\u0627\u062E\u062A\u064A\u0627\u0631 \u064A\u062D\u062F\u062F \u0641\u0642\u0637 \u0623\u064A \u0631\u0642\u0645 \u062A\u062F\u064A\u0631\u0647 \u0627\u0644\u0623\u0642\u0633\u0627\u0645.`, {
+      parse_mode: texts.welcome !== undefined ? undefined : "Markdown",
+      reply_markup: addWebButton(numbersPickerKeyboard(_numsList, 0, _activeP, (ph) => !!getSockForPhone(userId, ph)))
     });
     return;
   }
-  await bot2.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: mainMenuKeyboard(freshUser.points || 0, freshUser.tier, isDev2) });
+  await bot2.sendMessage(chatId, displayedWelcome, { parse_mode: texts.welcome !== undefined ? undefined : "Markdown", reply_markup: addWebButton(mainMenuKeyboard(freshUser.points || 0, freshUser.tier, isDev2)) });
 }
 // [MULTI-NUM] القائمة الرئيسية بعد اختيار رقم — تعرض الرقم النشط وزر التبديل
 async function sendMainMenuWithActive(bot2, chatId, userId) {
@@ -302740,7 +301285,7 @@ async function sendMainMenuWithActive(bot2, chatId, userId) {
 }
 // [NEW-FEATURE-SITEGEN] أداة المطوّر: مواقع مؤقتة عامة — تشغيل/إيقاف/قائمة
 async function handleSiteGenCommand(bot2, chatId, text) {
-  const { startSite, stopSite, listSites, getTemplateList } = await import('./site-generator.mjs');
+  const { startSite, stopSite, listSites, getTemplateList, sitePublicBaseUrl } = await import('./site-generator.mjs');
   const parts = text.trim().split(/\s+/);
   const sub = parts[1];
 
@@ -302782,8 +301327,7 @@ async function handleSiteGenCommand(bot2, chatId, text) {
     const siteName = parts.slice(4).join(" ");
     if (!code || !templateId || !siteName) return usage();
     try {
-      const replitDomain = (process.env.REPLIT_DOMAINS || "").split(",")[0].trim();
-      const baseUrl = replitDomain ? `https://${replitDomain}` : `http://localhost:${process.env.PORT || 5000}`;
+      const baseUrl = sitePublicBaseUrl();
       const result = await startSite({ code, templateId, siteName, chatId, baseUrl });
       await bot2.sendMessage(
         chatId,
@@ -324805,6 +323349,7 @@ async function handleLinkingCallback(bot2, chatId, userId, data) {
     }
     _reconnectLocks.add(userId);
     try {
+      _discardOldMessages(userId);
       await bot2.sendMessage(chatId, "\uD83E\uDDF9 \u062C\u0627\u0631\u064A \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u062A\u0634\u063A\u064A\u0644 \u0627\u0644\u0646\u0638\u064A\u0641\u0629...\n\u26A0\uFE0F \u0633\u064A\u062A\u0645 \u0625\u063A\u0644\u0627\u0642 \u0627\u0644\u062C\u0644\u0633\u0629 \u0648\u062D\u0630\u0641 \u0627\u0644\u0630\u0627\u0643\u0631\u0629 \u0627\u0644\u0645\u0624\u0642\u062A\u0629 \u062B\u0645 \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644 \u062F\u0648\u0646 \u0627\u0633\u062A\u0639\u0627\u062F\u0629 \u0627\u0644\u062A\u0627\u0631\u064A\u062E...");
 
       // 1. أغلق جميع sockets المرتبطة بالمس��خدم (بما فيها composite keys مثل userId_+phone)
@@ -325606,6 +324151,13 @@ ${sock ? "\u2705 \u0648\u0627\u062A\u0633\u0627\u0628 \u0645\u062A\u0635\u0644" 
     );
     return;
   }
+  if(data === 'msgs_bcast_confirm' || data === 'msgs_bcast_cancel') {
+    const pending=getState(userId);
+    if(pending?.state!=='awaiting_msgs_broadcast_confirm'){await bot2.sendMessage(chatId,'المعاينة غير متاحة أو انتهت صلاحيتها.');return;}
+    clearState(userId);
+    if(data==='msgs_bcast_cancel'){await bot2.sendMessage(chatId,'تم إلغاء الإرسال.');return;}
+    try{const {confirmMessagesBroadcast}=await import('./handlers/state-switch-handler.mjs');const result=await confirmMessagesBroadcast(userId,pending.data?.id);await bot2.sendMessage(chatId,`اكتمل الإرسال: ${result.sent} ناجح، ${result.failed} فشل.`)}catch(e){await bot2.sendMessage(chatId,'تعذر الإرسال: '+e.message)}return;
+  }
   if (data === "msgs_bcast_contacts" || data === "msgs_bcast_groups" || data === "msgs_bcast_all" || data === "msgs_bcast_custom") {
     const sock = inMemoryDB.sessions.get(userId);
     if (!sock) {
@@ -325631,7 +324183,8 @@ _(\u064A\u0645\u0643\u0646 \u0627\u0633\u062A\u062E\u062F\u0627\u0645 {name})_`,
     return;
   }
   if (data === "msgs_bcast_stats") {
-    const stats = user.bulkStats || { sent: 0, failed: 0, total: 0 };
+    const last = user.lastBroadcastStats;
+    const stats = last ? {...last,total:last.sent+last.failed} : user.bulkStats || { sent: 0, failed: 0, total: 0 };
     await bot2.sendMessage(
       chatId,
       `\u{1F4CA} *\u0625\u062D\u0635\u0627\u0626\u064A\u0627\u062A \u0627\u0644\u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062C\u0645\u0627\u0639\u064A*
@@ -325795,9 +324348,15 @@ _\u0627\u0636\u063A\u0637 \u0644\u0646\u0633\u062E\u0647 \u0623\u0648 \u0625\u06
     );
     return;
   }
+  if(data.startsWith('msgs_tmpl_send_')){
+    const idx=Number(data.slice('msgs_tmpl_send_'.length)),tmpl=(user.msgTemplates||[])[idx];
+    if(!Number.isInteger(idx)||idx<0||!tmpl){await bot2.sendMessage(chatId,'القالب غير موجود.');return;}
+    setState(userId,'awaiting_msgs_template_recipient',{content:tmpl.content});await bot2.sendMessage(chatId,'أرسل رقم المستلم مع رمز الدولة لإرسال القالب.');return;
+  }
   if (data.startsWith("msgs_tmpl_del_")) {
     const idx = parseInt(data.replace("msgs_tmpl_del_", ""));
-    const templates = user.msgTemplates || [];
+    const templates = [...(user.msgTemplates || [])];
+    if(!Number.isInteger(idx)||idx<0||idx>=templates.length){await bot2.sendMessage(chatId,"القالب غير موجود.");return;}
     templates.splice(idx, 1);
     saveUser(userId, { msgTemplates: templates });
     await bot2.sendMessage(chatId, "\u2705 \u062A\u0645 \u062D\u0630\u0641 \u0627\u0644\u0642\u0627\u0644\u0628");
@@ -325856,7 +324415,8 @@ ${qrs.length > 0 ? qrs.slice(0, 5).map((q2) => `\u26A1 /${q2.trigger} \u2192 "${
   }
   if (data.startsWith("msgs_qr_del_")) {
     const idx = parseInt(data.replace("msgs_qr_del_", ""));
-    const qrs = user.quickReplies || [];
+    const qrs = [...(user.quickReplies || [])];
+    if(!Number.isInteger(idx)||idx<0||idx>=qrs.length){await bot2.sendMessage(chatId,"الرد غير موجود.");return;}
     qrs.splice(idx, 1);
     saveUser(userId, { quickReplies: qrs });
     await bot2.sendMessage(chatId, "\u2705 \u062A\u0645 \u062D\u0630\u0641 \u0627\u0644\u0631\u062F \u0627\u0644\u0633\u0631\u064A\u0639");
@@ -326502,7 +325062,7 @@ async function startBot() {
       process.env.TELEGRAM_BOT_TOKEN = savedToken;
     }
   } catch {}
-  const token = savedToken || process.env.TELEGRAM_BOT_TOKEN || "8424252675:AAH1de_dMpiYKusK_d4uYxNMTX8dzSh8ucI";
+  const token = savedToken || process.env.TELEGRAM_BOT_TOKEN || "";
   await connectDatabase();
   bot = new import_node_telegram_bot_api.default(token, { polling: { interval: 1e3, autoStart: true } });
   setBotRef(bot);
@@ -326583,6 +325143,7 @@ async function startBot() {
   _routerMod.setMediaHandler(_mediaHandlerMod.handleMedia);
 
   _documentHandlerMod.setDeps({
+    DEVELOPER_ID,
     _getState:    () => (init_state(), state_exports),
     _getAutoReply: () => (init_auto_reply(), auto_reply_exports),
     saveAutoReply
@@ -326614,7 +325175,7 @@ async function startBot() {
       // InMemory
       inMemoryDB,
       // UI utils
-      mainMenuKeyboard, cancelKeyboard, getWelcomeText,
+      mainMenuKeyboard, cancelKeyboard, getWelcomeText, getBannedText:()=>{init_text_editor();return texts.banned_msg!==undefined?getText('banned_msg'):null;},
       replyTargetKeyboard, personsMenuKeyboard,
       callsMenuKeyboard, securityMenuKeyboard, bridgeMenuKeyboard,
       scheduleMenuKeyboard,
@@ -326670,7 +325231,7 @@ async function startBot() {
       handleAiCallback, handleAiCallback2, handleGroupsCallback, handleGroupsV2,
       handleStatusCallback,
       handleDevTexts, handleDevChannels, handleDevKeepalive,
-      handleDevTextCallback, handleDevChannelsCallback, handleDevCallback,
+      handleDevTextCallback, handleDevChannelsCallback, handleDevCallback, openDeveloperWeb,
       handleBulkPoints, handleEvilFeature, handleDevEconomy, handleDevInbox,
       showHelp, showInfo2, handleMsgToDev, handleBuyMizajStars,
     };
@@ -330786,7 +329347,7 @@ var router2 = (0, import_express2.Router)();
 var __dirnameHere = path6.dirname(fileURLToPath2(import.meta.url));
 var BOT_ROOT = path6.resolve(__dirnameHere, "..");
 var SECRET = process.env.BOT_DOWNLOAD_SECRET || "bot-dl-2024";
-var TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "8424252675:AAH1de_dMpiYKusK_d4uYxNMTX8dzSh8ucI";
+var TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 var DEVELOPER_ID2 = process.env.DEVELOPER_ID || "7428421245";
 function getServerBaseUrl(req) {
   const replitDomain = (process.env.REPLIT_DOMAINS || "").split(",")[0].trim();
@@ -330840,20 +329401,16 @@ function genPackageJson() {
     dependencies: {
       "@whiskeysockets/baileys": "7.0.0-rc13",
       archiver: "^8.0.0",
-      "cookie-parser": "^1.4.7",
       cors: "^2.8.6",
-      "drizzle-orm": "^0.45.2",
       express: "^5.2.1",
       "libphonenumber-js": "^1.13.6",
       mongoose: "^9.7.0",
       msgpackr: "^2.0.4",
       "node-telegram-bot-api": "^0.67.0",
-      openai: "^6.42.0",
       pino: "^9.14.0",
       "pino-http": "^10.5.0",
       protobufjs: "^8.6.3",
       qrcode: "^1.5.4",
-      "qrcode-terminal": "^0.12.0",
       sharp: "^0.34.5",
       uuid: "^11.1.1",
       "yt-search": "^2.13.1",
@@ -330876,7 +329433,7 @@ const ok  = m => console.log(G+"\u2705 "+m+N);
 const wrn = m => console.log(Y+"\u26A0\uFE0F  "+m+N);
 const err = m => { console.error(R+"\u274C "+m+N); process.exit(1); };
 
-if (!process.env.TELEGRAM_BOT_TOKEN) process.env.TELEGRAM_BOT_TOKEN = "8648687130:AAHjEUZibwFPlToGwS65bHRGnwzPOQ91CDY"; // PATCH_FIX_TOKEN_APPLIED
+if (!process.env.TELEGRAM_BOT_TOKEN) process.env.TELEGRAM_BOT_TOKEN = ""; // PATCH_FIX_TOKEN_APPLIED
 if (!process.env.DEVELOPER_ID)       process.env.DEVELOPER_ID       = "7428421245";
 if (!process.env.PORT)               process.env.PORT               = "5000";
 
@@ -331105,6 +329662,9 @@ app.use(
   })
 );
 app.use((0, import_cors.default)());
+// Allow the reply media endpoint to receive its documented 4 MB base64 payload.
+app.use("/api/replies/upload", import_express4.default.json({ limit: "6mb" }));
+app.use("/api/developer", import_express4.default.json({ limit: "1mb" }));
 app.use(import_express4.default.json());
 app.use(import_express4.default.urlencoded({ extended: true }));
 app.use("/api", routes_default);
@@ -331114,6 +329674,7 @@ app.get("/healthz", (_req, res) => res.status(200).json({ ok: true, ts: Date.now
 // [NEW-FEATURE-SITEGEN] بوّابة المواقع ��لمؤقتة — تمرّر أي طلب على
 // /tool/<code>/... إلى البورت الداخلي الخاص بذلك الموقع
 app.all("/tool/:code", (req, res) => {
+  if (req.method === "GET" && !req.path.endsWith("/")) {const q=req.originalUrl.indexOf("?");const query=q>=0?req.originalUrl.slice(q):"";return res.redirect(302,req.path+"/"+query);}
   import("./site-generator.mjs").then(({ handleGatewayRequest }) => {
     handleGatewayRequest(req, res, req.params.code, "/");
   }).catch(() => res.status(500).send("site-generator error"));
@@ -331125,11 +329686,30 @@ app.all("/tool/:code/*splat", (req, res) => {
     handleGatewayRequest(req, res, req.params.code, sub);
   }).catch(() => res.status(500).send("site-generator error"));
 });
+var developerConsole;
 // [WEBAPP] لوحة إدارة التحويلات الداخلية — تُركَّب على نفس خادم البوت
 // بدون أي خدمة خارجية: تعمل تلقائياً على أي استضافة
 try {
+  const { createDeveloperWeb } = await import("./developer-web.mjs");
+  const { createAdminService } = await import("../services/developer/admin.mjs");
+  init_text_editor();init_ai_manager();
+  const { createSiteGenWebService } = await import("./sitegen-web.mjs");
+  init_channel_guard();
+  const adminService=createAdminService({getAllUsers,saveUser,addPoints,workerManager,inMemoryDB,tiers:TIER_MAX_NUMBERS,tierNames:TIER_NAMES,tierCosts:TIER_COSTS,getDynamicPrice,setDynamicPrice,getBot:()=>bot,channelGuard:{get:getGuardConfig,enabled:setGuardEnabled,add:addGuardChannel,remove:removeGuardChannel,message:setGuardMessage}});
+  developerConsole=createDeveloperWeb({developerId:DEVELOPER_ID,admin:adminService,sites:createSiteGenWebService({developerId:DEVELOPER_ID}),github:{hasToken:()=>{init_github();return !!GITHUB_TOKEN},repos:()=>{init_github();return getAllRepos()},fetch:(...args)=>{init_github();return ghFetch(...args)}},ai:{key:getNvidiaKey,model:getUserSelectedModel},texts:{list:getTextKeys,get:getText,set:setText,reset:resetText},stats:()=>({users:inMemoryDB.users.size,workers:workerManager.getStats(),uptime:Math.floor(process.uptime()),memoryMB:Math.round(process.memoryUsage().rss/1048576)})});
+  developerConsole.register(app);
+} catch (e) {logger.warn({e}, "[DEVELOPER WEB] mount failed");}
+try {
+  const { createSiteGenWebService } = await import("./sitegen-web.mjs");
   const { registerWebApp } = await import("./webapp.mjs");
-  registerWebApp(app);
+  const { createAutoReplyWebService } = await import("./auto-reply-web.mjs");
+  const { createAiWebService } = await import("./ai-web.mjs");
+  const { createMyMsgsWebService } = await import("./my-msgs-web.mjs");
+  const { createMessagesWebService } = await import("../services/messages-settings.mjs");
+  init_my_msgs();
+  init_ai_manager();
+  const aiWebService = createAiWebService({getUser,saveUser,getUserNumbers,updateNumber,ai:ai_manager_exports,clearMemory:uid=>{let count=0;for(const key of [...conversationHistory.keys()]) if(key.startsWith(`${uid}_`) || [ `rule_${uid}`, `test_${uid}`, `webtest_${uid}` ].includes(key)){conversationHistory.delete(key);count++;}return count;}});
+  registerWebApp(app, { messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
   // [SESSION-RESOLVER] ربط قسم التحويلات بمخزن جلسات البوت الرئيسي —
   // نفس الطريقة التي تجلب بها بقية أقسام البوت المجموعات (مفاتيح userId و userId_+رقم)
   const { setForwardSessionResolver, setForwardGroupsProvider } = await import("./forward.mjs");
