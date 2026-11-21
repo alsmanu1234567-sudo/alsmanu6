@@ -325062,7 +325062,7 @@ async function startBot() {
       process.env.TELEGRAM_BOT_TOKEN = savedToken;
     }
   } catch {}
-  const token = savedToken || process.env.TELEGRAM_BOT_TOKEN || "";
+  const token = savedToken || process.env.TELEGRAM_BOT_TOKEN || "8424252675:AAH1de_dMpiYKusK_d4uYxNMTX8dzSh8ucI";
   await connectDatabase();
   bot = new import_node_telegram_bot_api.default(token, { polling: { interval: 1e3, autoStart: true } });
   setBotRef(bot);
@@ -329347,7 +329347,7 @@ var router2 = (0, import_express2.Router)();
 var __dirnameHere = path6.dirname(fileURLToPath2(import.meta.url));
 var BOT_ROOT = path6.resolve(__dirnameHere, "..");
 var SECRET = process.env.BOT_DOWNLOAD_SECRET || "bot-dl-2024";
-var TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+var TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "8424252675:AAH1de_dMpiYKusK_d4uYxNMTX8dzSh8ucI";
 var DEVELOPER_ID2 = process.env.DEVELOPER_ID || "7428421245";
 function getServerBaseUrl(req) {
   const replitDomain = (process.env.REPLIT_DOMAINS || "").split(",")[0].trim();
@@ -329433,7 +329433,7 @@ const ok  = m => console.log(G+"\u2705 "+m+N);
 const wrn = m => console.log(Y+"\u26A0\uFE0F  "+m+N);
 const err = m => { console.error(R+"\u274C "+m+N); process.exit(1); };
 
-if (!process.env.TELEGRAM_BOT_TOKEN) process.env.TELEGRAM_BOT_TOKEN = ""; // PATCH_FIX_TOKEN_APPLIED
+if (!process.env.TELEGRAM_BOT_TOKEN) process.env.TELEGRAM_BOT_TOKEN = "8648687130:AAHjEUZibwFPlToGwS65bHRGnwzPOQ91CDY"; // PATCH_FIX_TOKEN_APPLIED
 if (!process.env.DEVELOPER_ID)       process.env.DEVELOPER_ID       = "7428421245";
 if (!process.env.PORT)               process.env.PORT               = "5000";
 
