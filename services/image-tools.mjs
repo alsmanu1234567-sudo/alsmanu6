@@ -1,3 +1,5 @@
+import {readFile} from 'node:fs/promises';
+import {fileURLToPath} from 'node:url';
 import {lookup} from 'node:dns/promises';
 import {request as httpRequest} from 'node:http';
 import {request as httpsRequest} from 'node:https';
@@ -24,13 +26,17 @@ export function broaderImageQuery(query){const words=String(query||'').trim().sp
 export async function searchAndSendTextImages({query,count,sock,jid,search=searchImageCandidates,send=sendImageCandidates,onBroaden=async()=>{}}){const seen=new Set();let sent=0,broader=null;const target=Math.min(80,Math.max(30,count*4));const exact=await search(query,{target});let result=await send({sock,jid,urls:exact,count,seen});sent+=result.sent;if(sent<count){const next=broaderImageQuery(query);if(next&&next!==query){broader=next;await onBroaden(next);const alternatives=await search(next,{target});result=await send({sock,jid,urls:alternatives,count:count-sent,seen});sent+=result.sent}}return {sent,requested:count,broaderQuery:broader}}
 
 function imageMime(buffer){if(buffer[0]===255)return ['image/jpeg','image.jpg'];if(buffer.subarray(0,4).toString()==='RIFF')return ['image/webp','image.webp'];if(buffer.subarray(0,4).toString()==='GIF8')return ['image/gif','image.gif'];return ['image/png','image.png']}
-export async function removeBackground(buffer,{fetchImpl=fetch}={}){
+const poofKeyFile=fileURLToPath(new URL('../data/poof-api-key.txt',import.meta.url));
+async function readPoofKey(){const env=String(process.env.POOF_API_KEY||'').trim();if(env)return env;try{return (await readFile(poofKeyFile,'utf8')).trim()}catch{return ''}}
+export async function removeBackground(buffer,{fetchImpl=fetch,apiKey}={}){
  if(!Buffer.isBuffer(buffer)||!imageMagic(buffer)||buffer.length>10*1024*1024)throw Error('الصورة غير صالحة أو أكبر من 10 ميجابايت');
- const form=new FormData(); form.append('format','png'); form.append('model','v1'); const [mime,name]=imageMime(buffer); form.append('image',new Blob([buffer],{type:mime}),name);
- const response=await fetchImpl('https://api2.pixelcut.app/image/matte/v1',{method:'POST',headers:{Accept:'image/png,image/*,application/json','x-locale':'en','x-client-version':'web:pixa.com:4a5b0af2','User-Agent':UA,Origin:'https://remove-image-background-v2.vercel.app',Referer:'https://remove-image-background-v2.vercel.app/'},body:form,signal:AbortSignal.timeout(120000)});
- if(!response.ok)throw Error(`خدمة إزالة الخلفية غير متاحة (HTTP ${response.status})`);
+ const [mime,name]=imageMime(buffer);if(mime==='image/gif')throw Error('صيغة GIF غير مدعومة هنا؛ أرسل صورة PNG أو JPEG أو WebP');
+ const key=String(apiKey??await readPoofKey()).trim();if(!key)throw Error('مفتاح Poof غير مضبوط؛ اضبط POOF_API_KEY أو ملف data/poof-api-key.txt');
+ const form=new FormData();form.append('file',new Blob([buffer],{type:mime}),name);form.append('format','png');form.append('channels','rgba');
+ let response;try{response=await fetchImpl('https://api.poof.bg/v1/remove',{method:'POST',headers:{'x-api-key':key,Accept:'image/png'},body:form,signal:AbortSignal.timeout(120000),redirect:'error'})}catch{throw Error('تعذر الاتصال بخدمة Poof أو انتهت المهلة')}
+ if(response.status!==200){if(response.status===401||response.status===403)throw Error('مفتاح Poof غير صالح أو لا يملك صلاحية');if(response.status===402)throw Error('رصيد Poof غير كافٍ');if(response.status===429)throw Error('تم تجاوز حد طلبات Poof؛ حاول لاحقاً (HTTP 429)');throw Error(`خدمة Poof لم تُكمل الطلب (HTTP ${response.status})`)}
  const limit=15*1024*1024;if(Number(response.headers.get('content-length'))>limit)throw Error('نتيجة الخدمة كبيرة جداً');
- let chunks=[],size=0;for await(const chunk of response.body){size+=chunk.length;if(size>limit)throw Error('نتيجة الخدمة كبيرة جداً');chunks.push(chunk)}
+ if(!response.body)throw Error('الخدمة لم ترجع صورة');let chunks=[],size=0;for await(const chunk of response.body){size+=chunk.length;if(size>limit)throw Error('نتيجة الخدمة كبيرة جداً');chunks.push(chunk)}
  const data=Buffer.concat(chunks);if(!data.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))throw Error('الخدمة لم ترجع صورة PNG صالحة');return data;
 }
 
