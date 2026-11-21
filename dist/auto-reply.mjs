@@ -1,3 +1,4 @@
+import {typingSettings,validateTypingSettings} from '../services/reply-typing.mjs';
 import { parseInteractiveConfig } from "../services/auto-reply-interactive.mjs";
 // ============================================================
 // dist/auto-reply.mjs — قسم الردود التلقائية (ملف مستقل)
@@ -370,6 +371,12 @@ export async function handleAutoReplyCallback(bot2, chatId, userId, data) {
       { parse_mode: "Markdown", reply_markup: cancelKeyboard() }
     );
     return true;
+  }
+  if(data==='reply_typing_settings'||data==='reply_typing_toggle'||data==='reply_typing_predelay'||data==='reply_typing_duration'){
+    let cfg=typingSettings(getUser(userId));
+    if(data==='reply_typing_toggle'){cfg=validateTypingSettings({...cfg,enabled:!cfg.enabled});_deps.saveUser(userId,{autoReplyTyping:cfg});}
+    if(data==='reply_typing_predelay'||data==='reply_typing_duration'){setState(userId,'awaiting_reply_typing_seconds',{field:data==='reply_typing_predelay'?'preDelaySeconds':'typingSeconds'});await bot2.sendMessage(chatId,data==='reply_typing_predelay'?'أرسل مدة الانتظار قبل ظهور يكتب بالثواني، من 0 إلى 30 (مثال 0.5):':'أرسل مدة ظهور يكتب بالثواني، من 0.1 إلى 30 (مثال 0.5):');return true;}
+    await bot2.sendMessage(chatId,`⌨️ مؤشر واتساب «يكتب…»\nالحالة: ${cfg.enabled?'مفعّل':'متوقف'}\nالانتظار قبل ظهوره: ${cfg.preDelaySeconds} ثانية\nمدة ظهوره: ${cfg.typingSeconds} ثانية`,{reply_markup:{inline_keyboard:[[{text:cfg.enabled?'إيقاف':'تفعيل',callback_data:'reply_typing_toggle'}],[{text:'تغيير انتظار البداية',callback_data:'reply_typing_predelay'},{text:'تغيير مدة الكتابة',callback_data:'reply_typing_duration'}],[{text:'رجوع',callback_data:'menu_replies'}]]}});return true;
   }
   if (data === "reply_random_delay") {
     const numMgr = await _deps.getNumberManager();

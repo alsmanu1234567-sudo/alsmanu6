@@ -1,3 +1,4 @@
+import {typingSettings,validateTypingSettings} from '../services/reply-typing.mjs';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -53,12 +54,14 @@ export function validateWebReply(uid, input, existing = {}) {
     ...(["xo_ultra","xo_multi","ludo"].includes(replyType) ? {xoFallbackEnabled:input.xoFallbackEnabled !== false, xoFallbackText:STR(input.xoFallbackText||"",2000,"رسالة الرابط")} : {}),
     ...(MEDIA.has(replyType) ? {_audioMime: STR(input._audioMime || existing._audioMime || '',120,'نوع الملف'), _fileName: STR(input._fileName || existing._fileName || '',160,'اسم الملف')} : {})};
 }
-export function createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber}) {
+export function createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber,getUser,saveUser}) {
   const list=uid=>getUserReplies(String(uid)).map(r=>({...r, usage:getReplyStat(String(uid),r.id)}));
   function write(uid, replies) { inMemoryDB.autoReplies.set(String(uid), replies); persistReplies(); }
   function find(uid,id) {const r=getUserReplies(String(uid)).find(x=>String(x.id)===String(id)); if(!r) throw Error('الرد غير موجود'); return r;}
   return {
     list,
+    typing(uid){if(!getUser)throw Error('الإعداد غير جاهز');return typingSettings(getUser(String(uid)));},
+    saveTyping(uid,input){if(!getUser||!saveUser)throw Error('الإعداد غير جاهز');const settings=validateTypingSettings(input);saveUser(String(uid),{autoReplyTyping:settings});return settings;},
     save(uid,input) {uid=String(uid);const items=getUserReplies(uid),old=input.id?find(uid,input.id):null; const r=validateWebReply(uid,input,old||{}); if(old){r.id=old.id;write(uid,items.map(x=>x===old?r:x));} else {r.id=randomUUID();r.createdAt=new Date().toISOString();write(uid,[...items,r]);}return r;},
     delete(uid,id){uid=String(uid);const old=find(uid,id);write(uid,getUserReplies(uid).filter(x=>x!==old));return {ok:true};},
     toggle(uid,id,on){if(typeof on!=='boolean')throw Error('الحالة غير صالحة');uid=String(uid);const old=find(uid,id);write(uid,getUserReplies(uid).map(x=>x===old?{...x,isActive:on}:x));return {ok:true};},

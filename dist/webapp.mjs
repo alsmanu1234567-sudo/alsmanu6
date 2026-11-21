@@ -160,6 +160,8 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/replies/duplicate', parseJson, guard(async (uid, req) => reply().duplicate(uid, req.body?.id)));
   app.post('/api/replies/import', parseJson, guard(async (uid, req) => reply().import(uid, req.body?.replies)));
   app.post('/api/replies/upload', parseJson, guard(async (uid, req) => await reply().upload(uid, req.body || {})));
+  app.get('/api/replies/typing',guard(async uid=>reply().typing(uid)));
+  app.post('/api/replies/typing',parseJson,guard(async(uid,req)=>reply().saveTyping(uid,req.body)));
   app.post('/api/replies/delay', parseJson, guard(async (uid, req) => reply().delay(uid, req.body?.id, req.body?.enabled)));
 
   app.get("/api/fw/overview", guard(async (uid) => webGetOverview(uid)));

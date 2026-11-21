@@ -1,3 +1,4 @@
+import {typingSettings,validateTypingSettings} from '../../services/reply-typing.mjs';
 // dist/handlers/state-switch-handler.mjs
 // Phase 6: State Switch Handler — Business Logic المستخرج من text-handler.mjs
 // Phase 9: يستخدم bridge/bulk-send-service و groups/group-compare-service
@@ -41,6 +42,9 @@ export async function handleText(bot2, msg) {
 
   if (!state.state) return false;
 
+  if(state.state==='awaiting_reply_typing_seconds'){
+    try{const field=state.data?.field;if(!['preDelaySeconds','typingSeconds'].includes(field)||!text.trim())throw Error('أدخل رقماً صالحاً');const cfg=validateTypingSettings({...typingSettings(user),[field]:Number(text.trim().replace('٫','.'))});saveUser(userId,{autoReplyTyping:cfg});clearState(userId);await bot2.sendMessage(chatId,`✅ حُفظت المدة: ${cfg[field]} ثانية.`,{reply_markup:{inline_keyboard:[[{text:'إعداد مؤشر يكتب',callback_data:'reply_typing_settings'}]]}})}catch(e){await bot2.sendMessage(chatId,'⚠️ '+e.message)}return true;
+  }
   // Account-wide Messages states; these are separate from My Messages.
   const simpleStates={awaiting_away_message:'awayMessage',awaiting_welcome_message:'welcomeMessage',awaiting_fwd_keywords:'forwardOnlyKeywords',awaiting_notify_keywords:'smartNotifyKeywords',awaiting_word_filter:'wordFilter',awaiting_ignore_number:'ignoreList'};
   if(simpleStates[state.state]){

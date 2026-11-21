@@ -1,3 +1,5 @@
+import {waitForTyping,typingSettings} from '../services/reply-typing.mjs';
+import {getMessageCutoff as replyCutoff,isMessageAfterCutoff as replyIsFresh} from '../engine/message-cutoff.mjs';
 import {evaluateIncoming} from '../services/messages-settings.mjs';
 import {webappUrlFor} from './webapp-auth.mjs';
 import { sendInteractiveAutoReply, resolveInteractiveAnswer, formatInteractiveFallback } from '../services/auto-reply-interactive.mjs';
@@ -124745,6 +124747,7 @@ function repliesMenuKeyboard(activeCount, inactiveCount) {
       [{ text: "\u{1F5D1}\uFE0F \u062D\u0630\u0641 \u0631\u062F", callback_data: "reply_delete" }, { text: "\u25B6\uFE0F \u062A\u0641\u0639\u064A\u0644/\u062A\u0639\u0637\u064A\u0644", callback_data: "reply_toggle" }],
       [{ text: "\u{1F50D} \u0628\u062D\u062B", callback_data: "reply_search" }, { text: "\u{1F4CA} \u0625\u062D\u0635\u0627\u0626\u064A\u0627\u062A \u0627\u0644\u0631\u062F\u0648\u062F", callback_data: "reply_stats_all" }],
       [{ text: "\u{1F60A} \u0631\u062F \u0628\u062A\u0641\u0627\u0639\u0644 (Reaction)", callback_data: "reply_reaction" }],
+      [{ text: "⌨️ مؤشر يكتب وتأخير الرد", callback_data: "reply_typing_settings" }],
       [{ text: "\u23F1\uFE0F \u062A\u0623\u062E\u064A\u0631 \u0639\u0634\u0648\u0627\u0626\u064A", callback_data: "reply_random_delay" }, { text: "\u{1F504} \u0631\u0633\u0627\u0626\u0644 \u0645\u062A\u0646\u0627\u0648\u0628\u0629", callback_data: "reply_rotating" }],
       [{ text: "\u{1F4C5} \u062C\u062F\u0648\u0644 \u0639\u0645\u0644 \u0627\u0644\u0631\u062F", callback_data: "reply_schedule" }, { text: "\u{1F522} \u062D\u062F \u0623\u0642\u0635\u0649 \u064A\u0648\u0645\u064A", callback_data: "reply_daily_limit" }],
       [{ text: "\u{1F464} \u062D\u062F \u0644\u0643\u0644 \u0634\u062E\u0635 / 8\u0633\u0627\u0639\u0627\u062A", callback_data: "reply_per_user_limit" }],
@@ -293979,6 +293982,9 @@ function registerMessageHandler(sock, userId) {
           puData.count++;
           inMemoryDB[puKey] = puData;
         }
+        const typingConfig=typingSettings(getUser(userId));
+        const typingGeneration=replyCutoff(userId);
+        if(typingConfig.enabled && !await waitForTyping(sock,jid,typingConfig,{valid:()=>replyCutoff(userId)===typingGeneration && replyIsFresh(userId,msg)}))return;
         if (dailyLimit > 0) inMemoryDB[replyDailyKey] = dailyCount + 1;
         incrementReplyStat(userId, reply.id);
         if (['button_quick', 'button_url', 'button_list'].includes(reply.replyType)) {
@@ -298825,6 +298831,7 @@ var init_auto_reply = __esm({
     init_constants();
     // تسجيل الاعتماديات مع ملف الردود التلقائية المستقل
     _arMod.setDeps({
+      saveUser,
       getUserReplies,
       saveAutoReply,
       deleteAutoReply,
@@ -329709,7 +329716,7 @@ try {
   init_my_msgs();
   init_ai_manager();
   const aiWebService = createAiWebService({getUser,saveUser,getUserNumbers,updateNumber,ai:ai_manager_exports,clearMemory:uid=>{let count=0;for(const key of [...conversationHistory.keys()]) if(key.startsWith(`${uid}_`) || [ `rule_${uid}`, `test_${uid}`, `webtest_${uid}` ].includes(key)){conversationHistory.delete(key);count++;}return count;}});
-  registerWebApp(app, { messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
+  registerWebApp(app, { messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber,getUser,saveUser}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
   // [SESSION-RESOLVER] ربط قسم التحويلات بمخزن جلسات البوت الرئيسي —
   // نفس الطريقة التي تجلب بها بقية أقسام البوت المجموعات (مفاتيح userId و userId_+رقم)
   const { setForwardSessionResolver, setForwardGroupsProvider } = await import("./forward.mjs");
