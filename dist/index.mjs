@@ -1,4 +1,6 @@
-import {waitForTyping,typingSettings} from '../services/reply-typing.mjs';
+import {sendCarouselAutoReply,carouselAnswer,carouselFallback} from '../services/auto-reply-carousel.mjs';
+import {waitForTyping,typingSettings,startTyping} from '../services/reply-typing.mjs';
+import {deleteSentMessages} from '../services/fast-message-delete.mjs';
 import {getMessageCutoff as replyCutoff,isMessageAfterCutoff as replyIsFresh} from '../engine/message-cutoff.mjs';
 import {evaluateIncoming} from '../services/messages-settings.mjs';
 import {webappUrlFor} from './webapp-auth.mjs';
@@ -124770,6 +124772,7 @@ function replyTypeKeyboard() {
       [{ text: "🎮 XO نافذة ضد البوت", callback_data: "rtype_xo_ultra" }, { text: "👥 XO نافذة شخصين", callback_data: "rtype_xo_multi" }],
       [{ text: "🔘 أزرار رد سريع", callback_data: "rtype_button_quick" }, { text: "🔗 أزرار روابط", callback_data: "rtype_button_url" }],
       [{ text: "📋 قائمة خيارات", callback_data: "rtype_button_list" }],
+      [{ text: "🃏 بطاقات تمرير", callback_data: "rtype_carousel" }],
       backAndHome()
     ]
   };
@@ -293984,9 +293987,14 @@ function registerMessageHandler(sock, userId) {
         }
         const typingConfig=typingSettings(getUser(userId));
         const typingGeneration=replyCutoff(userId);
-        if(typingConfig.enabled && !await waitForTyping(sock,jid,typingConfig,{valid:()=>replyCutoff(userId)===typingGeneration && replyIsFresh(userId,msg)}))return;
+        if(reply.replyType !== "ai" && typingConfig.enabled && !await waitForTyping(baseSock,jid,typingConfig,{valid:()=>replyCutoff(userId)===typingGeneration && replyIsFresh(userId,msg)}))return;
         if (dailyLimit > 0) inMemoryDB[replyDailyKey] = dailyCount + 1;
         incrementReplyStat(userId, reply.id);
+        if (reply.replyType === 'carousel') {
+          try { await sendCarouselAutoReply(sock, jid, reply); }
+          catch(err) { logger.error({err}, 'Carousel auto-reply failed'); try { await sock.sendMessage(jid, {text:carouselFallback(reply)}); } catch(fallbackErr) { logger.error({err:fallbackErr}, 'Carousel fallback failed'); } }
+          break;
+        }
         if (['button_quick', 'button_url', 'button_list'].includes(reply.replyType)) {
           try { await sendInteractiveAutoReply(sock, jid, reply); }
           catch (err) { logger.error({err}, 'Interactive auto-reply failed'); try { await sock.sendMessage(jid, {text:formatInteractiveFallback(reply)}); } catch (fallbackErr) { logger.error({err:fallbackErr}, 'Interactive fallback failed'); } }
@@ -294021,6 +294029,7 @@ function registerMessageHandler(sock, userId) {
           break;
         }
         if (reply.replyType === "ai") {
+          const stopAiTyping = startTyping(baseSock, jid);
           try {
             const { getAiReplyForRule: getAiReplyForRule2 } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
             const aiPromptForRule = reply.replyContent === "__ai_default__" ? "" : reply.replyContent || "";
@@ -294030,6 +294039,8 @@ function registerMessageHandler(sock, userId) {
             }
           } catch (err) {
             logger.error({ err }, "AI auto-reply error");
+          } finally {
+            await stopAiTyping();
           }
           break;
         }
@@ -294125,7 +294136,7 @@ function registerMessageHandler(sock, userId) {
         if (!match) return false;
         const rule = getUserReplies(userId).find(r => String(r.id) === match[1]);
         if (!rule?.isActive || !matchesReplyTarget(rule, msg) || (rule.scope === 'private' && isGroup) || (rule.scope === 'groups' && !isGroup)) return true;
-        const answer = resolveInteractiveAnswer(rule, Number(match[2]));
+        const answer = rule.replyType === 'carousel' ? carouselAnswer(rule, Number(match[2])) : resolveInteractiveAnswer(rule, Number(match[2]));
         if (answer) await sock.sendMessage(jid, {text: answer});
         return true;
       }
@@ -295607,18 +295618,7 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
             } catch {
             }
           } else {
-            const toDelete = sentMsgs.slice(-count);
-            let deleted = 0;
-            for (const { key: sentKey } of toDelete) {
-              try {
-                await activeSock.sendMessage(jid, { delete: sentKey });
-                deleted++;
-                await new Promise((r) => setTimeout(r, 400));
-              } catch {
-              }
-            }
-            const remaining = sentMsgs.slice(0, sentMsgs.length - toDelete.length);
-            userSentMsgCache.set(cacheKey, remaining);
+            await deleteSentMessages(activeSock, jid, userSentMsgCache, cacheKey, count);
           }
           return; // [DISPATCH-FIX]
         }

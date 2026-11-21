@@ -1,3 +1,4 @@
+import {validateCarousel} from '../services/auto-reply-carousel.mjs';
 import {typingSettings,validateTypingSettings} from '../services/reply-typing.mjs';
 import { parseInteractiveConfig } from "../services/auto-reply-interactive.mjs";
 // ============================================================
@@ -109,6 +110,11 @@ async function handleReplyTypeCallbackInternal(bot2, chatId, userId, data) {
     return;
   }
 
+  if (data === 'rtype_carousel') {
+    setState(userId, 'awaiting_button_config', {replyType:'carousel'});
+    await bot2.sendMessage(chatId, '🃏 لإنشاء بطاقات تمرير بسهولة افتح قسم الردود في الويب آب واختر بطاقات تمرير. أو أرسل JSON يحتوي caption وcards (بطاقتان إلى 10)، وكل بطاقة title وbody وimageUrl وbuttons بمصفوفة {type,label,value}، ونوع الزر quick_reply أو cta_url.');
+    return;
+  }
   if (['rtype_button_quick','rtype_button_url','rtype_button_list'].includes(data)) {
     const replyType = data.slice(6);
     setState(userId, 'awaiting_button_config', { replyType });
@@ -1682,7 +1688,7 @@ export async function handleAutoReplyTextInput(bot2, chatId, userId, text, state
   if (state.state === 'awaiting_button_config') {
     const current = getState(userId);
     try {
-      const config = parseInteractiveConfig(current.data.replyType, text);
+      const config = current.data.replyType === 'carousel' ? validateCarousel(text) : parseInteractiveConfig(current.data.replyType, text);
       setState(userId, 'awaiting_reply_target', { replyContent: JSON.stringify(config) });
       await bot2.sendMessage(chatId, '✅ تم إعداد الأزرار. اختر هدف الرد:', {reply_markup:_deps.replyTargetKeyboard()});
     } catch (error) { await bot2.sendMessage(chatId, `❌ ${error.message}`); }

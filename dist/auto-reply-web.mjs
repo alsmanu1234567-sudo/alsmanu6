@@ -1,10 +1,11 @@
+import {validateCarousel} from '../services/auto-reply-carousel.mjs';
 import {typingSettings,validateTypingSettings} from '../services/reply-typing.mjs';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { validateInteractiveConfig } from '../services/auto-reply-interactive.mjs';
 
-const TYPES = new Set(['text','ai','reaction','rotating','morphing','xo','xo_ultra','xo_multi','ludo','button_quick','button_list','button_url','image','video','audio','document','sticker']);
+const TYPES = new Set(['text','ai','reaction','rotating','morphing','xo','xo_ultra','xo_multi','ludo','button_quick','button_list','button_url','carousel','image','video','audio','document','sticker']);
 const MEDIA = new Set(['image','video','audio','document','sticker']);
 const STR = (v,max,name) => { const s=String(v ?? '').trim(); if(s.length>max) throw Error(`${name} طويل جداً`); return s; };
 const integer = (v,name) => { const n=Number(v || 0); if(!Number.isInteger(n)||n<0||n>100000) throw Error(`${name} غير صالح`);return n; };
@@ -44,6 +45,7 @@ export function validateWebReply(uid, input, existing = {}) {
     morphEdits=input.morphEdits.map(e=>{const text=STR(e.text,4000,'نص التعديل'), delaySeconds=Number(e.delaySeconds);if(!text||!Number.isFinite(delaySeconds)||delaySeconds<0.1||delaySeconds>300) throw Error('التعديل يحتاج نصاً ومدة بين 0.1 و300 ثانية');return {text,delaySeconds};});
   }
   if(replyType.startsWith('button_')) validateInteractiveConfig(replyType,replyContent);
+  if(replyType==='carousel') validateCarousel(replyContent);
   const langFilter=String(input.langFilter||''); if(!['','arabic','english'].includes(langFilter)) throw Error('فلتر اللغة غير صالح');
   const scheduleFrom=String(input.scheduleFrom||''),scheduleTo=String(input.scheduleTo||'');
   const time=/^(?:[01]\d|2[0-3]):[0-5]\d$/;

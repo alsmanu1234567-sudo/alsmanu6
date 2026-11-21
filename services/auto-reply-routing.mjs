@@ -11,6 +11,10 @@ export function isGeneratedAutoReply(id, now = Date.now()) {
 export function protectAutoReplySocket(sock) {
   return new Proxy(sock, {
     get(target, prop) {
+      if (prop === 'relayMessage') return async (jid, content, options = {}) => {
+        if (options.messageId) { isGeneratedAutoReply(null); generated.set(options.messageId, Date.now() + TTL); }
+        return target.relayMessage(jid, content, options);
+      };
       if (prop === 'sendMessage') return async (jid, content, options = {}) => {
         const id = options.messageId || randomBytes(10).toString('hex').toUpperCase();
         isGeneratedAutoReply(null);
