@@ -1,3 +1,4 @@
+import {builtInPoofKey} from './poof-default-key.mjs';
 import {readFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {lookup} from 'node:dns/promises';
@@ -27,7 +28,7 @@ export async function searchAndSendTextImages({query,count,sock,jid,search=searc
 
 function imageMime(buffer){if(buffer[0]===255)return ['image/jpeg','image.jpg'];if(buffer.subarray(0,4).toString()==='RIFF')return ['image/webp','image.webp'];if(buffer.subarray(0,4).toString()==='GIF8')return ['image/gif','image.gif'];return ['image/png','image.png']}
 const poofKeyFile=fileURLToPath(new URL('../data/poof-api-key.txt',import.meta.url));
-async function readPoofKey(){const env=String(process.env.POOF_API_KEY||'').trim();if(env)return env;try{return (await readFile(poofKeyFile,'utf8')).trim()}catch{return ''}}
+async function readPoofKey(){const env=String(process.env.POOF_API_KEY||'').trim();if(env)return env;try{const stored=(await readFile(poofKeyFile,'utf8')).trim();if(stored)return stored}catch{}return builtInPoofKey()}
 export async function removeBackground(buffer,{fetchImpl=fetch,apiKey}={}){
  if(!Buffer.isBuffer(buffer)||!imageMagic(buffer)||buffer.length>10*1024*1024)throw Error('الصورة غير صالحة أو أكبر من 10 ميجابايت');
  const [mime,name]=imageMime(buffer);if(mime==='image/gif')throw Error('صيغة GIF غير مدعومة هنا؛ أرسل صورة PNG أو JPEG أو WebP');
