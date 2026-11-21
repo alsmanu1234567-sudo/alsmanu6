@@ -64,7 +64,7 @@ function guard(handler) {
 }
 
 // ─── التسجيل في تطبيق Express ──────────────────────────────────────
-export function registerWebApp(app, { replyService, aiService, myMsgsService, siteGenService, messagesService } = {}) {
+export function registerWebApp(app, { replyService, aiService, myMsgsService, siteGenService, messagesService, memberService } = {}) {
   // JSON body parsing خاص بمسارات الويب آب فقط (لا يؤثر على بقية البوت)
   const parseJson = (req, res, next) => {
     if (req.headers["content-type"]?.includes("application/json") && !req.body) {
@@ -117,6 +117,17 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.get('/api/sitegen/overview',guard(async uid=>siteWeb().overview(uid)));
   app.post('/api/sitegen/start',parseJson,guard(async(uid,req)=>siteWeb().start(uid,req.body||{})));
   app.post('/api/sitegen/stop',parseJson,guard(async(uid,req)=>siteWeb().stop(uid,req.body?.code)));
+
+  const membersWeb=()=>{if(!memberService)throw Error('مركز الأعضاء غير جاهز');return memberService;};
+  app.get('/member-manager.js',(_req,res)=>{res.setHeader('Content-Type','application/javascript; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(readFileSync(fileURLToPath(new URL('../public/member-manager.js',import.meta.url))));});
+  app.get('/api/member-manager/overview',guard(async uid=>membersWeb().overview(uid)));
+  app.get('/api/member-manager/groups',guard(async uid=>({groups:await membersWeb().groups(uid)})));
+  app.get('/api/member-manager/members',guard(async(uid,req)=>membersWeb().members(uid,req.query?.id,req.query?.q)));
+  app.get('/api/member-manager/job',guard(async(uid,req)=>membersWeb().jobDetail(uid,req.query?.id)));
+  app.post('/api/member-manager/extract',parseJson,guard(async(uid,req)=>membersWeb().extract(uid,req.body)));
+  app.post('/api/member-manager/delete-list',parseJson,guard(async(uid,req)=>membersWeb().removeList(uid,req.body?.id)));
+  app.post('/api/member-manager/start',parseJson,guard(async(uid,req)=>membersWeb().createJob(uid,req.body)));
+  app.post('/api/member-manager/control',parseJson,guard(async(uid,req)=>membersWeb().control(uid,req.body?.id,req.body?.action)));
 
   const messagesWeb = () => {if(!messagesService)throw Error('قسم الرسائل غير جاهز');return messagesService;};
   app.get('/messages-web.js',(_req,res)=>{res.setHeader('Content-Type','application/javascript; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(readFileSync(fileURLToPath(new URL('../public/messages-web.js',import.meta.url))));});
@@ -371,6 +382,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="stylesheet" href="/auto-replies.css">
 <script defer src="/sitegen-web.js"></script>
+<script defer src="/member-manager.js" onload="if (typeof TAB !== 'undefined' && TAB === 'members') render()"></script>
 <script defer src="/messages-web.js" onload="if (typeof TAB !== 'undefined' && TAB === 'messages') render()"></script>
 <script defer src="/my-msgs-web.js" onload="if (typeof TAB !== 'undefined' && TAB === 'mymsgs') render()"></script>
 <script defer src="/ai-web.js" onload="if (typeof TAB !== 'undefined' && TAB === 'ai') render()"></script>
@@ -496,6 +508,8 @@ body{background:radial-gradient(ellipse at 5% 0%,rgba(192,141,255,.18),transpare
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation-duration:.01ms!important;transition-duration:.01ms!important}}
 
 .dash-card{text-align:right;color:var(--txt);cursor:pointer;font:inherit}.dash-card strong,.dash-card small{display:block}.dash-card small{margin-top:8px;opacity:.75}.msg-hero,.msg-links,.msg-actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin:14px 0}.msg-grid,.msg-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:14px}.msg-panel{background:var(--card,#1c2536);border:1px solid #ffffff22;border-radius:16px;padding:16px;margin:12px 0}.msg-panel h2{font-size:18px}.msg-field,.msg-toggle{display:flex;gap:8px;margin:12px 0}.msg-field{flex-direction:column}.msg-field textarea,.msg-field input,.msg-field select{width:100%;padding:10px;background:#101827;color:#fff;border:1px solid #ffffff33;border-radius:9px}.msg-toggle{justify-content:space-between}.msg-toggle small,.msg-list-item small{display:block;opacity:.7}.msg-list-item{display:flex;justify-content:space-between;gap:10px;padding:10px;border-bottom:1px solid #ffffff22;overflow-wrap:anywhere}
+.tabs{overflow-x:auto;overscroll-behavior-inline:contain;max-width:calc(100% - 36px);scrollbar-width:thin}.tab{flex:0 0 auto;white-space:nowrap;padding-inline:12px}@media(min-width:760px){.tabs{max-width:100%}}
+.mm-summary,.mm-actions,.mm-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.mm-head{justify-content:space-between}.mm-summary span,.mm-status{padding:7px 10px;border-radius:999px;background:#ffffff12;font-size:12px}.mm-caution{line-height:1.7;color:#e7d3a4;font-size:12px}.mm-confirm{display:flex;gap:10px;align-items:center;margin:14px 0}.mm-row{display:flex;justify-content:space-between;gap:10px;padding:10px;border-bottom:1px solid #ffffff18;overflow-wrap:anywhere}.mm-search{width:100%;padding:10px;margin-top:12px;border-radius:10px;background:#111426;color:#fff;border:1px solid #ffffff33}.mm-job{padding:14px;margin:10px 0;border:1px solid #ffffff20;border-radius:14px}.mm-job progress{width:100%;margin:10px 0;accent-color:#bea6ff}.mm-job small{color:#bdb5d2}.mm-job p{font-size:12px;color:#e1cf9d}.mm-actions .btn{min-height:39px}
 </style>
 </head>
 <body>
@@ -513,6 +527,7 @@ body{background:radial-gradient(ellipse at 5% 0%,rgba(192,141,255,.18),transpare
   <button class="tab" data-tab="dashboard">🏠 الرئيسية</button>
   <button class="tab act" data-tab="rules">📋 القواعد</button>
   <button class="tab" data-tab="channels">📺 القنوات</button>
+  <button class="tab" data-tab="members">👥 مركز الأعضاء</button>
   <button class="tab" data-tab="groups">👥 المجموعات</button>
   <button class="tab" data-tab="replies">💬 الردود</button>
   <button class="tab" data-tab="ai">✦ الذكاء</button>
@@ -542,7 +557,7 @@ const TOKEN = qs.get("token") || localStorage.getItem("fw_token") || "";
 if (qs.get("token")) localStorage.setItem("fw_token", qs.get("token"));
 
 let ST = { numbers:[], channels:[], groups:[], rules:[], waConnected:false };
-let TAB = ["dashboard","messages","groups","replies","channels","ai","mymsgs"].includes(qs.get("section")) ? qs.get("section") : "rules";
+let TAB = ["dashboard","messages","groups","members","replies","channels","ai","mymsgs"].includes(qs.get("section")) ? qs.get("section") : "rules";
 let Q = "";
 const picCache = {};
 
@@ -578,10 +593,10 @@ async function load(){
     document.getElementById("subTitle").textContent =
       (ST.waConnected ? "واتساب متصل" : "واتساب غير متصل") +
       " · " + ST.rules.length + " قاعدة · " + ST.channels.length + " قناة · " + ST.groups.length + " مجموعة";
-    if(!(TAB === "messages" && document.getElementById("messagesForm")))render();
+    if(!((TAB === "messages" && document.getElementById("messagesForm")) || TAB === "members"))render();
   } catch(e){
     document.getElementById("subTitle").textContent = "⚠️ " + e.message;
-    if (TAB === "replies" || TAB === "ai" || TAB === "mymsgs" || TAB === "messages") render();
+    if (TAB === "replies" || TAB === "ai" || TAB === "mymsgs" || TAB === "messages" || TAB === "members") render();
     else document.getElementById("view").innerHTML = '<div class="empty"><div class="big">🔒</div>' + esc(e.message) + '<br>افتح الرابط من داخل البوت مجدداً.</div>';
   }
 }
@@ -596,7 +611,7 @@ document.getElementById("srchIn").addEventListener("input", (e)=>{
     srchTimer = setTimeout(()=>previewChannel(Q), 450);
   } else {
     document.getElementById("chPreview").classList.add("hide");
-    if(TAB!=="messages")render();
+    if(TAB!=="messages" && TAB!=="members")render();
   }
 });
 
@@ -634,7 +649,7 @@ async function addChannel(jsonStr){
 
 // ─── التبويبات ──────────────────────────────────────────────────
 function selectTab(tab, shouldRender=true){
-  TAB = ["dashboard", "messages", "groups", "channels", "replies", "ai", "mymsgs"].includes(tab) ? tab : "rules";
+  TAB = ["dashboard", "messages", "groups", "members", "channels", "replies", "ai", "mymsgs"].includes(tab) ? tab : "rules";
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("act", t.dataset.tab===TAB));
   document.getElementById("fab").style.display = TAB==="rules" ? "" : "none";
   document.getElementById("srchIn").placeholder = TAB==="groups"
@@ -660,6 +675,7 @@ function filt(arr){
 
 function render(){
   const v = document.getElementById("view");
+  if (TAB === "members") return window.MemberManagerUI ? window.MemberManagerUI.render(v) : (v.innerHTML='<div class="empty">جارٍ تحميل مركز الأعضاء…</div>');
   if (TAB === "dashboard") return renderDashboard(v);
   if (TAB === "rules") return renderRules(v);
   if (TAB === "channels") return renderChannels(v);
@@ -672,7 +688,7 @@ function render(){
 
 function renderDashboard(v){
  const active=ST.rules.filter(r=>r.isActive!==false && r.enabled!==false).length;
- const entries=[['rules','📋 قواعد التحويل',ST.rules.length+' قاعدة · '+active+' مفعلة تقريباً'],['channels','📺 القنوات',ST.channels.length+' قناة'],['groups','👥 المجموعات',ST.groups.length+' مجموعة'],['replies','💬 الردود التلقائية','إدارة الردود'],['messages','✉️ الرسائل','الإعدادات والإرسال الجماعي'],['mymsgs','📨 رسائلي','ميزات الرقم'],['ai','✦ الذكاء','النماذج والإعدادات']];
+ const entries=[['rules','📋 قواعد التحويل',ST.rules.length+' قاعدة · '+active+' مفعلة تقريباً'],['channels','📺 القنوات',ST.channels.length+' قناة'],['groups','👥 المجموعات',ST.groups.length+' مجموعة'],['members','👥 مركز الأعضاء','القوائم والمهام'],['replies','💬 الردود التلقائية','إدارة الردود'],['messages','✉️ الرسائل','الإعدادات والإرسال الجماعي'],['mymsgs','📨 رسائلي','ميزات الرقم'],['ai','✦ الذكاء','النماذج والإعدادات']];
  const q=Q.trim().toLowerCase(), visible=entries.filter(x=>!q||x.slice(1).join(' ').toLowerCase().includes(q));
  v.innerHTML='<div class="msg-hero"><div><h2>لوحة التحكم</h2><p>حالة واتساب: '+(ST.waConnected?'متصل':'غير متصل')+' · ملخص البيانات المحمّلة</p></div><button class="btn btn-s" onclick="load()">↻ تحديث</button></div><div class="msg-grid">'+visible.map(x=>'<button type="button" class="msg-panel dash-card" data-go="'+x[0]+'"><strong>'+esc(x[1])+'</strong><small>'+esc(x[2])+'</small></button>').join('')+'</div>'+(visible.length?'':'<div class="empty">لا توجد أقسام مطابقة</div>');
  v.querySelectorAll('[data-go]').forEach(button=>button.addEventListener('click',()=>{Q='';document.getElementById('srchIn').value='';selectTab(button.dataset.go)}));

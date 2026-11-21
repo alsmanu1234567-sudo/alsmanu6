@@ -18,3 +18,6 @@ logs/
 
 # Poof API credential (never commit)
 data/poof-api-key.txt
+
+# Private group-member lists and job records
+data/member-manager/

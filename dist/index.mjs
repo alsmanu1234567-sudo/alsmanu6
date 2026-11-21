@@ -329713,10 +329713,11 @@ try {
   const { createAiWebService } = await import("./ai-web.mjs");
   const { createMyMsgsWebService } = await import("./my-msgs-web.mjs");
   const { createMessagesWebService } = await import("../services/messages-settings.mjs");
+  const { createGroupMemberManager } = await import("../services/group-member-manager.mjs");
   init_my_msgs();
   init_ai_manager();
   const aiWebService = createAiWebService({getUser,saveUser,getUserNumbers,updateNumber,ai:ai_manager_exports,clearMemory:uid=>{let count=0;for(const key of [...conversationHistory.keys()]) if(key.startsWith(`${uid}_`) || [ `rule_${uid}`, `test_${uid}`, `webtest_${uid}` ].includes(key)){conversationHistory.delete(key);count++;}return count;}});
-  registerWebApp(app, { messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber,getUser,saveUser}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
+  registerWebApp(app, { memberService:createGroupMemberManager({inMemoryDB,getUser,getBot:()=>botRef}), messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber,getUser,saveUser}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
   // [SESSION-RESOLVER] ربط قسم التحويلات بمخزن جلسات البوت الرئيسي —
   // نفس الطريقة التي تجلب بها بقية أقسام البوت المجموعات (مفاتيح userId و userId_+رقم)
   const { setForwardSessionResolver, setForwardGroupsProvider } = await import("./forward.mjs");
