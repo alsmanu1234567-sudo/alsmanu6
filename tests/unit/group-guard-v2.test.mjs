@@ -147,3 +147,27 @@ test('أمر .طرد الكل يطرد الأعضاء غير المشرفين د
   assert.match(guard, /Promise\.allSettled\(chunks\.map/);
   assert.match(guard, /row\?\.admin === "admin" \|\| row\?\.admin === "superadmin"/);
 });
+
+test('المنشن يحوّل معرّف LID إلى رقم الهاتف الحقيقي', async () => {
+  const { resolveMentionJid, mentionText } = await import('../../services/group-guard.mjs');
+  const sock = {
+    groupMetadata: async () => ({
+      participants: [
+        { id: '170579491610832@lid', phoneNumber: '249114375739@s.whatsapp.net', admin: null },
+        { id: '249999999999@s.whatsapp.net', admin: 'admin' },
+      ],
+    }),
+  };
+  assert.equal(await resolveMentionJid(sock, '120363000000000009@g.us', '170579491610832@lid'), '249114375739@s.whatsapp.net');
+  assert.equal(await resolveMentionJid(sock, '120363000000000009@g.us', '249888888888@s.whatsapp.net'), '249888888888@s.whatsapp.net');
+  assert.equal(mentionText('249114375739@s.whatsapp.net'), '@249114375739');
+  assert.equal(mentionText(''), '');
+});
+
+test('كل رسائل التحذير والطرد تستخدم المنشن المحوّل لا كلمة «عضو»', () => {
+  assert.match(guard, /const targetJid = await resolveMentionJid\(sock, groupJid, memberJid\)/);
+  assert.match(guard, /const mention = mentionText\(targetJid\)/);
+  assert.match(guard, /const target = rawTarget \? await resolveMentionJid\(sock, groupJid, rawTarget\) : ""/);
+  assert.match(guard, /const resolvedMember = await resolveMentionJid\(sock, groupJid, memberJid\)/);
+  assert.ok(!/عدد مخالفات \$\{who \? `@\$\{who\.split\("@"\)\[0\]\}` : "العضو"\}/.test(guard), 'لا نكتب «العضو» بدل المنشن');
+});

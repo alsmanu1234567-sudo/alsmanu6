@@ -360,6 +360,60 @@ async function sendCard(sock, groupJid, file, caption, mentions = []) {
   );
 }
 
+// [LID-FIX] بعض الأعضاء معرّفهم LID وليس رقماً — عند المنشن يظهر رقم طويل أو «عضو».
+// نحوّل المعرّف إلى رقم الهاتف الحقيقي من بيانات المجموعة حتى يظهر المنشن أخضر بالاسم.
+const participantsCache = new Map();
+
+async function groupParticipants(sock, groupJid, force = false) {
+  const key = `${groupJid}`;
+  const cached = participantsCache.get(key);
+  if (!force && cached && Date.now() - cached.at < 30_000) return cached.rows;
+  let rows = [];
+  try {
+    const metadata = await sock.groupMetadata(groupJid);
+    rows = Array.isArray(metadata?.participants) ? metadata.participants : [];
+  } catch { }
+  participantsCache.set(key, { at: Date.now(), rows });
+  return rows;
+}
+
+function phoneJidFromRow(row) {
+  const candidates = [row?.phoneNumber, row?.jid, row?.pn, row?.id];
+  for (const candidate of candidates) {
+    const jid = jidOf(candidate);
+    if (jid && jid.endsWith("@s.whatsapp.net")) return jid;
+  }
+  return "";
+}
+
+/** يعيد معرّفاً بصيغة رقم الهاتف إن أمكن، وإلا يعيد الأصل */
+export async function resolveMentionJid(sock, groupJid, memberJid) {
+  const original = jidOf(memberJid);
+  if (!original) return "";
+  if (original.endsWith("@s.whatsapp.net")) return original;
+  const bare = original.split("@")[0].split(":")[0];
+  const rows = await groupParticipants(sock, groupJid);
+  for (const row of rows) {
+    const rowId = jidOf(row?.id || row?.jid);
+    const rowAlt = jidOf(row?.phoneNumber || row?.pn);
+    const rowBare = rowId.split("@")[0].split(":")[0];
+    if (rowId === original || rowAlt === original || (bare && rowBare === bare)) {
+      const resolved = phoneJidFromRow(row);
+      if (resolved) return resolved;
+    }
+  }
+  // احتياط: لو المعرّف يحمل رقماً بالفعل نستخدمه
+  if (/^\d{8,15}$/.test(bare)) return `${bare}@s.whatsapp.net`;
+  return original;
+}
+
+/** نص المنشن الظاهر في الرسالة (يجب أن يطابق الرقم) */
+export function mentionText(jid) {
+  const value = String(jid || "");
+  if (!value) return "";
+  return `@${value.split("@")[0].split(":")[0]}`;
+}
+
 async function isGroupAdmin(sock, groupJid, memberJid) {
   try {
     const metadata = await sock.groupMetadata(groupJid);
@@ -396,7 +450,9 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
   const level = escalationFor(count, cfg.maxWarnings);
   const max = cfg.maxWarnings;
   const kind = level === "first" ? "warn1" : level === "second" ? "warn2" : "warn3";
-  const mention = `@${memberJid.split("@")[0].split(":")[0]}`;
+  // [LID-FIX] منشن حقيقي (أخضر) بدل رقم طويل أو كلمة «عضو»
+  const targetJid = await resolveMentionJid(sock, groupJid, memberJid);
+  const mention = mentionText(targetJid);
   const reasonText = reason === "link" ? "نشر رابط" : reason === "word" ? "كلمة ممنوعة" : reason === "sticker" ? "نشر ملصقات" : "مخالفة القوانين";
   let caption;
   if (level === "final") {
@@ -405,7 +461,7 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
     caption = `⚠️ *تحذير رقم ${count}* ${mention}\nالسبب: ${reasonText}\nلديك ${max - count} تحذير قبل الطرد.`;
   }
 
-  await sendCard(sock, groupJid, cfg.cards[kind], caption, [memberJid]);
+  await sendCard(sock, groupJid, cfg.cards[kind], caption, [targetJid]);
 
   let kicked = false;
   if (level === "final" && cfg.kickOnLimit) {
@@ -444,17 +500,18 @@ export async function handleModeration({ userId, sock, message, cfg }) {
   const media = unwrapMedia(msg);
   const isImage = Boolean(media.imageMessage);
   const isAudio = Boolean(media.audioMessage);
-  const memberTag = `@${memberJid.split("@")[0].split(":")[0]}`;
+  const resolvedMember = await resolveMentionJid(sock, groupJid, memberJid);
+  const memberTag = mentionText(resolvedMember);
 
   if (cfg.imageGuard && isImage) {
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
-    await sock.sendMessage(groupJid, { text: `🖼️ الصور ممنوعة في هذه المجموعة ${memberTag} — حُذفت الصورة لحماية القروب.` }, { mentions: [memberJid] }).catch(() => { });
+    await sock.sendMessage(groupJid, { text: `🖼️ الصور ممنوعة في هذه المجموعة ${memberTag} — حُذفت الصورة لحماية القروب.` }, { mentions: [resolvedMember] }).catch(() => { });
     return { handled: true, action: "image-deleted" };
   }
 
   if (cfg.audioGuard && isAudio) {
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
-    await sock.sendMessage(groupJid, { text: `🎤 الرسائل الصوتية ممنوعة في هذه المجموعة ${memberTag} — حُذف المقطع الصوتي.` }, { mentions: [memberJid] }).catch(() => { });
+    await sock.sendMessage(groupJid, { text: `🎤 الرسائل الصوتية ممنوعة في هذه المجموعة ${memberTag} — حُذف المقطع الصوتي.` }, { mentions: [resolvedMember] }).catch(() => { });
     return { handled: true, action: "audio-deleted" };
   }
 
@@ -466,7 +523,7 @@ export async function handleModeration({ userId, sock, message, cfg }) {
       await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "sticker", delayKick: true });
       return { handled: true, action: "sticker-warning", count };
     }
-    await sock.sendMessage(groupJid, { text: `🚫 الملصقات ممنوعة في هذه المجموعة حتى إشعار آخر — لحماية القروب من الملصقات المشبوهة.\n@${memberJid.split("@")[0]} (${count}/${every})`, }, { mentions: [memberJid] }).catch(() => { });
+    await sock.sendMessage(groupJid, { text: `🚫 الملصقات ممنوعة في هذه المجموعة حتى إشعار آخر — لحماية القروب من الملصقات المشبوهة.\n${memberTag} (${count}/${every})`, }, { mentions: [resolvedMember] }).catch(() => { });
     return { handled: true, action: "sticker-deleted", count };
   }
 
@@ -527,8 +584,10 @@ export async function handleCommand({ userId, sock, message, text }) {
   }
   const cfg = getGroupConfig(userId, groupJid);
   const rest = parsed.rest;
-  const target = resolveTarget(message, rest);
-  const mention = target ? `@${target.split("@")[0]}` : "";
+  const rawTarget = resolveTarget(message, rest);
+  // [LID-FIX] تحويل معرّف LID إلى رقم حقيقي حتى يظهر المنشن أخضر بالاسم
+  const target = rawTarget ? await resolveMentionJid(sock, groupJid, rawTarget) : "";
+  const mention = mentionText(target);
   const reply = (body, mentions = []) => sock.sendMessage(groupJid, { text: body }, mentions.length ? { mentions } : undefined).catch(() => null);
 
   switch (parsed.key) {
@@ -537,9 +596,14 @@ export async function handleCommand({ userId, sock, message, text }) {
       return { handled: true };
     }
     case "warnings": {
-      const who = target || jidOf(message?.key?.participant);
-      const count = warningCount(userId, groupJid, who);
-      await reply(`📊 عدد مخالفات ${who ? `@${who.split("@")[0]}` : "العضو"}: *${count}/${cfg.maxWarnings}*`, who ? [who] : []);
+      const rawWho = target || jidOf(message?.key?.participant);
+      if (!rawWho) {
+        await reply("حدد العضو: `.مخالفات @العضو` أو بالرد على رسالته.");
+        return { handled: true };
+      }
+      const who = await resolveMentionJid(sock, groupJid, rawWho);
+      const count = warningCount(userId, groupJid, who) || warningCount(userId, groupJid, rawWho);
+      await reply(`📊 عدد مخالفات ${mentionText(who)}: *${count}/${cfg.maxWarnings}*`, [who]);
       return { handled: true };
     }
     case "reset": {
@@ -727,7 +791,12 @@ async function flushWelcome(entry) {
 
 export async function sendWelcomeMessage({ userId, sock, groupJid, members, logger }) {
   const cfg = getGroupConfig(userId, groupJid);
-  const list = (members || []).filter(Boolean);
+  const raw = (members || []).filter(Boolean);
+  const list = [];
+  for (const jid of raw) {
+    const resolved = await resolveMentionJid(sock, groupJid, jid).catch(() => jid);
+    if (resolved && !list.includes(resolved)) list.push(resolved);
+  }
   if (!list.length) return { sent: false };
   const caption = renderMentionsAll(cfg.welcome?.text || "أهلاً وسهلاً @nem", list);
   const cardFile = cfg.cards.welcome || cfg.cards.join;
@@ -762,15 +831,17 @@ export async function handleParticipants({ userId, sock, event, logger }) {
   for (const participant of participants) {
     const memberJid = jidOf(participant);
     if (!memberJid) continue;
+    // [LID-FIX] نحوّل المعرّف إلى رقم الهاتف حتى يظهر المنشن بالاسم لا برقم طويل
+    const resolvedJid = await resolveMentionJid(sock, groupJid, memberJid);
     if (action === "add") {
-      resetWarnings(userId, groupJid, memberJid);
+      resetWarnings(userId, groupJid, resolvedJid);
       if (!cfg.welcome?.enabled) continue;
-      enqueueWelcome({ userId, sock, groupJid, memberJid, logger });
+      enqueueWelcome({ userId, sock, groupJid, memberJid: resolvedJid, logger });
     } else if (action === "remove") {
       if (!cfg.goodbye?.enabled) continue;
-      const caption = renderMentions(cfg.goodbye.text || "إلى اللقاء @nem", memberJid);
-      if (cfg.goodbye?.card) await sendCard(sock, groupJid, cfg.cards.leave, caption, [memberJid]);
-      else await sock.sendMessage(groupJid, { text: caption }, { mentions: [memberJid] }).catch(() => { });
+      const caption = renderMentions(cfg.goodbye.text || "إلى اللقاء @nem", resolvedJid);
+      if (cfg.goodbye?.card) await sendCard(sock, groupJid, cfg.cards.leave, caption, [resolvedJid]);
+      else await sock.sendMessage(groupJid, { text: caption }, { mentions: [resolvedJid] }).catch(() => { });
     }
   }
   return { handled: true };
