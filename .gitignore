@@ -21,3 +21,6 @@ data/poof-api-key.txt
 
 # Private group-member lists and job records
 data/member-manager/
+
+# Repositories downloaded from developer console
+developer-downloads/

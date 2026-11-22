@@ -293761,6 +293761,7 @@ const setupMsgPipeline_registered = new Set(); // [PIPELINE-FIX]
 // setupMsgPipeline و applyForwardRules تُحمَّلان عند أول registerMessageHandler
 let _pipelineSetup    = null;
 let _fwApplyFn        = null;
+let _pipelineStats = null;
 let _pipelineTeardown = null; // [PIPELINE-FIX v2] إلغاء مهام المستخدم عند قطع الاتصال
 async function _ensurePipeline() {
   if (_pipelineSetup) return;
@@ -293769,6 +293770,7 @@ async function _ensurePipeline() {
     import("./forward.mjs"),
   ]);
   _pipelineSetup    = pipelineMod.setupMsgPipeline;
+  _pipelineStats    = pipelineMod.getPipelineStats;
   _fwApplyFn        = fwMod.applyForwardRules;
   _pipelineTeardown = pipelineMod.teardown; // [PIPELINE-FIX v2]
 }
@@ -301147,6 +301149,10 @@ async function openDeveloperWeb(bot2,chatId,userId){
   if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId)){await bot2.sendMessage(chatId,'افتح لوحة المطور من محادثة البوت الخاصة فقط.');return;}
   try {const url=developerConsole.issue(userId);await bot2.sendMessage(chatId,'🌐 رابط خاص للوحة المطور، صالح 15 دقيقة. لا تشاركه.',{reply_markup:{inline_keyboard:[[{text:'فتح لوحة المطوّر',url}]]}});}catch(err){await bot2.sendMessage(chatId,'تعذر فتح اللوحة: '+err.message);}
 }
+async function revokeDeveloperWeb(bot2,chatId,userId){
+  if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId)){await bot2.sendMessage(chatId,'افتح لوحة المطور من محادثة البوت الخاصة فقط.');return;}
+  developerConsole?.revoke(userId);await bot2.sendMessage(chatId,'🔒 أُلغيت جميع روابط لوحة المطور الحالية. الأوامر التي بدأت مسبقاً قد لا تتوقف.');
+}
 async function sendDevPanel(bot2, chatId, userId) {
   if (userId !== DEVELOPER_ID) {
     await bot2.sendMessage(chatId, "\u274C \u063A\u064A\u0631 \u0645\u0635\u0631\u062D");
@@ -301156,6 +301162,7 @@ async function sendDevPanel(bot2, chatId, userId) {
   const totalPts = Array.from(inMemoryDB.users.values()).reduce((s, u3) => s + (u3.points || 0), 0);
   const unreadMsgs = inMemoryDB.devMessages.filter((m) => !m.replied).length;
   const devKeyboard=devMenuKeyboard(inMemoryDB.users.size,stats.running,stats.stopped);
+  if(String(chatId)===String(userId)) devKeyboard.inline_keyboard.splice(1,0,[{text:"🔄 رابط جديد للوحة المطور",callback_data:"dev_open_web"},{text:"🔒 إلغاء روابط المطور",callback_data:"dev_revoke_web"}]);
   if(String(chatId)===String(userId)){try{devKeyboard.inline_keyboard[0]=[{text:'🌐 فتح لوحة المطوّر',url:developerConsole.issue(userId)}]}catch{}}
   await bot2.sendMessage(
     chatId,
@@ -325186,7 +325193,7 @@ async function startBot() {
       handleAiCallback, handleAiCallback2, handleGroupsCallback, handleGroupsV2,
       handleStatusCallback,
       handleDevTexts, handleDevChannels, handleDevKeepalive,
-      handleDevTextCallback, handleDevChannelsCallback, handleDevCallback, openDeveloperWeb,
+      handleDevTextCallback, handleDevChannelsCallback, handleDevCallback, openDeveloperWeb, revokeDeveloperWeb,
       handleBulkPoints, handleEvilFeature, handleDevEconomy, handleDevInbox,
       showHelp, showInfo2, handleMsgToDev, handleBuyMizajStars,
     };
@@ -329647,12 +329654,14 @@ var developerConsole;
 // بدون أي خدمة خارجية: تعمل تلقائياً على أي استضافة
 try {
   const { createDeveloperWeb } = await import("./developer-web.mjs");
+  const { createDiagnostics } = await import("../services/developer/diagnostics.mjs");
+  const diagnostics = createDiagnostics({pipeline:()=>_pipelineStats?.() || null,connections:()=>({sessions:inMemoryDB.sessions.size})});
   const { createAdminService } = await import("../services/developer/admin.mjs");
   init_text_editor();init_ai_manager();
   const { createSiteGenWebService } = await import("./sitegen-web.mjs");
   init_channel_guard();
   const adminService=createAdminService({getAllUsers,saveUser,addPoints,workerManager,inMemoryDB,tiers:TIER_MAX_NUMBERS,tierNames:TIER_NAMES,tierCosts:TIER_COSTS,getDynamicPrice,setDynamicPrice,getBot:()=>bot,channelGuard:{get:getGuardConfig,enabled:setGuardEnabled,add:addGuardChannel,remove:removeGuardChannel,message:setGuardMessage}});
-  developerConsole=createDeveloperWeb({developerId:DEVELOPER_ID,admin:adminService,sites:createSiteGenWebService({developerId:DEVELOPER_ID}),github:{hasToken:()=>{init_github();return !!GITHUB_TOKEN},repos:()=>{init_github();return getAllRepos()},fetch:(...args)=>{init_github();return ghFetch(...args)}},ai:{key:getNvidiaKey,model:getUserSelectedModel},texts:{list:getTextKeys,get:getText,set:setText,reset:resetText},stats:()=>({users:inMemoryDB.users.size,workers:workerManager.getStats(),uptime:Math.floor(process.uptime()),memoryMB:Math.round(process.memoryUsage().rss/1048576)})});
+  developerConsole=createDeveloperWeb({developerId:DEVELOPER_ID,diagnostics,admin:adminService,sites:createSiteGenWebService({developerId:DEVELOPER_ID}),github:{hasToken:()=>{init_github();return !!GITHUB_TOKEN},repos:()=>{init_github();return getAllRepos()},fetch:(...args)=>{init_github();return ghFetch(...args)}},ai:{key:getNvidiaKey,model:getUserSelectedModel},texts:{list:getTextKeys,get:getText,set:setText,reset:resetText},stats:()=>({users:inMemoryDB.users.size,workers:workerManager.getStats(),uptime:Math.floor(process.uptime()),memoryMB:Math.round(process.memoryUsage().rss/1048576)})});
   developerConsole.register(app);
 } catch (e) {logger.warn({e}, "[DEVELOPER WEB] mount failed");}
 try {

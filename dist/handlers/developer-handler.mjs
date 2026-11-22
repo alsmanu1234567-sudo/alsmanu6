@@ -110,6 +110,7 @@ export async function handleCallback(bot, query) {
   ) {
     if (userId !== String(_deps.DEVELOPER_ID)) {await bot.sendMessage(chatId,'غير مصرح');return true;}
     if (data === 'dev_open_web') {await _deps.openDeveloperWeb(bot,chatId,userId);return true;}
+    if (data === 'dev_revoke_web') {await _deps.revokeDeveloperWeb(bot,chatId,userId);return true;}
     if (data === 'dev_panel') {
       const { sendDevPanel: sendDevPanel2 } = await _deps._mod_messages2();
       await sendDevPanel2(bot, chatId, userId);
