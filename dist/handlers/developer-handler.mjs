@@ -48,6 +48,7 @@ export async function handleText(bot, msg) {
   if (!isDev) return false;
 
   if (/^\/serverlink(?:\s+\d+)?$/.test(text)) {const n=text.split(/\s+/)[1];if(n)await _deps.openServerControl(bot,chatId,userId,Number(n));else await _deps.showServerControlMenu(bot,chatId,userId);return true;}
+  if (text === '/why' || text === '/diag_bot' || text === '/processing') { await _deps.reportProcessingHealth(bot, chatId, userId); return true; }
   if (text === '/dev_panel' || text === '/dev') { await _deps.sendDevPanel(bot, chatId, userId); return true; }
   if (text === '/dev_users') { await _deps.sendDevUsers(bot, chatId, userId); return true; }
   if (text === '/dev_stats') { await _deps.sendDevStats(bot, chatId, userId); return true; }

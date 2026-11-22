@@ -1,4 +1,4 @@
-import { getMessageCutoff, isMessageAfterCutoff, guardMessageSocket } from "./message-cutoff.mjs";
+import { getMessageCutoff, isMessageAfterCutoff, guardMessageSocket, noteIncoming, getProcessingDiagnostics } from "./message-cutoff.mjs";
 /**
  * engine/msg-pipeline.mjs — v2
  * ─────────────────────────────────────────────────────────────────
@@ -174,10 +174,23 @@ export function teardown(userId) {
   return n;
 }
 
+// أخطاء المعالجة كانت تُبتلع بصمت؛ نسجلها بمعدل محدود لتشخيص «البوت لا يرد».
+let _handlerErrors = 0, _lastHandlerLog = 0;
+function _logHandlerError(userId, stage, err) {
+  _handlerErrors++;
+  const now = Date.now();
+  if (now - _lastHandlerLog < 15000) return;
+  _lastHandlerLog = now;
+  const detail = String(err?.stack || err?.message || err).split('\n').slice(0, 4).join(' | ');
+  process.stderr.write(`[PIPELINE] خطأ في ${stage} للمستخدم ${String(userId).slice(0, 8)}… (المجموع ${_handlerErrors}): ${detail.slice(0, 500)}\n`);
+}
+export function getProcessingErrors() { return _handlerErrors; }
+
 // ── التوجيه الداخلي ──────────────────────────────────────────────
 
 function _routeMessage(sock, userId, msg, type, isNewsletter, applyForward, mainHandler) {
   const jid = msg.key?.remoteJid || "";
+  noteIncoming(userId);
   if (!jid || !isMessageAfterCutoff(userId, msg)) return;
 
   const us = _uStat(userId);
@@ -230,10 +243,10 @@ async function _processMsg(sock, userId, msg, applyForward, mainHandler) {
   const generation = getMessageCutoff(userId);
   const guardedSock = guardMessageSocket(sock, userId, msg, generation);
   try { await applyForward(guardedSock, msg); }
-  catch { /* خطأ forward لا يُعطّل الأوامر */ }
+  catch (err) { _logHandlerError(userId, 'applyForward', err); }
   if (generation !== getMessageCutoff(userId) || !isMessageAfterCutoff(userId, msg)) return;
   try { await mainHandler(msg, userId, guardedSock); }
-  catch { /* حماية الـ lane */ }
+  catch (err) { _logHandlerError(userId, 'mainHandler', err); }
 }
 
 // ── إحصائيات ─────────────────────────────────────────────────────
@@ -242,6 +255,7 @@ async function _processMsg(sock, userId, msg, applyForward, mainHandler) {
 export function getPipelineStats() {
   return {
     ..._stats,
+    handlerErrors: _handlerErrors,
     watchdogRecoveries: _wdRecoveries,
     commandsInflight: [..._cmdInflight.values()].reduce((a, b) => a + b, 0),
     lanes: {

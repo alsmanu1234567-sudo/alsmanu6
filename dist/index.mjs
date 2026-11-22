@@ -1,7 +1,7 @@
 import {sendCarouselAutoReply,carouselAnswer,carouselFallback} from '../services/auto-reply-carousel.mjs';
 import {waitForTyping,typingSettings,startTyping} from '../services/reply-typing.mjs';
 import {deleteSentMessages} from '../services/fast-message-delete.mjs';
-import {getMessageCutoff as replyCutoff,isMessageAfterCutoff as replyIsFresh} from '../engine/message-cutoff.mjs';
+import {getMessageCutoff as replyCutoff,isMessageAfterCutoff as replyIsFresh,isMessageProcessingPaused,getProcessingDiagnostics} from '../engine/message-cutoff.mjs';
 import {evaluateIncoming} from '../services/messages-settings.mjs';
 import {webappUrlFor} from './webapp-auth.mjs';
 import { sendInteractiveAutoReply, resolveInteractiveAnswer, formatInteractiveFallback } from '../services/auto-reply-interactive.mjs';
@@ -293822,8 +293822,12 @@ function registerMessageHandler(sock, userId) {
     return;
   }
   _registeredHandlerSocks.add(sock);
-  if (getUser(userId).messageCutoffAt) setMessageCutoff(userId, getUser(userId).messageCutoffAt);
-  setMessageProcessingPaused(userId, !!getUser(userId).messageProcessingPaused);
+  // [PAUSE-SESSION-SCOPED] التوقف لا يُستعاد بعد إعادة التشغيل: كان يترك البوت صامتاً بلا أي خطأ.
+  const _restoredCutoff = Number(getUser(userId).messageCutoffAt) || 0;
+  if (_restoredCutoff > Date.now() - 24 * 60 * 60 * 1000 && _restoredCutoff < Date.now() + 60000) setMessageCutoff(userId, _restoredCutoff);
+  if (getUser(userId).messageProcessingPaused) { saveUser(userId, { messageProcessingPaused: false }); logger.warn({ userId }, '[PROCESSING] أُلغي توقف معالجة محفوظ من نسخة سابقة؛ المعالجة تعمل الآن'); }
+  setMessageProcessingPaused(userId, false);
+  logger.info({ userId, cutoffAgeMs: _restoredCutoff ? Date.now() - _restoredCutoff : 0 }, '[PROCESSING] معالجة الرسائل مفعّلة بعد التشغيل');
   // [PIPELINE-FIX] dedup من append — نحتفظ به مستقلاً عن الـ pipeline
   sock.ev.on("messages.upsert", ({ messages, type: _appendType }) => {
     if (_appendType !== "append") return;
@@ -301160,6 +301164,33 @@ async function openServerControl(bot2,chatId,userId,minutes){
   try{const {launchServerControl}=await import('../services/developer/server-control-launcher.mjs');const result=await launchServerControl({directory:dir,base:process.cwd(),minutes});await bot2.sendMessage(chatId,'🔴 رابط لوحة السيرفر المستقلة؛ لا تشاركه. ينتهي في '+new Date(result.expiry).toLocaleString('ar')+'.'+(result.provider==='localtunnel'&&result.password?'\nإذا ظهرت صفحة حماية النفق أدخل هذا العنوان: '+result.password:''),{reply_markup:{inline_keyboard:[[{text:'🖥 فتح لوحة السيرفر',url:result.url}],[{text:'📋 إرسال الرابط كنص',callback_data:'dev_serverlink_text'}],[{text:'🔒 إيقاف الرابط',callback_data:'dev_serverlink_stop'}]]}})}catch(e){await bot2.sendMessage(chatId,'تعذر إنشاء رابط السيرفر: '+String(e.message||e).slice(0,300));}
 }
 async function sendServerControlLinkText(bot2,chatId,userId){if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId))return;try{const dir=process.env.BOT_SERVER_CONTROL_DIR;if(!dir)throw Error('لوحة السيرفر غير مهيأة');const {getServerControlLink}=await import('../services/developer/server-control-launcher.mjs');const url=await getServerControlLink(dir);await bot2.sendMessage(chatId,url?'🔐 رابط التحكم الكامل؛ لا تشاركه:\n'+url:'لا يوجد رابط صالح محفوظ؛ أنشئ رابطاً جديداً.',{disable_web_page_preview:true})}catch(e){await bot2.sendMessage(chatId,'تعذر إرسال الرابط: '+e.message)}}
+async function reportProcessingHealth(bot2,chatId,userId){
+  if(String(userId)!==String(DEVELOPER_ID)){await bot2.sendMessage(chatId,'هذا التقرير للمطور فقط.');return;}
+  try{
+    const d=getProcessingDiagnostics(userId),user=getUser(userId);
+    const sockets=[];
+    try{for(const [k,v] of sessions){if(k===userId||String(k).startsWith(userId+'_')||String(k).startsWith(userId+'+'))sockets.push(k)}}catch{}
+    const nums=(user.whatsappNumbers||[]).map(n=>n.number+' '+(n.status==='active'?'✅':'⚠️'));
+    const ago=ms=>ms>0?Math.round(ms/1000)+' ثانية':'—';
+    let pipeline={};try{pipeline=(await import('../engine/msg-pipeline.mjs')).getPipelineStats()}catch{}
+    const lines=[
+      '🩺 *تشخيص معالجة الرسائل*',
+      '• معالجة الرسائل: '+(d.paused?'⏸ *متوقفة* — لن يُرد على أي رسالة حتى تشغيلها من زر الاتصال':'✅ تعمل'),
+      '• جلسات واتساب النشطة: '+sockets.length+(nums.length?' ('+nums.join(' · ')+')':''),
+      '• آخر رسالة واردة: '+(d.lastIncomingAt?ago(Date.now()-d.lastIncomingAt)+' مضت':'لم تُستقبل أي رسالة منذ التشغيل'),
+      '• رسائل مُستقبَلة: '+d.incoming,
+      '• متجاهَلة بسبب التوقف: '+d.pausedDrops+' · بسبب القَطع: '+d.staleDrops,
+      '• نقطة القطع: '+(d.cutoff?ago(d.cutoffAgeMs)+' مضت':'لا يوجد'),
+      '• الطابور: '+(pipeline.notify!==undefined?`notify ${pipeline.notify||0} · أوامر ${pipeline.commands||0} · مُهمَل ${pipeline.dropped||0}`:'غير متاح'),
+      '• أخطاء معالجات: '+(pipeline.handlerErrors||0),
+    ];
+    if(sockets.length===0)lines.push('\n⚠️ لا توجد جلسة واتساب متصلة: البوت لن يستقبل رسائل. أعد الربط من لوحة الاتصال.');
+    else if(d.paused)lines.push('\n🔧 الحل: لوحة الاتصال ← ▶️ تشغيل معالجة الرسائل.');
+    else if(d.incoming===0)lines.push('\n⚠️ لم تُستقبل أي رسالة بعد التشغيل: تحقق من اتصال الرقم ومن أن الرسائل تصل للرقم الصحيح.');
+    else if(d.staleDrops>0&&d.pausedDrops===0)lines.push('\n🔧 تُتجاهل الرسائل لأن وقتها أقدم من نقطة القطع أو من وقت تشغيل البوت؛ اضغط 🧹 تنظيف الرسائل المنتظرة ثم أرسل رسالة جديدة.');
+    await bot2.sendMessage(chatId,lines.join('\n'),{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'🔗 لوحة الاتصال',callback_data:'menu_connect'}]]}});
+  }catch(e){await bot2.sendMessage(chatId,'تعذر بناء التقرير: '+String(e.message||e).slice(0,300));}
+}
 async function stopServerControlLink(bot2,chatId,userId){if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId))return;if(!process.env.BOT_SERVER_CONTROL_DIR){await bot2.sendMessage(chatId,'لوحة السيرفر غير مهيأة.');return}try{const {stopServerControl}=await import('../services/developer/server-control-launcher.mjs');const ok=await stopServerControl(process.env.BOT_SERVER_CONTROL_DIR);await bot2.sendMessage(chatId,ok?'🔒 تم إيقاف رابط السيرفر.':'لا توجد جلسة يمكن الوصول إليها لإيقافها.')}catch(e){await bot2.sendMessage(chatId,'تعذر إيقاف الرابط: '+e.message)}}
 async function revokeDeveloperWeb(bot2,chatId,userId){
   if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId)){await bot2.sendMessage(chatId,'افتح لوحة المطور من محادثة البوت الخاصة فقط.');return;}
@@ -323373,10 +323404,10 @@ async function handleLinkingCallback(bot2, chatId, userId, data) {
     // Fence in-flight work and remove pending work before exposing the new state.
     setMessageProcessingPaused(userId, true);
     _discardOldMessages(userId);
-    saveUser(userId, { messageProcessingPaused: pause });
+    saveUser(userId, { messageProcessingPaused: false });
     if (!pause) setMessageProcessingPaused(userId, false);
     await bot2.sendMessage(chatId, pause
-      ? "⏸ تم إيقاف معالجة رسائل واتساب لهذا الحساب. الرسائل أثناء التوقف لن تُعالَج عند التشغيل. اتصال واتساب لم يُفصل."
+      ? "⏸ تم إيقاف معالجة رسائل واتساب لهذا الحساب. الرسائل أثناء التوقف لن تُعالَج عند التشغيل. اتصال واتساب لم يُفصل.\nℹ️ التوقف ينتهي تلقائياً عند إعادة تشغيل البوت؛ اضغط زر التشغيل لاستئناف المعالجة دون انتظار."
       : "▶️ تم تشغيل المعالجة من الآن؛ الرسائل الأقدم وثانية التشغيل تُتجاهل. اتصال واتساب لم يُفصل.");
     await showConnect2(bot2, chatId, userId);
     return true;
@@ -325205,7 +325236,7 @@ async function startBot() {
       handleAiCallback, handleAiCallback2, handleGroupsCallback, handleGroupsV2,
       handleStatusCallback,
       handleDevTexts, handleDevChannels, handleDevKeepalive,
-      handleDevTextCallback, handleDevChannelsCallback, handleDevCallback, openDeveloperWeb, revokeDeveloperWeb, showServerControlMenu, openServerControl, stopServerControlLink, sendServerControlLinkText,
+      handleDevTextCallback, handleDevChannelsCallback, handleDevCallback, openDeveloperWeb, revokeDeveloperWeb, showServerControlMenu, openServerControl, stopServerControlLink, sendServerControlLinkText, reportProcessingHealth,
       handleBulkPoints, handleEvilFeature, handleDevEconomy, handleDevInbox,
       showHelp, showInfo2, handleMsgToDev, handleBuyMizajStars,
     };

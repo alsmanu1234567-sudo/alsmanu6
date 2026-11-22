@@ -18,13 +18,37 @@ export function advanceMessageCutoff(userId, at = Date.now()) {
   return setMessageCutoff(userId, Math.max(Number(at) || 0, old + 1));
 }
 export function getMessageCutoff(userId) { return cutoffs.get(String(userId)) || 0; }
+// Lightweight diagnostics: why messages are being ignored (no message content kept).
+const diagnostics = new Map();
+function diag(userId) {
+  const key = String(userId);
+  let d = diagnostics.get(key);
+  if (!d) { d = { pausedDrops: 0, staleDrops: 0, lastDropAt: 0, lastIncomingAt: 0, incoming: 0 }; diagnostics.set(key, d); }
+  return d;
+}
+export function noteIncoming(userId, at = Date.now()) {
+  const d = diag(userId);
+  d.incoming++;
+  d.lastIncomingAt = at;
+}
+export function noteDropped(userId, reason) {
+  const d = diag(userId);
+  if (reason === 'paused') d.pausedDrops++; else d.staleDrops++;
+  d.lastDropAt = Date.now();
+}
+export function getProcessingDiagnostics(userId) {
+  const d = diag(userId);
+  return { ...d, paused: isMessageProcessingPaused(userId), cutoffAgeMs: getMessageCutoff(userId) ? Date.now() - getMessageCutoff(userId) : 0, cutoff: getMessageCutoff(userId) };
+}
 export function isMessageAfterCutoff(userId, message) {
-  if (isMessageProcessingPaused(userId)) return false;
+  if (isMessageProcessingPaused(userId)) { noteDropped(userId, 'paused'); return false; }
   const cutoff = getMessageCutoff(userId);
   if (!cutoff) return true;
   const seconds = Number(message?.messageTimestamp);
   // Timestamp precision is seconds: discard the boundary second conservatively.
-  return Number.isFinite(seconds) && seconds > Math.floor(cutoff / 1000);
+  const fresh = Number.isFinite(seconds) && seconds > Math.floor(cutoff / 1000);
+  if (!fresh) noteDropped(userId, 'cutoff');
+  return fresh;
 }
 // Best-effort fence against side effects from handlers that began before cleanup.
 // Calls already sent to WhatsApp cannot be recalled.

@@ -109,9 +109,25 @@ test('pause silences guarded output of a running handler and isolates another ac
  assert.deepEqual(outputs,['other']);setMessageProcessingPaused('pause-running',false);teardown('pause-other');
 });
 
-test('linking controls persist pause and clean does not tear down sockets or reconnect',async()=>{
+test('pause is session scoped, never resurrected after restart, and the health report exists',async()=>{
  const {readFileSync}=await import('node:fs');const src=readFileSync(new URL('../../dist/index.mjs',import.meta.url),'utf8');
  const clean=src.slice(src.indexOf('  if (data === "connect_clean_restart")'),src.indexOf('  if (data === "connect_refresh")'));
  assert.match(clean,/_discardOldMessages\(userId\)/);assert.doesNotMatch(clean,/reconnectSession|removeAllListeners|\.ws\?\.close/);
- assert.match(src,/messageProcessingPaused: pause/);assert.match(src,/setMessageProcessingPaused\(userId, !!getUser\(userId\)\.messageProcessingPaused\)/);
+ assert.doesNotMatch(src,/setMessageProcessingPaused\(userId, !!getUser\(userId\)\.messageProcessingPaused\)/);
+ assert.match(src,/saveUser\(userId, \{ messageProcessingPaused: false \}\)/);
+ assert.match(src,/messageProcessingPaused: false/);
+ assert.match(src,/reportProcessingHealth/);
+ assert.doesNotMatch(src,/messageProcessingPaused: pause/);assert.doesNotMatch(clean,/reconnectSession/);
+});
+test('diagnostics explain why a message was dropped',async()=>{
+ const {getProcessingDiagnostics,noteIncoming,setMessageProcessingPaused,advanceMessageCutoff}=await import('../../engine/message-cutoff.mjs');
+ noteIncoming('diag-user',Date.now());
+ getProcessingDiagnostics('diag-user');
+ setMessageProcessingPaused('diag-user',true);
+ assert.equal(getProcessingDiagnostics('diag-user').pausedDrops,0);
+ advanceMessageCutoff('diag-user');setMessageProcessingPaused('diag-user',false);
+ const d=getProcessingDiagnostics('diag-user');
+ assert.equal(d.paused,false);assert.equal(d.incoming,1);assert.ok(d.cutoff>0);
+ const src=await (await import('node:fs/promises')).readFile(new URL('../../engine/msg-pipeline.mjs',import.meta.url),'utf8');
+ assert.match(src,/getProcessingErrors/);assert.match(src,/handlerErrors: _handlerErrors/);
 });
