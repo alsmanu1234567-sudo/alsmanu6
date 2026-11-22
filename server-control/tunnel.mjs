@@ -114,24 +114,13 @@ function _tryCloudflare(port, log, timeoutMs = 30000) {
 // ─── المزود الأول: tunnelmole (يعمل عبر WSS منفذ 443 — الأكثر توافقاً) ──
 let _tmProc = null;
 async function _tryTunnelmole(port, log) {
-  // 1) كمكتبة مثبتة (الأسرع)
-  try {
-    const mod = await import("tunnelmole");
-    const tm = mod.tunnelmole || mod.default;
-    if (typeof tm === "function") {
-      const url = await Promise.race([
-        tm({ port }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 45000)),
-      ]);
-      if (url) return String(url).replace(/^http:/, "https:");
-    }
-  } catch {}
+  // Use a separate process so a failed candidate can be stopped cleanly.
   // 2) عبر npx (لا يتطلب تثبيتاً مسبقاً — فقط Node + npm)
   try {
     return await new Promise((resolve) => {
       const p = spawn("npx", ["-y", "tunnelmole", String(port)], {
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, NODE_OPTIONS: "" },
+        env: { ...process.env, NODE_OPTIONS: "--dns-result-order=ipv4first" },
       });
       let done = false;
       const finish = (v, keep) => {
@@ -197,7 +186,7 @@ async function _tryLocaltunnel(port, log) {
 }
 
 // ─── نقطة الدخول ─────────────────────────────────────────────────────
-export async function startTunnel(port, logger, onUrl) {
+export async function startTunnel(port, logger, onUrl, verify = async () => true) {
   const log = (m) => { try { logger ? logger.info(m) : console.log(m); } catch { console.log(m); } };
   if (_starting || _url) return _url;
   _starting = true;
@@ -207,12 +196,13 @@ export async function startTunnel(port, logger, onUrl) {
     //    بدون صفحة وسيطة وبدون كلمة مرور — مثالي لزر Telegram WebApp
     log(`[TUNNEL] محاولة إنشاء رابط عام عبر tunnelmole...`);
     const tmUrl = await _tryTunnelmole(port, log);
-    if (tmUrl) {
+    if (tmUrl && !(await verify(tmUrl))) { log('[TUNNEL] tunnelmole لم يصل للخدمة؛ تجربة مزود آخر'); try { _tmProc?.kill(); } catch {} _tmProc = null; }
+    else if (tmUrl) {
       _setUrl(tmUrl, "tunnelmole", log, onUrl);
       _tmProc?.on("exit", () => {
         _url = null; globalThis.__FW_PUBLIC_URL = null; _starting = false;
         log("[TUNNEL] النفق أُغلق — إعادة تشغيل خلال 5 ثوانٍ...");
-        setTimeout(() => startTunnel(port, logger, onUrl), 5000);
+        setTimeout(() => startTunnel(port, logger, onUrl, verify), 5000);
       });
       return tmUrl;
     }
@@ -220,13 +210,14 @@ export async function startTunnel(port, logger, onUrl) {
     // 2) Cloudflare (بدون صفحة وسيطة — يتطلب منفذ 7844 صادراً)
     log(`[TUNNEL] tunnelmole غير متاح — محاولة Cloudflare...`);
     const cfUrl = await _tryCloudflare(port, log);
-    if (cfUrl) {
+    if (cfUrl && !(await verify(cfUrl))) { log('[TUNNEL] Cloudflare لم يصل للخدمة؛ تجربة مزود آخر'); try { _cfProc?.kill(); } catch {} _cfProc = null; }
+    else if (cfUrl) {
       _setUrl(cfUrl, "cloudflare", log, onUrl);
       // مراقبة انهيار النفق وإعادة التشغيل
       _cfProc?.on("exit", () => {
         _url = null; globalThis.__FW_PUBLIC_URL = null; _starting = false;
         log("[TUNNEL] النفق أُغلق — إعادة تشغيل خلال 5 ثوانٍ...");
-        setTimeout(() => startTunnel(port, logger, onUrl), 5000);
+        setTimeout(() => startTunnel(port, logger, onUrl, verify), 5000);
       });
       return cfUrl;
     }
@@ -234,7 +225,8 @@ export async function startTunnel(port, logger, onUrl) {
     // 3) الاحتياطي الأخير: localtunnel
     log(`[TUNNEL] Cloudflare محجوب على هذه الاستضافة — التحويل إلى localtunnel...`);
     const ltUrl = await _tryLocaltunnel(port, log);
-    if (ltUrl) {
+    if (ltUrl && !(await verify(ltUrl))) { log('[TUNNEL] localtunnel لم يصل للخدمة'); _ltStopped = true; for (const socket of _ltSockets) socket.destroy(); _ltSockets = []; }
+    else if (ltUrl) {
       _setUrl(ltUrl, "localtunnel", log, onUrl);
       if (_password) log(`[TUNNEL] كلمة مرور الصفحة الأولى (تُدخل مرة واحدة): ${_password}`);
       return ltUrl;
