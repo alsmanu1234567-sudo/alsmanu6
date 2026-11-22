@@ -55,6 +55,18 @@ test('واجهة المجموعات صارت بطاقات بصور وأسماء 
   assert.ok(!/data-guard="'\+esc\(g\.id\)\+'"/.test(webapp), 'لا درع فوق اسم المجموعة');
 });
 
+test('بطاقات المجموعات: صف واحد لكل مجموعة مع فتح وإغلاق وأكورديون', () => {
+  assert.match(webapp, /class="gc-list"/);
+  assert.match(webapp, /class="gc-head" data-toggle="1"/);
+  assert.match(webapp, /class="gc-caret"/);
+  assert.match(webapp, /data-act="guard"/);
+  assert.match(webapp, /data-act="details"/);
+  assert.match(webapp, /querySelectorAll\("\.gc-card\.open"\)/);
+  assert.match(webapp, /card\.classList\.toggle\("open", !wasOpen\)/);
+  assert.match(webapp, /\.gc-card\{box-sizing:border-box;width:100%;max-width:540px/);
+  assert.match(webapp, /\.gc-card\.open\{max-width:100%/);
+});
+
 test('بحث المجموعات يتجاهل التشكيل والتطويل واختلاف الحروف', () => {
   assert.match(webapp, /function nrmSearch/);
   assert.match(webapp, /\\u0640/);

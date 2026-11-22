@@ -711,15 +711,24 @@ body{background:radial-gradient(ellipse at 5% 0%,rgba(192,141,255,.18),transpare
 .gg-pill:hover{transform:translateY(-1px);border-color:#7fb3ff66;box-shadow:0 8px 20px #00000030}
 .gg-pill:active{transform:translateY(0)}
 .gg-count{margin-inline-start:auto;font-size:12px;opacity:.6}
-.gc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:12px}
-.gc-card{all:unset;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;gap:10px;padding:16px 12px 14px;border-radius:18px;border:1px solid #ffffff1f;background:linear-gradient(180deg,#ffffff10,#ffffff06);cursor:pointer;font:inherit;color:inherit;text-align:center;transition:transform .16s,border-color .16s,box-shadow .16s;box-shadow:0 6px 18px #0000001a}
-.gc-card:hover{transform:translateY(-3px);border-color:#60a5fa66;box-shadow:0 14px 28px #00000038}
-.gc-pic{width:66px;height:66px;border-radius:50%;overflow:hidden;display:grid;place-items:center;font-size:26px;background:linear-gradient(135deg,#1f2b45,#2b1f45);border:2px solid #ffffff24;flex:0 0 auto}
+.gc-list{display:flex;flex-direction:column;gap:10px;align-items:center}
+.gc-card{box-sizing:border-box;width:100%;max-width:540px;border-radius:18px;border:1px solid #ffffff1f;background:linear-gradient(180deg,#ffffff10,#ffffff06);overflow:hidden;transition:max-width .22s ease,border-color .2s,box-shadow .2s}
+.gc-card.open{max-width:100%;border-color:#60a5fa66;box-shadow:0 14px 34px #0000003d}
+.gc-head{display:flex;align-items:center;gap:11px;padding:12px 14px;cursor:pointer;user-select:none}
+.gc-head:hover{background:#ffffff08}
+.gc-pic{width:46px;height:46px;border-radius:14px;overflow:hidden;display:grid;place-items:center;font-size:22px;background:linear-gradient(135deg,#1f2b45,#2b1f45);border:1px solid #ffffff24;flex:0 0 auto}
 .gc-pic img{width:100%;height:100%;object-fit:cover;display:block}
-.gc-row{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;min-width:0}
-.gc-name{font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gc-meta{flex:1;min-width:0;display:flex;align-items:center;gap:8px}
+.gc-name{font-size:13.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gc-count{order:-1;flex:0 0 auto;font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:999px;background:#3b82f633;color:#9dc4ff;border:1px solid #3b82f64d}
-@media(max-width:520px){.gc-grid{grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:10px}.gc-pic{width:58px;height:58px}}
+.gc-caret{flex:0 0 auto;font-size:15px;opacity:.55;transition:transform .22s ease}
+.gc-card.open .gc-caret{transform:rotate(180deg);opacity:.9}
+.gc-body{max-height:0;overflow:hidden;transition:max-height .26s ease}
+.gc-card.open .gc-body{max-height:220px;border-top:1px solid #ffffff14}
+.gc-actions{display:flex;gap:8px;flex-wrap:wrap;padding:12px 14px}
+.gc-act{display:inline-flex;align-items:center;gap:6px;border:1px solid #ffffff26;background:linear-gradient(180deg,#ffffff18,#ffffff08);color:inherit;border-radius:999px;padding:8px 13px;font:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:transform .14s,border-color .14s}
+.gc-act:hover{transform:translateY(-1px);border-color:#7fb3ff66}
+@media(max-width:520px){.gc-card{max-width:100%}.gc-pic{width:42px;height:42px;font-size:20px}}
 </style>
 <script src="/groups-guard-web.js"></script>
 <script>
@@ -956,21 +965,43 @@ function renderGroups(v){
   if (!items.length) {
     html += '<div class="empty"><div class="big">👥</div>لا توجد مجموعات' + (Q?' مطابقة للبحث':'') + '<br>اضغط "تحديث من واتساب" لجلب مجموعاتك</div>';
   } else {
-    html += '<div class="gc-grid">' + items.map(g =>
-      '<button type="button" class="gc-card" data-group-open="'+esc(g.id)+'" aria-label="خيارات '+esc(g.name)+'">' +
-        '<span class="gc-pic avatar" data-jid="'+esc(g.id)+'">👥</span>' +
-        '<span class="gc-row"><span class="gc-count">'+(g.members?esc(g.members):'—')+'</span><span class="gc-name">'+esc(g.name)+'</span></span>' +
-      '</button>'
+    html += '<div class="gc-list">' + items.map(g =>
+      '<div class="gc-card" data-card="'+esc(g.id)+'">' +
+        '<div class="gc-head" data-toggle="1" role="button" tabindex="0">' +
+          '<span class="gc-pic avatar" data-jid="'+esc(g.id)+'">👥</span>' +
+          '<span class="gc-meta"><span class="gc-count">'+(g.members?esc(g.members):'—')+'</span><span class="gc-name">'+esc(g.name)+'</span></span>' +
+          '<span class="gc-caret">⌄</span>' +
+        '</div>' +
+        '<div class="gc-body"><div class="gc-actions">' +
+          '<button class="gc-act" data-act="guard"><b>🛡️</b> الحماية والتحذيرات</button>' +
+          '<button class="gc-act" data-act="docs"><b>📖</b> أوامر المجموعات</button>' +
+          '<button class="gc-act" data-act="details"><b>⚙️</b> تفاصيل وإدارة</button>' +
+        '</div></div>' +
+      '</div>'
     ).join('') + '</div>';
   }
   v.innerHTML = html;
-  v.querySelectorAll("[data-group-open]").forEach(card=>{
-    card.addEventListener("click", ()=>openGroupDetails(card.dataset.groupOpen));
-    card.addEventListener("keydown", event=>{
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        openGroupDetails(card.dataset.groupOpen);
-      }
+
+  // أكورديون: بطاقة واحدة مفتوحة في كل مرة
+  v.querySelectorAll(".gc-card").forEach(card=>{
+    const head = card.querySelector("[data-toggle]");
+    const toggle = ()=>{
+      const wasOpen = card.classList.contains("open");
+      v.querySelectorAll(".gc-card.open").forEach(other=>{ if(other!==card) other.classList.remove("open"); });
+      card.classList.toggle("open", !wasOpen);
+    };
+    head.addEventListener("click", toggle);
+    head.addEventListener("keydown", event=>{
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); }
+    });
+    card.querySelectorAll("[data-act]").forEach(btn=>{
+      btn.addEventListener("click", event=>{
+        event.stopPropagation();
+        const id = card.dataset.card;
+        if (btn.dataset.act === "guard" && window.GroupGuardUI) window.GroupGuardUI.openFor(id);
+        else if (btn.dataset.act === "docs" && window.GroupGuardUI) window.GroupGuardUI.docs();
+        else if (btn.dataset.act === "details") openGroupDetails(id);
+      });
     });
   });
   lazyPics();
