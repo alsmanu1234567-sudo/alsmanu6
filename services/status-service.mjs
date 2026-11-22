@@ -5,14 +5,12 @@ export function createStatusService({getUser,saveUser,inMemoryDB,getContacts=()=
  const uidOf=x=>String(x);
  const sockOf=uid=>{const v=inMemoryDB.sessions.get(uidOf(uid))||inMemoryDB.sessions.get(Number(uid));const s=v?.sock||v;if(!s||!s.user?.id||typeof s.sendMessage!=='function')throw Error('واتساب غير متصل للرقم النشط');return s};
  const account=s=>String(s.user.id).split(':')[0].split('@')[0];
- const selection=uid=>{const sock=sockOf(uid),privacy=sock.__statusPrivacy,contacts=[...(sock.__statusContacts||[])].map(normalJid).filter(Boolean);let jids=[];
-  if(privacy&&['ALLOW_LIST','DENY_LIST','CONTACTS',0,1,2].includes(privacy.mode)&&Array.isArray(privacy.userJid)){
-   const list=privacy.userJid.map(normalJid);if(list.some(x=>!x))throw Error('تعذر قراءة إعداد خصوصية الحالة من واتساب بأمان');const mode=privacy.mode;
-   if(mode===0||mode==='ALLOW_LIST')jids=list;
-   else if(mode===1||mode==='DENY_LIST'){const domains=new Set([...contacts,...list].map(j=>j.split('@')[1]));if(list.length&&domains.size>1)throw Error('تعذر مطابقة خصوصية الحالة بين معرّفات واتساب المختلفة؛ لم تُنشر الحالة');const blocked=new Set(list);jids=contacts.filter(j=>!blocked.has(j))}
-   else jids=contacts;
-  }
-  jids=[...new Set(jids)];if(!jids.length)throw Error('لم تصل للبوت إعدادات خصوصية الحالة وجهات الاتصال من واتساب بعد؛ أعد ربط الرقم وانتظر المزامنة. لم تُنشر الحالة لحماية خصوصيتك');return {sock,jids};
+ const selection=uid=>{
+  const sock=sockOf(uid);
+  const current=[...(sock.__statusContacts||[])];
+  if(sock.contacts&&typeof sock.contacts==='object')for(const [id,c] of Object.entries(sock.contacts))if(c?.name)current.push(id);
+  const self=normalJid(sock.user?.id),jids=[...new Set(current.map(normalJid).filter(j=>j&&j!==self))];
+  if(!jids.length)throw Error('لم يعثر البوت على جهات اتصال متاحة للرقم النشط؛ تأكد من مزامنة جهات واتساب ثم حاول مجدداً');return {sock,jids};
  };
  function overview(uid){uid=uidOf(uid);let connected=false,active='',audience=[];try{const s=sockOf(uid);connected=true;active=account(s);const a=getUser(uid).statusAudience;if(a?.account===active)audience=a.jids||[]}catch{}const contacts=(getContacts(uid)||[]).map(c=>({jid:normalJid(c.jid),name:String(c.name||'').slice(0,100)})).filter(c=>c.jid);return {connected,active,audience,contacts,history:(getUser(uid).statusHistory||[]).slice(-50).reverse()};}
  function saveAudience(uid,input){uid=uidOf(uid);const s=sockOf(uid);if(!Array.isArray(input)||input.length>500)throw Error('اختر من 1 إلى 500 رقم');const jids=[...new Set(input.map(normalJid))];if(!jids.length||jids.includes(''))throw Error('أرقام الجمهور غير صالحة');saveUser(uid,{statusAudience:{account:account(s),jids}});return {count:jids.length}}

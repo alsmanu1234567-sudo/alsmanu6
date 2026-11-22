@@ -296578,7 +296578,7 @@ ${senderName}: ${text}` });
       }
       await runAutoReplies(sock, msg, text, senderName);
   }
-  // Status recipients must come from this socket's synced contacts and status privacy, not chat history.
+  // Track this socket’s synced named contacts for status publication.
   const rememberStatusContacts = list => {
     if (!Array.isArray(list)) return;
     sock.__statusContacts ||= new Set();
