@@ -4,7 +4,19 @@ import {quickReply,urlButton} from './interactive.js';
 import {safeImageDownload} from './image-tools.mjs';
 const text=(v,max,label,required=true)=>{if(typeof v!=='string')throw Error(label+' غير صالح');const s=v.trim();if((required&&!s)||s.length>max)throw Error(label+' مطلوب أو طويل جداً');return s};
 function url(v,label){let u;try{u=new URL(v)}catch{throw Error(label+' غير صالح')}if(!['http:','https:'].includes(u.protocol)||u.username||u.password)throw Error(label+' غير صالح');return u.href}
-export function validateCarousel(raw){let cfg;try{cfg=JSON.parse(raw)}catch{throw Error('بيانات البطاقات غير صالحة')};if(!cfg||!Array.isArray(cfg.cards)||cfg.cards.length<2||cfg.cards.length>10)throw Error('أضف من بطاقتين إلى 10 بطاقات');return {caption:text(cfg.caption||'',1000,'نص الرسالة'),footer:text(cfg.footer||'',60,'التذييل',false),cards:cfg.cards.map((c,i)=>{if(!c||!Array.isArray(c.buttons)||c.buttons.length<1||c.buttons.length>3)throw Error(`البطاقة ${i+1}: أضف من زر إلى 3 أزرار`);return {title:text(c.title||'',60,'عنوان البطاقة'),body:text(c.body||'',1000,'وصف البطاقة'),imageUrl:url(text(c.imageUrl||'',2000,'رابط الصورة'),'رابط الصورة'),buttons:c.buttons.map(b=>{if(!b||!['quick_reply','cta_url'].includes(b.type))throw Error('نوع الزر غير صالح');const label=text(b.label||'',24,'عنوان الزر'),value=text(b.value||'',1000,'قيمة الزر');return {type:b.type,label,value:b.type==='cta_url'?url(value,'رابط الزر'):value}})}})};}
+export function validateCarousel(raw){
+ let cfg;try{cfg=JSON.parse(raw)}catch{throw Error('بيانات البطاقات غير صالحة')}
+ if(!cfg||!Array.isArray(cfg.cards)||cfg.cards.length<2||cfg.cards.length>10)throw Error('أضف من بطاقتين إلى 10 بطاقات');
+ return {caption:text(cfg.caption||'',1000,'نص الرسالة'),footer:text(cfg.footer||'',60,'التذييل',false),cards:cfg.cards.map((c,i)=>{
+  const label=`البطاقة ${i+1}`;
+  if(!c||!Array.isArray(c.buttons)||c.buttons.length<1||c.buttons.length>3)throw Error(`${label}: أضف من زر إلى 3 أزرار`);
+  return {title:text(c.title||'',60,`${label}: العنوان`),body:text(c.body||'',1000,`${label}: الوصف`),imageUrl:url(text(c.imageUrl||'',2000,`${label}: رابط الصورة`),`${label}: رابط الصورة`),buttons:c.buttons.map((b,j)=>{
+   if(!b||!['quick_reply','cta_url'].includes(b.type))throw Error(`${label}: نوع الزر ${j+1} غير صالح`);
+   const name=text(b.label||'',24,`${label}: عنوان الزر ${j+1}`),value=text(b.value||'',1000,`${label}: قيمة الزر ${j+1}`);
+   return {type:b.type,label:name,value:b.type==='cta_url'?url(value,`${label}: رابط الزر ${j+1}`):value};
+  })};
+ })};
+}
 export function carouselAnswer(rule,index){if(rule?.replyType!=='carousel')return null;const buttons=validateCarousel(rule.replyContent).cards.flatMap(c=>c.buttons);return Number.isInteger(index)&&buttons[index]?.type==='quick_reply'?buttons[index].value:null}
 export function carouselFallback(rule){const cfg=validateCarousel(rule.replyContent);return [cfg.caption,...cfg.cards.map(c=>[c.title,c.body,...c.buttons.map(b=>`${b.label}: ${b.value}`)].join('\n'))].join('\n\n')}
 export async function sendCarouselAutoReply(sock,jid,rule,{baileys,download=safeImageDownload}={}){

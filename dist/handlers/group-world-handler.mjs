@@ -479,7 +479,7 @@ const HELP_SECTIONS = {
   },
   games: {
     title: "أوامر الألعاب",
-    text: "• .الألعاب — قائمة الألعاب\n• .اكس_او — مباراة X و O للاعبين\n• .لودو — لعبة لودو للاعبين إلى أربعة\n• .شطرنج · .سنيك · .اركيد — ألعاب نافذة\n• .تحدي @الخصم — تحدٍ آلي بين عضوين\n• .زعيم — حالة زعيم المجموعة\n• .صيد الكلمات — بدء صيد كلمة",
+    text: "• .الألعاب — قائمة الألعاب\n• .مبارزة @الخصم — مبارزة بالنقاط الصحية\n• .سلوت — ماكينة حظ مجانية تكسب XP\n• .اكس_او — مباراة X و O للاعبين\n• .لودو — لعبة لودو للاعبين إلى أربعة\n• .شطرنج · .سنيك · .اركيد — ألعاب نافذة\n• .تحدي @الخصم — تحدٍ آلي بين عضوين\n• .زعيم — حالة زعيم المجموعة\n• .صيد الكلمات — بدء صيد كلمة",
   },
   challenges: {
     title: "أوامر التحديات",
@@ -505,6 +505,8 @@ async function sendHelpMenu(sock, groupId) {
 
 async function sendGamesMenu(sock, groupId) {
   return sendInteractiveList(sock, groupId, "اختر لعبة أو نشاطاً لمعرفة طريقة تشغيله.", "الألعاب والأنشطة", [
+    { id: "gw:games:duel", title: "مبارزة اللاعبين", description: "مبارزة أدوار حتى الفوز" },
+    { id: "gw:games:slots", title: "ماكينة الحظ", description: "فرص مجانية تكسب خبرة" },
     { id: "gw:games:xo", title: "لعبة X و O", description: "مباراة مباشرة بين عضوين" },
     { id: "gw:games:ludo", title: "لودو رويال", description: "لعبة من ٢ إلى ٤ لاعبين" },
     { id: "gw:games:chess", title: "الشطرنج", description: "لعبة شطرنج" },
@@ -555,6 +557,8 @@ async function handleGroupWorldInteraction(userId, sock, groupId, memberId, inte
   if (interactionId.startsWith("gw:games:")) {
     const action = interactionId.slice("gw:games:".length);
     const instructions = {
+      duel: "ابدأ بـ .مبارزة @الخصم، يقبل بـ .مبارزة قبول، ثم الهجوم بـ .مبارزة هجوم. المدة دقيقتان.",
+      slots: "اكتب .سلوت لتدوير ماكينة الحظ مجاناً والفوز بخبرة XP، بحد 50 مرة يومياً.",
       xo: "لبدء مباراة لاعبين: .اكس_او",
       ludo: "لبدء طاولة لودو لاثنين إلى أربعة لاعبين: .لودو",
       chess: "لبدء الشطرنج: .شطرنج", snake: "لبدء سنيك: .سنيك", arcade: "لبدء لعبة السيارات: .اركيد",
@@ -604,6 +608,26 @@ async function commandReply(sock, groupId, memberId, message, text, isBotOwner =
 
   if ([".الألعاب", ".العاب"].includes(commandToken)) {
     return sendGamesMenu(sock, groupId);
+  }
+
+  if ([".سلوت", ".slots", ".slot"].includes(commandToken.toLowerCase())) {
+    const result=await groupWorldService.seaaveySlot(groupId,memberId);
+    return sendText(sock,groupId,`🎰 ماكينة الحظ\n[ ${result.reels.join(" | ")} ]\n${result.xp?`🎉 ربحت ${result.xp} XP`:"حاول مرة أخرى"}\nالفرص المتبقية اليوم: ${result.remaining} (اللعبة مجانية)`);
+  }
+  if ([".مبارزة", ".duel"].includes(commandToken.toLowerCase())) {
+    const sub=(argsList[0]||"").toLowerCase();let action=["قبول","accept"].includes(sub)?"accept":["هجوم","attack"].includes(sub)?"attack":"start",target="";
+    if(action==="start") {
+      const content=unwrappedMessageContent(message);const ctx=content.extendedTextMessage?.contextInfo||{};target=ctx.mentionedJid?.[0]||ctx.participant||"";
+      if(!target)return sendText(sock,groupId,"⚔️ لمنشن الخصم: .مبارزة @الخصم · للقبول: .مبارزة قبول · للهجوم: .مبارزة هجوم");
+      const meta=await sock.groupMetadata(groupId);const player=(meta.participants||[]).find(p=>participantIdentityValues(p).some(v=>sameWhatsAppIdentity(v,target)));
+      if(!player)throw Error("الخصم ليس عضواً في المجموعة أو لم أتمكن من التحقق");target=player.id||target;
+      if((await resolvedMessageSenderIds(message,memberId,sock)).some(id=>participantIdentityValues(player).some(v=>sameWhatsAppIdentity(v,id))))throw Error("لا يمكنك تحدي نفسك");
+    }
+    const d=await groupWorldService.seaaveyDuel(groupId,memberId,action,target);
+    if(d.event==='challenge')return sock.sendMessage(groupId,{text:`⚔️ تحدى @${d.challenger.split('@')[0]} اللاعب @${d.target.split('@')[0]}!\nعلى الخصم إرسال .مبارزة قبول خلال دقيقتين.`,mentions:[d.challenger,d.target]});
+    if(d.event==='accepted')return sock.sendMessage(groupId,{text:`⚔️ بدأت المبارزة! دور @${d.turn.split('@')[0]} أولاً. اكتب .مبارزة هجوم`,mentions:[d.turn]});
+    if(d.event==='won')return sock.sendMessage(groupId,{text:`🏆 فاز @${d.winner.split('@')[0]} بالمبارزة وحصل على 25 XP!`,mentions:[d.winner,d.opponent]});
+    return sock.sendMessage(groupId,{text:`⚔️ ضرر ${d.damage}!\nصحة @${d.challenger.split('@')[0]}: ${d.hp[d.challenger]}\nصحة @${d.target.split('@')[0]}: ${d.hp[d.target]}\nدور @${d.turn.split('@')[0]}: .مبارزة هجوم`,mentions:[d.challenger,d.target]});
   }
 
   if (commandToken === ".مساعدة") {

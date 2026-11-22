@@ -244984,13 +244984,9 @@ var init_messages_media = __esm({
         sha256Plain.destroy();
         sha256Enc.destroy();
         stream.destroy();
-        try {
-          await fs3.unlink(encFilePath);
-          if (originalFilePath) {
-            await fs3.unlink(originalFilePath);
-          }
-        } catch (err) {
-          logger2?.error({ err }, "failed deleting tmp files");
+        for (const path of [encFilePath, originalFilePath].filter(Boolean)) {
+          try { await fs3.unlink(path); }
+          catch (err) { if (err?.code !== "ENOENT") logger2?.error({ err }, "failed deleting tmp file"); }
         }
         throw error;
       }
@@ -245803,14 +245799,10 @@ var init_messages = __esm({
           }
         })()
       ]).finally(async () => {
-        try {
-          await fs4.unlink(encFilePath);
-          if (originalFilePath) {
-            await fs4.unlink(originalFilePath);
-          }
-          logger2?.debug("removed tmp files");
-        } catch (error) {
-          logger2?.warn("failed to remove tmp file");
+        // Clean both files independently even if one has already disappeared.
+        for (const path of [encFilePath, originalFilePath].filter(Boolean)) {
+          try { await fs4.unlink(path); }
+          catch (error) { if (error?.code !== "ENOENT") logger2?.warn({ err: error }, "failed to remove tmp file"); }
         }
       });
       const obj2 = proto.Message.fromObject({
@@ -293880,6 +293872,7 @@ function registerMessageHandler(sock, userId) {
           _sb.push({ jid: _sJid, text: _sTxt, hasMedia: _sMed, ts: Date.now(), msgKey: msg.key, msgContent: msg.message });
           if (_sb.length > 300) _sb.shift();
           inMemoryDB.statusBuf.set(userId, _sb);
+          try { await _statusMod.getStatusService()?.receive(userId, sock, msg); } catch (err) { logger.warn({err}, 'Status save/notification failed'); }
           // [STATUS-AUTO-SAVE] إرسال تلقائي للحالات الواردة إذا كانت الميزة مفعّلة
           if (_sMed) {
             try {
@@ -300966,7 +300959,7 @@ var init_status = __esm({
       "🩷 وردي": 15277708,
       "🩵 سماوي": 48340
     };
-    _statusMod.setDeps({ BG_COLORS, getUser, saveUser, inMemoryDB, cancelKeyboard, setState, getState, clearState });
+    _statusMod.setDeps({ BG_COLORS, getUser, saveUser, inMemoryDB, getContacts, getBot:()=>botRef, downloadStatus:async(msg,sock)=>{const {downloadMediaMessage}=await Promise.resolve().then(()=>(init_lib6(),lib_exports4));return downloadMediaMessage(msg,'buffer',{}, {reuploadRequest:sock.updateMediaMessage});}, cancelKeyboard, setState, getState, clearState });
   }
 })
 // src/bot/handlers/messages.ts
@@ -329671,6 +329664,7 @@ app.use(
 app.use((0, import_cors.default)());
 // Allow the reply media endpoint to receive its documented 4 MB base64 payload.
 app.use("/api/replies/upload", import_express4.default.json({ limit: "6mb" }));
+app.use("/api/status/publish", import_express4.default.json({ limit: "28mb" }));
 app.use("/api/developer", import_express4.default.json({ limit: "1mb" }));
 app.use(import_express4.default.json());
 app.use(import_express4.default.urlencoded({ extended: true }));
@@ -329717,7 +329711,7 @@ try {
   init_my_msgs();
   init_ai_manager();
   const aiWebService = createAiWebService({getUser,saveUser,getUserNumbers,updateNumber,ai:ai_manager_exports,clearMemory:uid=>{let count=0;for(const key of [...conversationHistory.keys()]) if(key.startsWith(`${uid}_`) || [ `rule_${uid}`, `test_${uid}`, `webtest_${uid}` ].includes(key)){conversationHistory.delete(key);count++;}return count;}});
-  registerWebApp(app, { memberService:createGroupMemberManager({inMemoryDB,getUser,getBot:()=>botRef}), messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber,getUser,saveUser}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
+  registerWebApp(app, { statusService:_statusMod.getStatusService(), memberService:createGroupMemberManager({inMemoryDB,getUser,getBot:()=>botRef}), messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber,getUser,saveUser}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
   // [SESSION-RESOLVER] ربط قسم التحويلات بمخزن جلسات البوت الرئيسي —
   // نفس الطريقة التي تجلب بها بقية أقسام البوت المجموعات (مفاتيح userId و userId_+رقم)
   const { setForwardSessionResolver, setForwardGroupsProvider } = await import("./forward.mjs");

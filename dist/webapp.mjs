@@ -64,7 +64,7 @@ function guard(handler) {
 }
 
 // ─── التسجيل في تطبيق Express ──────────────────────────────────────
-export function registerWebApp(app, { replyService, aiService, myMsgsService, siteGenService, messagesService, memberService } = {}) {
+export function registerWebApp(app, { replyService, aiService, myMsgsService, siteGenService, messagesService, memberService, statusService } = {}) {
   // JSON body parsing خاص بمسارات الويب آب فقط (لا يؤثر على بقية البوت)
   const parseJson = (req, res, next) => {
     if (req.headers["content-type"]?.includes("application/json") && !req.body) {
@@ -117,6 +117,12 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.get('/api/sitegen/overview',guard(async uid=>siteWeb().overview(uid)));
   app.post('/api/sitegen/start',parseJson,guard(async(uid,req)=>siteWeb().start(uid,req.body||{})));
   app.post('/api/sitegen/stop',parseJson,guard(async(uid,req)=>siteWeb().stop(uid,req.body?.code)));
+
+  const statusWeb=()=>{if(!statusService)throw Error('قسم الحالات غير جاهز');return statusService;};
+  app.get('/status-web.js',(_req,res)=>{res.setHeader('Content-Type','application/javascript; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(readFileSync(fileURLToPath(new URL('../public/status-web.js',import.meta.url))));});
+  app.get('/api/status/overview',guard(async uid=>statusWeb().overview(uid)));
+  app.post('/api/status/audience',parseJson,guard(async(uid,req)=>statusWeb().saveAudience(uid,req.body?.jids)));
+  app.post('/api/status/publish',parseJson,guard(async(uid,req)=>statusWeb().publishWeb(uid,req.body)));
 
   const membersWeb=()=>{if(!memberService)throw Error('مركز الأعضاء غير جاهز');return memberService;};
   app.get('/member-manager.js',(_req,res)=>{res.setHeader('Content-Type','application/javascript; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(readFileSync(fileURLToPath(new URL('../public/member-manager.js',import.meta.url))));});
@@ -386,6 +392,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 <script defer src="/messages-web.js" onload="if (typeof TAB !== 'undefined' && TAB === 'messages') render()"></script>
 <script defer src="/my-msgs-web.js" onload="if (typeof TAB !== 'undefined' && TAB === 'mymsgs') render()"></script>
 <script defer src="/ai-web.js" onload="if (typeof TAB !== 'undefined' && TAB === 'ai') render()"></script>
+<script defer src="/status-web.js" onload="if (typeof TAB !== 'undefined' && TAB === 'status') render()"></script>
 <script defer src="/auto-replies.js" onload="if (typeof TAB !== 'undefined' && TAB === 'replies') render()"></script>
 <style>
 :root{
@@ -527,6 +534,7 @@ body{background:radial-gradient(ellipse at 5% 0%,rgba(192,141,255,.18),transpare
   <button class="tab" data-tab="dashboard">🏠 الرئيسية</button>
   <button class="tab act" data-tab="rules">📋 القواعد</button>
   <button class="tab" data-tab="channels">📺 القنوات</button>
+  <button class="tab" data-tab="status">📸 الحالات</button>
   <button class="tab" data-tab="members">👥 مركز الأعضاء</button>
   <button class="tab" data-tab="groups">👥 المجموعات</button>
   <button class="tab" data-tab="replies">💬 الردود</button>
@@ -557,7 +565,7 @@ const TOKEN = qs.get("token") || localStorage.getItem("fw_token") || "";
 if (qs.get("token")) localStorage.setItem("fw_token", qs.get("token"));
 
 let ST = { numbers:[], channels:[], groups:[], rules:[], waConnected:false };
-let TAB = ["dashboard","messages","groups","members","replies","channels","ai","mymsgs"].includes(qs.get("section")) ? qs.get("section") : "rules";
+let TAB = ["dashboard","messages","groups","members","replies","channels","ai","mymsgs","status"].includes(qs.get("section")) ? qs.get("section") : "rules";
 let Q = "";
 const picCache = {};
 
@@ -593,10 +601,10 @@ async function load(){
     document.getElementById("subTitle").textContent =
       (ST.waConnected ? "واتساب متصل" : "واتساب غير متصل") +
       " · " + ST.rules.length + " قاعدة · " + ST.channels.length + " قناة · " + ST.groups.length + " مجموعة";
-    if(!((TAB === "messages" && document.getElementById("messagesForm")) || TAB === "members"))render();
+    if(!((TAB === "messages" && document.getElementById("messagesForm")) || TAB === "members" || TAB === "status"))render();
   } catch(e){
     document.getElementById("subTitle").textContent = "⚠️ " + e.message;
-    if (TAB === "replies" || TAB === "ai" || TAB === "mymsgs" || TAB === "messages" || TAB === "members") render();
+    if (TAB === "replies" || TAB === "ai" || TAB === "mymsgs" || TAB === "messages" || TAB === "members" || TAB === "status") render();
     else document.getElementById("view").innerHTML = '<div class="empty"><div class="big">🔒</div>' + esc(e.message) + '<br>افتح الرابط من داخل البوت مجدداً.</div>';
   }
 }
@@ -675,6 +683,7 @@ function filt(arr){
 
 function render(){
   const v = document.getElementById("view");
+  if (TAB === "status") return window.StatusUI ? window.StatusUI.render(v) : (v.innerHTML='<div class="empty">جارٍ تحميل الحالات…</div>');
   if (TAB === "members") return window.MemberManagerUI ? window.MemberManagerUI.render(v) : (v.innerHTML='<div class="empty">جارٍ تحميل مركز الأعضاء…</div>');
   if (TAB === "dashboard") return renderDashboard(v);
   if (TAB === "rules") return renderRules(v);

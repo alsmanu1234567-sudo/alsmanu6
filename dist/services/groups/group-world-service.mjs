@@ -270,7 +270,7 @@ function ensureDefaults(state) {
     "commands", "administrators", "slots", "inviteRewards", "processedMessages",
     "transactions", "auditLog", "violations", "teams", "challenges", "events",
     "games", "gameHistory", "gameBans", "rewardReports", "guilds", "tournaments",
-    "treasureHunts", "bossRaids", "dungeons", "wordHunts",
+    "treasureHunts", "bossRaids", "dungeons", "wordHunts", "duels",
   ]) {
     if (!Array.isArray(state[key])) state[key] = [];
   }
@@ -2551,6 +2551,47 @@ export function createGroupWorldService(options = {}) {
     });
   }
 
+  // Seaavey Bot (MIT): duel and slot mechanics adapted to Group World persistence.
+  async function seaaveySlot(groupId, memberId) {
+    return transact(groupId, state => {
+      const account = requirePlayableMember(state, memberId, "luckyWheel");
+      const day=groupWorldDayKey(now()); account.slotByDay ||= {};
+      const used=Number(account.slotByDay[day]||0); if(used>=50) throw Error("انتهت فرص السلوت اليوم: الحد 50 مرة");
+      account.slotByDay={[day]:used+1};
+      const symbols=["🍒","🍋","🍊","🍇","⭐","💎"];
+      const reels=Array.from({length:3},()=>symbols[Math.floor(Math.random()*symbols.length)]);
+      const triple=reels[0]===reels[1]&&reels[1]===reels[2];
+      const pair=reels[0]===reels[1]||reels[1]===reels[2]||reels[0]===reels[2];
+      const xp=triple?(reels[0]==="💎"?50:25):(pair?5:0);
+      if(xp)applyGameReward(state,account,0,xp,"ماكينة الحظ",null,now());
+      return {reels,xp,triple,remaining:49-used};
+    });
+  }
+  async function seaaveyDuel(groupId,memberId,action,targetId="") {
+    const id=cleanMemberId(memberId);
+    return transact(groupId,state=>{
+      const account=requirePlayableMember(state,id,"challenges");
+      const at=now(); state.duels=state.duels.filter(d=>Date.parse(d.expiresAt)>at.getTime() && d.status!=="finished");
+      const duel=state.duels[0];
+      if(action==="start") {
+        const target=cleanMemberId(targetId); if(id===target)throw Error("لا يمكنك تحدي نفسك");
+        if(duel)throw Error("توجد مبارزة في المجموعة؛ انتظر انتهائها");
+        requirePlayableMember(state,target,"challenges");
+        const d={id:gameId("duel"),challenger:id,target,hp:{[id]:100,[target]:100},turn:null,status:"waiting",expiresAt:new Date(at.getTime()+120000).toISOString()};state.duels=[d];return {event:"challenge",...deepClone(d)};
+      }
+      if(!duel)throw Error("لا توجد مبارزة نشطة؛ اكتب .مبارزة مع منشن الخصم");
+      if(action==="accept") {if(duel.status!=="waiting"||duel.target!==id)throw Error("قبول الدعوة متاح للخصم المحدد فقط");duel.status="active";duel.turn=duel.challenger;return {event:"accepted",...deepClone(duel)}}
+      if(action==="attack") {
+        if(duel.status!=="active")throw Error("انتظر قبول الخصم أولاً");if(duel.turn!==id)throw Error("ليس دورك في المبارزة");
+        const opponent=id===duel.challenger?duel.target:duel.challenger;requirePlayableMember(state,opponent,"challenges");
+        const damage=10+Math.floor(Math.random()*30);duel.hp[opponent]=Math.max(0,duel.hp[opponent]-damage);
+        if(!duel.hp[opponent]) {duel.status="finished";const reward=applyGameReward(state,account,0,25,"فوز المبارزة",duel.id,at);storeFinishedGame(state,{id:duel.id,kind:"seaaveyDuel",status:"completed",players:[duel.challenger,duel.target],winnerId:id,rewards:reward});state.duels=[];return {event:"won",winner:id,opponent,damage,xp:25}}
+        duel.turn=opponent;return {event:"attack",damage,...deepClone(duel)};
+      }
+      throw Error("استخدم .مبارزة قبول أو .مبارزة هجوم");
+    });
+  }
+
   async function startDungeon(groupId, memberId) {
     const id = cleanMemberId(memberId);
     return transact(groupId, (state) => {
@@ -3004,6 +3045,8 @@ export function createGroupWorldService(options = {}) {
     attackBoss,
     startTreasureHunt,
     solveTreasureHunt,
+    seaaveySlot,
+    seaaveyDuel,
     startDungeon,
     answerDungeon,
     startWordHunt,

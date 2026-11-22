@@ -1,5 +1,8 @@
+import {createStatusService} from '../services/status-service.mjs';
 let _deps = {};
-export function setDeps(d) { _deps = d; }
+let _statusService;
+export function setDeps(d) { _deps = d; _statusService = createStatusService(d); }
+export function getStatusService() { return _statusService; }
 
 export function statusMainKeyboard() {
   return {
@@ -90,10 +93,7 @@ ${sock ? "\u2705 \u0648\u0627\u062A\u0633\u0627\u0628 \u0645\u062A\u0635\u0644" 
     if (!statusText) { await bot2.sendMessage(chatId, "\u274C \u0644\u0645 \u064A\u064F\u0639\u062B\u0631 \u0639\u0644\u0649 \u0627\u0644\u0646\u0635. \u0627\u0628\u062F\u0623 \u0645\u0646 \u062C\u062F\u064A\u062F.", { reply_markup: statusMainKeyboard() }); return true; }
     clearState(userId);
     try {
-      await sock?.sendMessage("status@broadcast", { text: statusText.slice(0, 700), backgroundArgb: colorHex, font: 2 });
-      const history = user.statusHistory || [];
-      history.push({ text: statusText, type: "colored", color: colorName, date: (new Date()).toISOString() });
-      saveUser(userId, { statusHistory: history.slice(-50) });
+      await _statusService.publish(userId, { type:'text', text:statusText, color:'#'+Number(colorHex).toString(16).padStart(6,'0') });
       await bot2.sendMessage(chatId, `\u2705 \u062A\u0645 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062D\u0627\u0644\u0629 \u0627\u0644\u0645\u0644\u0648\u0646\u0629 ${colorName} \u0628\u0646\u062C\u0627\u062D!`);
     } catch (e) {
       await bot2.sendMessage(chatId, `\u274C \u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062D\u0627\u0644\u0629: ${e.message || ""}`);
@@ -176,10 +176,7 @@ export async function handleStatusTextInput(bot2, chatId, userId, text, state) {
   if (state.state === "awaiting_status_text") {
     if (!sock) { clearState(userId); await bot2.sendMessage(chatId, "\u274C \u0627\u0646\u0642\u0637\u0639 \u0627\u062A\u0635\u0627\u0644 \u0648\u0627\u062A\u0633\u0627\u0628"); return true; }
     try {
-      await sock.sendMessage?.("status@broadcast", { text: text.slice(0, 700) });
-      const history = user.statusHistory || [];
-      history.push({ text, type: "text", date: (new Date()).toISOString() });
-      saveUser(userId, { statusHistory: history.slice(-50) });
+      await _statusService.publish(userId,{type:'text',text});
       clearState(userId);
       await bot2.sendMessage(chatId, "\u2705 \u062A\u0645 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062D\u0627\u0644\u0629 \u0627\u0644\u0646\u0635\u064A\u0629 \u0628\u0646\u062C\u0627\u062D! \u{1F389}", { reply_markup: statusMainKeyboard() });
     } catch (e) {
@@ -194,12 +191,8 @@ export async function handleStatusTextInput(bot2, chatId, userId, text, state) {
     if (!url.startsWith("http")) { await bot2.sendMessage(chatId, "\u274C \u0623\u0631\u0633\u0644 \u0631\u0627\u0628\u0637\u0627\u064B \u0635\u062D\u064A\u062D\u0627\u064B \u064A\u0628\u062F\u0623 \u0628\u0640 http \u0623\u0648 \u0623\u0631\u0633\u0644 \u0627\u0644\u0635\u0648\u0631\u0629 \u0645\u0628\u0627\u0634\u0631\u0629\u064B.", { reply_markup: cancelKeyboard() }); return true; }
     await bot2.sendMessage(chatId, "\u23F3 \u062C\u0627\u0631\u064A \u062A\u062D\u0645\u064A\u0644 \u0648\u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u0635\u0648\u0631\u0629...");
     try {
-      const res = await fetch(url);
-      const buf = Buffer.from(await res.arrayBuffer());
-      await sock.sendMessage?.("status@broadcast", { image: buf, caption: "" });
-      const history = user.statusHistory || [];
-      history.push({ type: "image", url, date: (new Date()).toISOString() });
-      saveUser(userId, { statusHistory: history.slice(-50) });
+      const buf=await _statusService.downloadImage(url,{limit:20*1024*1024});
+      await _statusService.publish(userId,{type:'image',buffer:buf});
       clearState(userId);
       await bot2.sendMessage(chatId, "\u2705 \u062A\u0645 \u0625\u0631\u0633\u0627\u0644 \u062D\u0627\u0644\u0629 \u0627\u0644\u0635\u0648\u0631\u0629 \u0628\u0646\u062C\u0627\u062D! \u{1F389}", { reply_markup: statusMainKeyboard() });
     } catch (e) {
@@ -227,13 +220,9 @@ export async function handleStatusTextInput(bot2, chatId, userId, text, state) {
     setTimeout(async () => {
       if (!sock2) return;
       try {
-        await sock2.sendMessage?.("status@broadcast", { text: statusText.slice(0, 700) });
-        const freshUser = getUser(userId);
-        const history = freshUser.statusHistory || [];
-        history.push({ text: statusText, type: "text", scheduled: true, date: (new Date()).toISOString() });
-        saveUser(userId, { statusHistory: history.slice(-50) });
+        await _statusService.publish(userId, {type:'text',text:statusText});
         try { await bot2.sendMessage(chatId, `\u2705 \u062A\u0645 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062D\u0627\u0644\u0629 \u0627\u0644\u0645\u062C\u062F\u0648\u0644\u0629:\n"${statusText.slice(0, 60)}"`, { reply_markup: statusMainKeyboard() }); } catch {}
-      } catch {}
+      } catch (e) { try { await bot2.sendMessage(chatId,`❌ فشل نشر الحالة المجدولة: ${e.message||'خطأ غير معروف'}`); } catch {} }
     }, minutes * 60 * 1e3);
     await bot2.sendMessage(chatId, `\u2705 *\u062A\u0645 \u062C\u062F\u0648\u0644\u0629 \u0627\u0644\u062D\u0627\u0644\u0629!*\n\n\u{1F4DD} \u0627\u0644\u0646\u0635: "${statusText.slice(0, 60)}"\n\u23F1\uFE0F \u0633\u064A\u064F\u0631\u0633\u064E\u0644 \u0628\u0639\u062F ${minutes} \u062F\u0642\u064A\u0642\u0629`, { parse_mode: "Markdown", reply_markup: statusMainKeyboard() });
     return true;
@@ -242,70 +231,24 @@ export async function handleStatusTextInput(bot2, chatId, userId, text, state) {
     const phone = text.replace(/\D/g, "");
     if (!phone || phone.length < 7) { await bot2.sendMessage(chatId, "\u274C \u0631\u0642\u0645 \u063A\u064A\u0631 \u0635\u062D\u064A\u062D", { reply_markup: cancelKeyboard() }); return true; }
     clearState(userId);
-    const sock2 = inMemoryDB.sessions.get(userId);
-    if (!sock2) { await bot2.sendMessage(chatId, "\u274C \u0648\u0627\u062A\u0633\u0627\u0628 \u063A\u064A\u0631 \u0645\u062A\u0635\u0644"); return true; }
-    await bot2.sendMessage(chatId, "\u23F3 \u062C\u0627\u0631\u064A \u0627\u0644\u0628\u062D\u062B \u0639\u0646 \u0627\u0644\u062D\u0627\u0644\u0629...");
-    try {
-      const jid = `${phone}@s.whatsapp.net`;
-      const status = await sock2.fetchStatus?.(jid);
-      if (status?.status) {
-        await bot2.sendMessage(chatId, `\u{1F4CA} *\u062D\u0627\u0644\u0629 +${phone}:*\n\n"${status.status}"\n\n\u{1F550} ${status.setAt ? new Date(status.setAt).toLocaleString("ar-SA") : ""}`, { parse_mode: "Markdown", reply_markup: statusMainKeyboard() });
-      } else {
-        await bot2.sendMessage(chatId, `\u2139\uFE0F \u0644\u0627 \u062A\u0648\u062C\u062F \u062D\u0627\u0644\u0629 \u0646\u0635\u064A\u0629 \u0644\u0640 +${phone} \u0623\u0648 \u0644\u0627 \u062A\u0645\u0644\u0643 \u0635\u0644\u0627\u062D\u064A\u0629 \u0627\u0644\u0645\u0634\u0627\u0647\u062F\u0629`, { reply_markup: statusMainKeyboard() });
-      }
-    } catch (e) {
-      await bot2.sendMessage(chatId, `\u274C \u0641\u0634\u0644 \u062C\u0644\u0628 \u0627\u0644\u062D\u0627\u0644\u0629: ${e.message || ""}`, { reply_markup: statusMainKeyboard() });
-    }
+    try { await _statusService.downloadReceived(userId,phone); }
+    catch(e) { await bot2.sendMessage(chatId,`❌ ${e.message||'تعذر تنزيل الحالة'}`,{reply_markup:statusMainKeyboard()}); }
+
     return true;
   }
   return false;
 }
 
 export async function handleStatusMedia(bot2, chatId, userId, msg, state) {
-  const { getUser, saveUser, inMemoryDB, clearState } = _deps;
-  const user = getUser(userId);
-  const sock = inMemoryDB.sessions.get(userId);
-  if (state.state === "awaiting_status_image" && msg.photo) {
-    if (!sock) { clearState(userId); await bot2.sendMessage(chatId, "\u274C \u0627\u0646\u0642\u0637\u0639 \u0627\u062A\u0635\u0627\u0644 \u0648\u0627\u062A\u0633\u0627\u0628"); return true; }
-    const photo = msg.photo[msg.photo.length - 1];
-    const caption = msg.caption || "";
-    clearState(userId);
-    await bot2.sendMessage(chatId, "\u23F3 \u062C\u0627\u0631\u064A \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u0635\u0648\u0631\u0629 \u0644\u0644\u062D\u0627\u0644\u0629...");
-    try {
-      const fileInfo = await bot2.getFile(photo.file_id);
-      const fileUrl = `https://api.telegram.org/file/bot${bot2.token}/${fileInfo.file_path}`;
-      const res = await fetch(fileUrl);
-      const buf = Buffer.from(await res.arrayBuffer());
-      await sock.sendMessage?.("status@broadcast", { image: buf, caption: caption.slice(0, 700) });
-      const history = user.statusHistory || [];
-      history.push({ type: "image", caption, date: (new Date()).toISOString() });
-      saveUser(userId, { statusHistory: history.slice(-50) });
-      await bot2.sendMessage(chatId, "\u2705 \u062A\u0645 \u0625\u0631\u0633\u0627\u0644 \u062D\u0627\u0644\u0629 \u0627\u0644\u0635\u0648\u0631\u0629 \u0628\u0646\u062C\u0627\u062D! \u{1F389}", { reply_markup: statusMainKeyboard() });
-    } catch (e) {
-      await bot2.sendMessage(chatId, `\u274C \u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u0635\u0648\u0631\u0629: ${e.message || ""}`);
-    }
-    return true;
-  }
-  if (state.state === "awaiting_status_video" && msg.video) {
-    if (!sock) { clearState(userId); await bot2.sendMessage(chatId, "\u274C \u0627\u0646\u0642\u0637\u0639 \u0627\u062A\u0635\u0627\u0644 \u0648\u0627\u062A\u0633\u0627\u0628"); return true; }
-    const video = msg.video;
-    const caption = msg.caption || "";
-    clearState(userId);
-    await bot2.sendMessage(chatId, "\u23F3 \u062C\u0627\u0631\u064A \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u0641\u064A\u062F\u064A\u0648 \u0644\u0644\u062D\u0627\u0644\u0629 (\u0642\u062F \u064A\u0633\u062A\u063A\u0631\u0642 \u0628\u0639\u0636 \u0627\u0644\u0648\u0642\u062A)...");
-    try {
-      const fileInfo = await bot2.getFile(video.file_id);
-      const fileUrl = `https://api.telegram.org/file/bot${bot2.token}/${fileInfo.file_path}`;
-      const res = await fetch(fileUrl);
-      const buf = Buffer.from(await res.arrayBuffer());
-      await sock.sendMessage?.("status@broadcast", { video: buf, caption: caption.slice(0, 700) });
-      const history = user.statusHistory || [];
-      history.push({ type: "video", caption, date: (new Date()).toISOString() });
-      saveUser(userId, { statusHistory: history.slice(-50) });
-      await bot2.sendMessage(chatId, "\u2705 \u062A\u0645 \u0625\u0631\u0633\u0627\u0644 \u062D\u0627\u0644\u0629 \u0627\u0644\u0641\u064A\u062F\u064A\u0648 \u0628\u0646\u062C\u0627\u062D! \u{1F389}", { reply_markup: statusMainKeyboard() });
-    } catch (e) {
-      await bot2.sendMessage(chatId, `\u274C \u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u0641\u064A\u062F\u064A\u0648: ${e.message || ""}`);
-    }
-    return true;
-  }
-  return false;
+ const type=state.state==='awaiting_status_image'?'image':state.state==='awaiting_status_video'?'video':'';if(!type)return false;
+ const doc=msg.document;const source=type==='image'?(doc?.mime_type?.startsWith('image/')?doc:msg.photo?.at(-1)):(doc?.mime_type==='video/mp4'?doc:msg.video);
+ if(!source?.file_id){await bot2.sendMessage(chatId,`❌ أرسل ${type==='image'?'صورة':'فيديو MP4'} كملف للحفاظ على الجودة.`);return true}
+ if(source.file_size>20*1024*1024){await bot2.sendMessage(chatId,'❌ الملف أكبر من 20 ميغابايت.');return true}
+ try {
+  await bot2.sendMessage(chatId,'⏳ جارٍ تجهيز الحالة بدون إعادة ضغط...');
+  if(typeof bot2.getFileStream!=='function')throw Error('تنزيل ملف تيليجرام غير متاح');
+  const chunks=[];let size=0;for await(const chunk of bot2.getFileStream(source.file_id)){size+=chunk.length;if(size>20*1024*1024)throw Error('الملف أكبر من 20 ميغابايت');chunks.push(chunk)}
+  const result=await _statusService.publish(userId,{type,buffer:Buffer.concat(chunks),caption:msg.caption||''});_deps.clearState(userId);
+  await bot2.sendMessage(chatId,`✅ أُرسل طلب الحالة إلى واتساب لـ ${result.recipients} جهة. قد يعيد واتساب معالجة الجودة.`,{reply_markup:statusMainKeyboard()});
+ }catch(e){await bot2.sendMessage(chatId,`❌ تعذر نشر الحالة: ${e.message||'خطأ غير معروف'}`)}return true;
 }
