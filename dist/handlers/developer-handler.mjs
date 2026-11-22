@@ -47,6 +47,7 @@ export async function handleText(bot, msg) {
 
   if (!isDev) return false;
 
+  if (/^\/serverlink(?:\s+\d+)?$/.test(text)) {const n=text.split(/\s+/)[1];if(n)await _deps.openServerControl(bot,chatId,userId,Number(n));else await _deps.showServerControlMenu(bot,chatId,userId);return true;}
   if (text === '/dev_panel' || text === '/dev') { await _deps.sendDevPanel(bot, chatId, userId); return true; }
   if (text === '/dev_users') { await _deps.sendDevUsers(bot, chatId, userId); return true; }
   if (text === '/dev_stats') { await _deps.sendDevStats(bot, chatId, userId); return true; }
@@ -109,6 +110,9 @@ export async function handleCallback(bot, query) {
     data === 'dev_panel'
   ) {
     if (userId !== String(_deps.DEVELOPER_ID)) {await bot.sendMessage(chatId,'غير مصرح');return true;}
+    if (data === 'dev_servercontrol') {await _deps.showServerControlMenu(bot,chatId,userId);return true;}
+    if (data === 'dev_serverlink_stop') {await _deps.stopServerControlLink(bot,chatId,userId);return true;}
+    if (/^dev_serverlink_\d+$/.test(data)) {await _deps.openServerControl(bot,chatId,userId,Number(data.slice('dev_serverlink_'.length)));return true;}
     if (data === 'dev_open_web') {await _deps.openDeveloperWeb(bot,chatId,userId);return true;}
     if (data === 'dev_revoke_web') {await _deps.revokeDeveloperWeb(bot,chatId,userId);return true;}
     if (data === 'dev_panel') {

@@ -14,8 +14,9 @@
  */
 
 import { spawn }     from "child_process";
-import { existsSync } from "fs";
-import { join }      from "path";
+import { existsSync, mkdirSync } from "fs";
+import { writeFile, rename } from "fs/promises";
+import { join, dirname }      from "path";
 import { ok, wrn, logErr } from "../core/logger.mjs";
 
 const MAX_RESTARTS   = 10;         // حد أقصى لإعادات التشغيل في الجلسة
@@ -61,6 +62,12 @@ export function spawnBot(baseDir, options = {}) {
   let child        = null;
   let restartCount = 0;
   let stopped      = false;
+  // Bounded latest output snapshot, in the external private control directory.
+  const logPath = process.env.BOT_SERVER_CONTROL_LOG;
+  let chunks = [], bytes = 0, writing = false, dirty = false;
+  const capture = chunk => { const b=Buffer.from(chunk); chunks.push(b);bytes+=b.length;while(bytes>1024*1024&&chunks.length>1)bytes-=chunks.shift().length;if(bytes>1024*1024){chunks=[chunks[0].subarray(-1024*1024)];bytes=chunks[0].length}dirty=true; };
+  if(logPath){try{mkdirSync(dirname(logPath),{recursive:true,mode:0o700});const t=setInterval(async()=>{if(!dirty||writing)return;dirty=false;writing=true;const tmp=logPath+".tmp";try{await writeFile(tmp,Buffer.concat(chunks),{mode:0o600});await rename(tmp,logPath)}catch{}finally{writing=false}},1000);t.unref?.()}catch{}}
+
 
   function launch() {
     if (stopped) return;
@@ -70,9 +77,10 @@ export function spawnBot(baseDir, options = {}) {
     child = spawn(
       "node",
       ["--enable-source-maps", entry],
-      { cwd: baseDir, stdio: "inherit", env: process.env }
+      { cwd: baseDir, stdio: logPath ? ["inherit", "pipe", "pipe"] : "inherit", env: process.env }
     );
 
+    if(logPath){child.stdout?.pipe(process.stdout,{end:false});child.stderr?.pipe(process.stderr,{end:false});child.stdout?.on("data",capture);child.stderr?.on("data",capture);}
     if (onSpawn) onSpawn(child);
 
     child.on("error", e => logErr(`خطأ في العملية: ${e.message}`));

@@ -4,7 +4,7 @@
  * يمنع تشغيل نسختين، لا يعيد التثبيت بلا داعٍ، وينظف مؤقتات البوت فقط.
  */
 import { createHash } from "crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, cpSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { banner, ok, wrn } from "../core/logger.mjs";
@@ -219,6 +219,10 @@ async function main() {
   await ensureYtDlp(BASE_DIR);
   await ensureFfmpegStatic(BASE_DIR, { allowDownload: !NO_INSTALL });
 
+  // The standalone control service is copied next to external dependencies, not into session storage.
+  const serverControlDir = join(EXTERNAL_DEPS_DIR, "server-control");
+  try { mkdirSync(serverControlDir, { recursive: true, mode: 0o700 }); cpSync(join(BASE_DIR, "server-control"), serverControlDir, { recursive: true }); process.env.BOT_SERVER_CONTROL_DIR = serverControlDir; process.env.BOT_SERVER_CONTROL_LOG = join(serverControlDir, "bot.log"); }
+  catch (error) { wrn("لوحة السيرفر المستقلة غير جاهزة: " + error.message); }
   const port = Number.parseInt(process.env.PORT ?? "5000", 10);
   const { startEngine } = await import("../engine/index.mjs");
   runner = spawnBot(BASE_DIR, {

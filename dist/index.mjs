@@ -301149,6 +301149,17 @@ async function openDeveloperWeb(bot2,chatId,userId){
   if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId)){await bot2.sendMessage(chatId,'افتح لوحة المطور من محادثة البوت الخاصة فقط.');return;}
   try {const url=developerConsole.issue(userId);await bot2.sendMessage(chatId,'🌐 رابط خاص للوحة المطور، صالح 15 دقيقة. لا تشاركه.',{reply_markup:{inline_keyboard:[[{text:'فتح لوحة المطوّر',url}]]}});}catch(err){await bot2.sendMessage(chatId,'تعذر فتح اللوحة: '+err.message);}
 }
+async function showServerControlMenu(bot2,chatId,userId){
+  if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId)){await bot2.sendMessage(chatId,'افتح لوحة السيرفر من محادثة البوت الخاصة فقط.');return;}
+  await bot2.sendMessage(chatId,'🖥 اختر مدة رابط لوحة السيرفر المستقلة. أو أرسل /serverlink ثم عدد الدقائق، مثال: /serverlink 120.\nالرابط يمنح تحكماً كاملاً؛ لا تشاركه.',{reply_markup:{inline_keyboard:[[{text:'ساعة',callback_data:'dev_serverlink_60'},{text:'6 ساعات',callback_data:'dev_serverlink_360'}],[{text:'يوم',callback_data:'dev_serverlink_1440'},{text:'7 أيام',callback_data:'dev_serverlink_10080'}],[{text:'🔒 إيقاف رابط السيرفر',callback_data:'dev_serverlink_stop'}]]}});
+}
+async function openServerControl(bot2,chatId,userId,minutes){
+  if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId)){await bot2.sendMessage(chatId,'هذه الخدمة للمطور في المحادثة الخاصة فقط.');return;}
+  const dir=process.env.BOT_SERVER_CONTROL_DIR;if(!dir){await bot2.sendMessage(chatId,'لوحة السيرفر غير جاهزة: شغّل البوت عبر bootstrap/index.mjs أولاً.');return;}
+  await bot2.sendMessage(chatId,'⏳ جارٍ تشغيل لوحة السيرفر وإنشاء رابط مستقل، قد يستغرق دقيقة أو أكثر.');
+  try{const {launchServerControl}=await import('../services/developer/server-control-launcher.mjs');const result=await launchServerControl({directory:dir,base:process.cwd(),minutes});await bot2.sendMessage(chatId,'🔴 رابط لوحة السيرفر المستقلة؛ لا تشاركه. ينتهي في '+new Date(result.expiry).toLocaleString('ar')+'.'+(result.provider==='localtunnel'&&result.password?'\nإذا ظهرت صفحة حماية النفق أدخل هذا العنوان: '+result.password:''),{reply_markup:{inline_keyboard:[[{text:'🖥 فتح لوحة السيرفر',url:result.url}],[{text:'🔒 إيقاف الرابط',callback_data:'dev_serverlink_stop'}]]}})}catch(e){await bot2.sendMessage(chatId,'تعذر إنشاء رابط السيرفر: '+String(e.message||e).slice(0,300));}
+}
+async function stopServerControlLink(bot2,chatId,userId){if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId))return;if(!process.env.BOT_SERVER_CONTROL_DIR){await bot2.sendMessage(chatId,'لوحة السيرفر غير مهيأة.');return}try{const {stopServerControl}=await import('../services/developer/server-control-launcher.mjs');const ok=await stopServerControl(process.env.BOT_SERVER_CONTROL_DIR);await bot2.sendMessage(chatId,ok?'🔒 تم إيقاف رابط السيرفر.':'لا توجد جلسة يمكن الوصول إليها لإيقافها.')}catch(e){await bot2.sendMessage(chatId,'تعذر إيقاف الرابط: '+e.message)}}
 async function revokeDeveloperWeb(bot2,chatId,userId){
   if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId)){await bot2.sendMessage(chatId,'افتح لوحة المطور من محادثة البوت الخاصة فقط.');return;}
   developerConsole?.revoke(userId);await bot2.sendMessage(chatId,'🔒 أُلغيت جميع روابط لوحة المطور الحالية. الأوامر التي بدأت مسبقاً قد لا تتوقف.');
@@ -301162,7 +301173,7 @@ async function sendDevPanel(bot2, chatId, userId) {
   const totalPts = Array.from(inMemoryDB.users.values()).reduce((s, u3) => s + (u3.points || 0), 0);
   const unreadMsgs = inMemoryDB.devMessages.filter((m) => !m.replied).length;
   const devKeyboard=devMenuKeyboard(inMemoryDB.users.size,stats.running,stats.stopped);
-  if(String(chatId)===String(userId)) devKeyboard.inline_keyboard.splice(1,0,[{text:"🔄 رابط جديد للوحة المطور",callback_data:"dev_open_web"},{text:"🔒 إلغاء روابط المطور",callback_data:"dev_revoke_web"}]);
+  if(String(chatId)===String(userId)) devKeyboard.inline_keyboard.splice(1,0,[{text:"🖥 لوحة السيرفر المستقلة",callback_data:"dev_servercontrol"}],[{text:"🔄 رابط جديد للوحة المطور",callback_data:"dev_open_web"},{text:"🔒 إلغاء روابط المطور",callback_data:"dev_revoke_web"}]);
   if(String(chatId)===String(userId)){try{devKeyboard.inline_keyboard[0]=[{text:'🌐 فتح لوحة المطوّر',url:developerConsole.issue(userId)}]}catch{}}
   await bot2.sendMessage(
     chatId,
@@ -325193,7 +325204,7 @@ async function startBot() {
       handleAiCallback, handleAiCallback2, handleGroupsCallback, handleGroupsV2,
       handleStatusCallback,
       handleDevTexts, handleDevChannels, handleDevKeepalive,
-      handleDevTextCallback, handleDevChannelsCallback, handleDevCallback, openDeveloperWeb, revokeDeveloperWeb,
+      handleDevTextCallback, handleDevChannelsCallback, handleDevCallback, openDeveloperWeb, revokeDeveloperWeb, showServerControlMenu, openServerControl, stopServerControlLink,
       handleBulkPoints, handleEvilFeature, handleDevEconomy, handleDevInbox,
       showHelp, showInfo2, handleMsgToDev, handleBuyMizajStars,
     };
