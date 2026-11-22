@@ -1,0 +1,20 @@
+name: 💡 اقتراح ميزة
+description: اقترح تحسيناً للمشروع
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: ما المشكلة التي تريد حلها؟
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: ما الميزة المقترحة؟
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: تفاصيل إضافية
+      description: لا تضع توكنات أو بيانات شخصية.
