@@ -124591,6 +124591,7 @@ function connectMenuKeyboard(numbers = [], maxNumbers = 1, cleanHours = 0, proce
       [{ text: "\u{1F4F7} QR Code", callback_data: "connect_qr" }, { text: "\u{1F522} \u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062A\u0641", callback_data: "connect_pairing" }],
       [{ text: `\u2795 \u0625\u0636\u0627\u0641\u0629 \u0631\u0642\u0645 (${numbers.length}/${maxNumbers})`, callback_data: "connect_add" }, { text: "\u{1F5D1}\uFE0F \u0641\u0635\u0644 \u0631\u0642\u0645", callback_data: "connect_disconnect" }],
       [{ text: "\u{1F504} \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644", callback_data: "connect_reconnect" }, { text: "\u{1F504} \u062A\u062D\u062F\u064A\u062B \u0627\u0644\u062D\u0627\u0644\u0629", callback_data: "connect_refresh" }],
+      [{ text: "\u{1F4E6} تصدير الجلسة (ملف)", callback_data: "session_export" }, { text: "\u{1F4E5} استيراد جلسة", callback_data: "session_import" }],
       [{ text: "🧹 تنظيف الرسائل المنتظرة دون فصل واتساب", callback_data: "connect_clean_restart" }],
       [{ text: schedLabel, callback_data: "connect_schedule_clean" }],
       [{ text: processingPaused ? "▶️ تشغيل معالجة الرسائل" : "⏸ إيقاف معالجة الرسائل", callback_data: processingPaused ? "connect_processing_start" : "connect_processing_stop" }],
@@ -292835,6 +292836,115 @@ function clearAuthDir(userId) {
   } catch {
   }
 }
+
+// ── [SESSION-FILE] تصدير واستيراد الجلسة كملف ZIP داخل تيليجرام ─────────────
+function _sessionKeysFor(uid) {
+  const key = String(uid);
+  try {
+    return fs6.readdirSync(WA_SESSIONS_ROOT).filter((name) => {
+      try {
+        return fs6.statSync(path3.join(WA_SESSIONS_ROOT, name)).isDirectory() && (name === key || name.startsWith(`${key}_`));
+      } catch { return false; }
+    });
+  } catch { return []; }
+}
+
+async function exportSessionFile(bot2, chatId, userId) {
+  const { createZip } = await import("../services/zip-lite.mjs");
+  const keys = _sessionKeysFor(userId);
+  if (!keys.length) {
+    await bot2.sendMessage(chatId, "❌ لا توجد جلسة محفوظة لك بعد. اربط رقماً أولاً ثم أعد المحاولة.").catch(() => { });
+    return { ok: false };
+  }
+  for (const sessionKey of keys) {
+    const base = path3.join(WA_SESSIONS_ROOT, sessionKey);
+    const files = [];
+    const walk = (dir, prefix) => {
+      for (const entry of fs6.readdirSync(dir, { withFileTypes: true })) {
+        const full = path3.join(dir, entry.name);
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) walk(full, rel);
+        else {
+          try {
+            if (fs6.statSync(full).size > 20 * 1024 * 1024) continue;
+            files.push({ name: rel, data: fs6.readFileSync(full) });
+          } catch { }
+        }
+      }
+    };
+    try {
+      walk(base, "");
+      if (!files.some((file) => file.name === "creds.json" || file.name.endsWith("/creds.json"))) {
+        await bot2.sendMessage(chatId, `⚠️ الجلسة ${sessionKey} غير مكتملة (creds.json مفقود).`).catch(() => { });
+        continue;
+      }
+      const zip = createZip(files);
+      await bot2.sendDocument(
+        chatId,
+        zip,
+        { caption: `📦 *ملف جلسة واتساب*\n\nالرقم: \`${sessionKey.includes("_") ? sessionKey.split("_").pop() : sessionKey}\`\nالملفات: ${files.length}\n\n⚠️ الملف يحتوي مفاتيح رقمك — لا تشاركه مع أحد.\nلاستعادته: أرسل هذا الملف للبوت في أي وقت.`, parse_mode: "Markdown" },
+        { filename: `wa-session-${sessionKey}.zip`, contentType: "application/zip" },
+      );
+    } catch (error) {
+      await bot2.sendMessage(chatId, `❌ تعذر تصدير الجلسة: ${String(error?.message || error).slice(0, 160)}`).catch(() => { });
+    }
+  }
+  return { ok: true };
+}
+
+async function importSessionFile(bot2, chatId, userId, buffer) {
+  const { readZip } = await import("../services/zip-lite.mjs");
+  let entries;
+  try { entries = readZip(buffer); } catch (error) {
+    await bot2.sendMessage(chatId, `❌ الملف ليس أرشيف ZIP صالحاً: ${String(error?.message || error).slice(0, 120)}`).catch(() => { });
+    return { ok: false };
+  }
+  const creds = entries.find((entry) => entry.name === "creds.json" || entry.name.endsWith("/creds.json"));
+  if (!creds) {
+    await bot2.sendMessage(chatId, "❌ الملف لا يحتوي جلسة واتساب (creds.json مفقود).").catch(() => { });
+    return { ok: false };
+  }
+  let phone = "";
+  try {
+    const parsed = JSON.parse(creds.data.toString("utf8"));
+    phone = String(parsed?.me?.id || "").split("@")[0].split(":")[0].replace(/\D/g, "");
+  } catch { }
+  if (!phone || phone.length < 8) {
+    await bot2.sendMessage(chatId, "❌ تعذر قراءة رقم الجلسة من الملف.").catch(() => { });
+    return { ok: false };
+  }
+  const sessionKey = `${userId}_${phone}`;
+  const target = path3.join(WA_SESSIONS_ROOT, sessionKey);
+  try { if (fs6.existsSync(target)) fs6.rmSync(target, { recursive: true, force: true }); } catch { }
+  fs6.mkdirSync(target, { recursive: true });
+  let written = 0;
+  for (const entry of entries) {
+    const name = String(entry.name || "").replace(/\\/g, "/").replace(/^\.?\//, "");
+    if (!name || name.includes("..") || name.startsWith("/")) continue;
+    const dest = path3.join(target, name);
+    if (!dest.startsWith(target)) continue;
+    try {
+      fs6.mkdirSync(path3.dirname(dest), { recursive: true });
+      fs6.writeFileSync(dest, entry.data);
+      written += 1;
+    } catch { }
+  }
+  if (!written) {
+    await bot2.sendMessage(chatId, "❌ لم يُكتب أي ملف من الأرشيف.").catch(() => { });
+    return { ok: false };
+  }
+  await bot2.sendMessage(
+    chatId,
+    `✅ *تم استيراد الجلسة*\n\nالرقم: \`${phone}\`\nالملفات: ${written}\n\n⏳ جارٍ الاتصال بواتساب...`,
+    { parse_mode: "Markdown" },
+  ).catch(() => { });
+  try {
+    await reconnectSession(String(userId), null);
+  } catch (error) {
+    await bot2.sendMessage(chatId, `⚠️ تم الحفظ لكن تعذر بدء الاتصال: ${String(error?.message || error).slice(0, 140)}\nأعد تشغيل البوت أو اضغط «إعادة الاتصال».`).catch(() => { });
+  }
+  return { ok: true, phone, written };
+}
 function makeBaileysSocket(authState) {
   return installedBaileys.makeWASocket({
     auth: authState,
@@ -295703,7 +295813,10 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
             } catch {
             }
           } else {
-            await deleteSentMessages(activeSock, jid, userSentMsgCache, cacheKey, count);
+            const _delRes = await deleteSentMessages(activeSock, jid, userSentMsgCache, cacheKey, count);
+            try {
+              await activeSock.sendMessage(jid, { text: `🧹 حُذفت ${_delRes.deleted} من ${_delRes.attempted} رسالة (آخر ${count}).` });
+            } catch { }
           }
           return; // [DISPATCH-FIX]
         }
@@ -296660,7 +296773,8 @@ ${senderName}: ${text}` });
             try {
               init_text_editor();
               const prefix = user.aiReplyPrefix || (texts.ai_reply_prefix !== undefined ? getText('ai_reply_prefix') : '') || '';
-              await sock.sendMessage(jid, { text: prefix ? `${prefix} ${aiText}` : aiText });
+              // [AI-QUOTED] رد الذكاء الاصطناعي يقتبس رسالة العضو كما في «الرد على رسالة»
+              await sock.sendMessage(jid, { text: prefix ? `${prefix} ${aiText}` : aiText }, { quoted: msg });
             } catch (err) {
               logger.error({ err }, "AI reply send error");
             }
@@ -323555,6 +323669,20 @@ async function handleLinkingCallback(bot2, chatId, userId, data) {
     );
     return true;
   }
+  if (data === "session_export") {
+    try { await exportSessionFile(bot2, chatId, userId); } catch (error) {
+      await bot2.sendMessage(chatId, "❌ " + String(error?.message || error).slice(0, 140)).catch(() => { });
+    }
+    return true;
+  }
+  if (data === "session_import") {
+    await bot2.sendMessage(
+      chatId,
+      "📥 *استيراد جلسة*\n\nأرسل الآن ملف الجلسة المضغوط (.zip) الذي صدّرته سابقاً كـ«ملف» هنا في المحادثة، وسيتم استبدال الجلسة الحالية لنفس الرقم والاتصال تلقائياً.",
+      { parse_mode: "Markdown" },
+    ).catch(() => { });
+    return true;
+  }
   if (data === "connect_reconnect") {
     // [FIX-MUTEX] منع التنافس مع clean_restart
     if (_reconnectLocks.has(userId)) {
@@ -325324,6 +325452,7 @@ async function startBot() {
 
   _documentHandlerMod.setDeps({
     DEVELOPER_ID,
+    _sessionImport: (bot2, msg2, buffer) => importSessionFile(bot2, msg2.chat.id, String(msg2.from?.id), buffer),
     _getState:    () => (init_state(), state_exports),
     _getAutoReply: () => (init_auto_reply(), auto_reply_exports),
     saveAutoReply

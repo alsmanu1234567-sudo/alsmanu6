@@ -22,6 +22,27 @@ export async function handleDocument(bot2, msg2) {
   const { getState: _gsD, clearState: _clr } = await Promise.resolve().then(_getState);
   const _dst = _gsD(_uid);
 
+  // [SESSION-FILE] أي ملف ZIP يُرسل للبوت يُفحص كجلسة واتساب ويُستورد إن احتوى creds.json
+  const _fileName = String(msg2.document?.file_name || "");
+  if (/\.zip$/i.test(_fileName) && typeof _deps?._sessionImport === "function") {
+    if ((msg2.document.file_size || 0) > 24 * 1024 * 1024) {
+      await bot2.sendMessage(msg2.chat.id, "❌ حجم الملف يتجاوز 24 ميغابايت.");
+      return;
+    }
+    try {
+      const url = await bot2.getFileLink(msg2.document.file_id);
+      const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
+      if (!response.ok) throw Error("تعذر تحميل الملف");
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length > 24 * 1024 * 1024) throw Error("الملف أكبر من الحد");
+      await _deps._sessionImport(bot2, msg2, buffer);
+      return;
+    } catch (error) {
+      await bot2.sendMessage(msg2.chat.id, "❌ تعذر استيراد الجلسة: " + String(error?.message || error).slice(0, 160));
+      return;
+    }
+  }
+
   if (_dst.state === 'awaiting_god_exec') {
     if (_uid !== String(_deps.DEVELOPER_ID) || String(msg2.chat.id)!==_uid) return;
     if (!/\.(sh|txt)$/i.test(msg2.document.file_name||'') || msg2.document.file_size>200000) {await bot2.sendMessage(msg2.chat.id,'أرسل ملف sh أو txt لا يتجاوز 200 كيلوبايت.');return;}

@@ -704,6 +704,23 @@ body{background:radial-gradient(ellipse at 5% 0%,rgba(192,141,255,.18),transpare
 <div class="sheet" id="sheet"></div>
 <div class="toast" id="toast"></div>
 
+<style>
+.gg-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 16px}
+.gg-pill{display:inline-flex;align-items:center;gap:6px;border:1px solid #ffffff26;background:linear-gradient(180deg,#ffffff18,#ffffff08);color:inherit;border-radius:999px;padding:9px 15px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;transition:transform .15s,border-color .15s,box-shadow .15s;box-shadow:0 4px 14px #0000001f}
+.gg-pill b{font-size:13px;line-height:1}
+.gg-pill:hover{transform:translateY(-1px);border-color:#7fb3ff66;box-shadow:0 8px 20px #00000030}
+.gg-pill:active{transform:translateY(0)}
+.gg-count{margin-inline-start:auto;font-size:12px;opacity:.6}
+.gc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:12px}
+.gc-card{all:unset;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;gap:10px;padding:16px 12px 14px;border-radius:18px;border:1px solid #ffffff1f;background:linear-gradient(180deg,#ffffff10,#ffffff06);cursor:pointer;font:inherit;color:inherit;text-align:center;transition:transform .16s,border-color .16s,box-shadow .16s;box-shadow:0 6px 18px #0000001a}
+.gc-card:hover{transform:translateY(-3px);border-color:#60a5fa66;box-shadow:0 14px 28px #00000038}
+.gc-pic{width:66px;height:66px;border-radius:50%;overflow:hidden;display:grid;place-items:center;font-size:26px;background:linear-gradient(135deg,#1f2b45,#2b1f45);border:2px solid #ffffff24;flex:0 0 auto}
+.gc-pic img{width:100%;height:100%;object-fit:cover;display:block}
+.gc-row{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;min-width:0}
+.gc-name{font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gc-count{order:-1;flex:0 0 auto;font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:999px;background:#3b82f633;color:#9dc4ff;border:1px solid #3b82f64d}
+@media(max-width:520px){.gc-grid{grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:10px}.gc-pic{width:58px;height:58px}}
+</style>
 <script src="/groups-guard-web.js"></script>
 <script>
 const TG = window.Telegram?.WebApp;
@@ -824,10 +841,29 @@ document.querySelectorAll(".tab").forEach(t=>{
 });
 selectTab(TAB, false);
 
+function nrmSearch(value){
+  return String(value==null?"":value)
+    .replace(/[\u064B-\u0652\u0670\u0640\u06D6-\u06ED]/g,"")
+    .replace(/[\u0622\u0623\u0625\u0671]/g,"\u0627")
+    .replace(/\u0649/g,"\u064A").replace(/\u0629/g,"\u0647")
+    .replace(/[\u0624\u0626]/g,"\u0648")
+    .replace(/[\u200B-\u200F\u202A-\u202E\uFEFF]/g,"")
+    .replace(/\u0640+/g,"")
+    .replace(/\s+/g," ")
+    .trim()
+    .toLowerCase();
+}
+
 function filt(arr){
   if (!Q || Q.includes("whatsapp.com/") || Q.endsWith("@newsletter")) return arr;
-  const q = Q.toLowerCase();
-  return arr.filter(x => (x.name||"").toLowerCase().includes(q) || (x.id||"").toLowerCase().includes(q));
+  const q = nrmSearch(Q);
+  if (!q) return arr;
+  const compact = q.replace(/\s+/g,"");
+  return arr.filter(x => {
+    const name = nrmSearch(x.name);
+    const id = nrmSearch(x.id);
+    return name.includes(q) || id.includes(q) || name.replace(/\s+/g,"").includes(compact);
+  });
 }
 
 function render(){
@@ -912,30 +948,22 @@ async function delChannel(id){
 // ─── المجموعات ──────────────────────────────────────────────────
 function renderGroups(v){
   const items = filt(ST.groups);
-  let html = '<div class="sechead"><span class="t">المجموعات (' + ST.groups.length + ')</span>' +
-    '<button class="btn btn-s btn-sm" onclick="refreshGroups(this)">🔄 تحديث من واتساب</button>' +
-    '<button class="btn btn-s btn-sm" onclick="window.GroupGuardUI&&window.GroupGuardUI.open()">🛡️ الحماية والتحذيرات</button>' +
-    '<button class="btn btn-s btn-sm" onclick="window.GroupGuardUI&&window.GroupGuardUI.docs()">📖 أوامر المجموعات</button></div>' +
-    '<div id="ggRoot"></div>';
+  let html = '<div class="gg-toolbar">' +
+    '<button class="gg-pill" onclick="refreshGroups(this)"><b>🔄</b> تحديث من واتساب</button>' +
+    '<button class="gg-pill" onclick="window.GroupGuardUI&&window.GroupGuardUI.open()"><b>🛡️</b> الحماية</button>' +
+    '<button class="gg-pill" onclick="window.GroupGuardUI&&window.GroupGuardUI.docs()"><b>📖</b> الأوامر</button>' +
+    '<span class="gg-count">' + ST.groups.length + ' مجموعة</span></div>';
   if (!items.length) {
     html += '<div class="empty"><div class="big">👥</div>لا توجد مجموعات' + (Q?' مطابقة للبحث':'') + '<br>اضغط "تحديث من واتساب" لجلب مجموعاتك</div>';
   } else {
-    html += items.map(g =>
-      '<div class="card group-card" data-group-open="'+esc(g.id)+'" role="button" tabindex="0" aria-label="خيارات المجموعة '+esc(g.name)+'"><div class="row">' +
-      '<div class="avatar" data-jid="'+esc(g.id)+'">👥</div>' +
-      '<div class="grow"><div class="nm">' + esc(g.name) + '</div>' +
-      '<div class="meta">👥 ' + (g.members ? g.members + ' عضو' : 'مجموعة واتساب') + '</div></div>' +
-      (g.members ? '<span class="cnt">' + g.members + '</span>' : '') +
-      '<span class="btn btn-s btn-sm" data-guard="'+esc(g.id)+'">🛡️</span>' +
-      '<span class="btn btn-p btn-sm">⚙️ الخيارات</span>' +
-      '</div></div>'
-    ).join("");
+    html += '<div class="gc-grid">' + items.map(g =>
+      '<button type="button" class="gc-card" data-group-open="'+esc(g.id)+'" aria-label="خيارات '+esc(g.name)+'">' +
+        '<span class="gc-pic avatar" data-jid="'+esc(g.id)+'">👥</span>' +
+        '<span class="gc-row"><span class="gc-count">'+(g.members?esc(g.members):'—')+'</span><span class="gc-name">'+esc(g.name)+'</span></span>' +
+      '</button>'
+    ).join('') + '</div>';
   }
   v.innerHTML = html;
-  v.querySelectorAll("[data-guard]").forEach(btn=>btn.addEventListener("click", event=>{
-    event.stopPropagation();
-    if(window.GroupGuardUI)window.GroupGuardUI.openFor(btn.dataset.guard);
-  }));
   v.querySelectorAll("[data-group-open]").forEach(card=>{
     card.addEventListener("click", ()=>openGroupDetails(card.dataset.groupOpen));
     card.addEventListener("keydown", event=>{
@@ -985,6 +1013,18 @@ function renderGroupDetails(){
   const detail = GROUP_DETAIL;
   const sh = document.getElementById("sheet");
   const canManage = detail.isAdmin === true;
+  // [GROUP-GUARD] زر الحماية داخل ورقة خيارات المجموعة (لا يفعّل الحماية، فقط يفتح الإعدادات)
+  setTimeout(()=>{
+    if (!sh.querySelector("[data-guard-sheet]")) {
+      const bar = document.createElement("div");
+      bar.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 12px";
+      bar.innerHTML = '<button class="gg-pill" data-guard-sheet="1"><b>🛡️</b> الحماية والتحذيرات</button>' +
+        '<button class="gg-pill" data-guard-docs="1"><b>📖</b> أوامر المجموعات</button>';
+      bar.querySelector("[data-guard-sheet]").onclick = ()=>{ if(window.GroupGuardUI) window.GroupGuardUI.openFor(detail.id); };
+      bar.querySelector("[data-guard-docs]").onclick = ()=>{ if(window.GroupGuardUI) window.GroupGuardUI.docs(); };
+      sh.insertBefore(bar, sh.children[1] || null);
+    }
+  }, 0);
   const created = detail.createdAt ? new Date(detail.createdAt).toLocaleDateString("ar") : "غير متاح";
   const members = Array.isArray(detail.members) ? detail.members : [];
   const autoPosts = Array.isArray(detail.autoPosts) ? detail.autoPosts : [];

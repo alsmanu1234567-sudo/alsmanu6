@@ -2,6 +2,7 @@
 // أوامر المجموعة بالنقطة، كروت الانضمام والمغادرة، وقوائم الأكواد.
 import fs from "node:fs";
 import path from "node:path";
+import { sendInteractive, listButton, extractInteractiveResponseId } from "./interactive.js";
 
 const ROOT = process.cwd();
 const DATA_DIR = path.join(ROOT, "bot-data", "group-guard");
@@ -18,7 +19,8 @@ const DEFAULT_CARDS = {
 };
 
 const DEFAULTS = {
-  enabled: true,
+  // [OFF-BY-DEFAULT] الحماية لا تعمل في أي مجموعة إلا إذا فعّلها المالك بنفسه
+  enabled: false,
   linkGuard: true,
   wordGuard: false,
   words: [],
@@ -185,8 +187,13 @@ const LINK_PATTERNS = [
 ];
 
 export function detectLink(text) {
-  const value = String(text || "");
-  return LINK_PATTERNS.some((pattern) => pattern.test(value));
+  const raw = String(text || "").replace(/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, "");
+  if (!raw) return false;
+  const compact = raw.replace(/\s+/g, "");
+  if (LINK_PATTERNS.some((pattern) => pattern.test(raw))) return true;
+  if (compact !== raw && LINK_PATTERNS.some((pattern) => pattern.test(compact))) return true;
+  // أي نطاق قصير شائع حتى لو كان ملتصقاً بكلام عربي: "شوفexample.ly"
+  return /(?:^|[^\w@])(?:[a-z0-9-]{2,}\.)+(?:ly|gd|so|to|cc|ws|ru|de|fr|tr|eg|sa|ae|sd|in|pk|id|ma|dz|tn|ir|iq|jo|kw|qa|bh|om|ye|ly)(?:\/[^\s]*)?/i.test(raw);
 }
 
 export function normalizeArabic(text) {
@@ -418,21 +425,24 @@ async function sendCodesList(sock, groupJid) {
     id: `gcmd:${command.key}`,
   });
   const sections = [
-    { title: "أوامر الإدارة", rows: list.filter((command) => command.adminOnly).map(toRow) },
-    { title: "أوامر متاحة للجميع", rows: list.filter((command) => !command.adminOnly).map(toRow) },
+    { title: "أوامر الأعضاء", rows: list.filter((c) => ["kick", "add", "warn", "reset"].includes(c.key)).map(toRow) },
+    { title: "أوامر الدردشة", rows: list.filter((c) => ["mute", "open", "admin"].includes(c.key)).map(toRow) },
+    { title: "الفلاتر", rows: list.filter((c) => c.key.startsWith("stickers") || c.key.startsWith("links")).map(toRow) },
+    { title: "نظام الحماية", rows: list.filter((c) => c.key.startsWith("guard") || c.key === "warnings").map(toRow) },
   ].filter((section) => section.rows.length);
   try {
-    await sock.sendMessage(groupJid, {
-      text: "*قائمة أكواد المجموعة*",
-      footer: "اضغط على أي كود لمعرفة وصفه وطريقة استخدامه",
-      title: "أكواد البوت",
-      buttonText: "اعرض الأكواد",
-      sections,
+    await sendInteractive(sock, groupJid, {
+      headerTitle: "⚡ أكواد المجموعة",
+      text: "*اضغط على أي كود* ليعرض البوت وصفه وطريقة استخدامه.\nالأكواد تتفعّل فقط عندما ترسلها أنت من رقمك.",
+      footer: "أكواد المجموعة",
+      buttons: [listButton("اعرض الأكواد", sections.map((section) => ({ title: section.title.slice(0, 24), rows: section.rows.slice(0, 10) })))],
     });
     return true;
-  } catch {
-    const lines = COMMANDS.map((command) => `*${command.usage}*\n${command.description}`).join("\n\n");
-    await sock.sendMessage(groupJid, { text: `*أكواد المجموعة*\n\n${lines}` }).catch(() => { });
+  } catch (error) {
+    try {
+      const lines = COMMANDS.map((command) => `*${command.usage}*\n${command.description}`).join("\n\n");
+      await sock.sendMessage(groupJid, { text: `*أكواد المجموعة*\n\n${lines}` });
+    } catch { }
     return false;
   }
 }
@@ -530,7 +540,7 @@ export async function handleCommand({ userId, sock, message, text }) {
     case "stickers-off":
     case "stickers-on": {
       const on = parsed.key === "stickers-off";
-      updateGroupConfig(userId, groupJid, { stickerGuard: on });
+      updateGroupConfig(userId, groupJid, on ? { stickerGuard: true, enabled: true } : { stickerGuard: false });
       if (!on) resetStickerCounters(userId, groupJid);
       await reply(on ? "🚫 تم منع الملصقات. كل 5 ملصقات = تحذير." : "✅ تم تفعيل الملصقات وبدأ العدّاد من جديد.");
       return { handled: true };
@@ -538,7 +548,7 @@ export async function handleCommand({ userId, sock, message, text }) {
     case "links-off":
     case "links-on": {
       const on = parsed.key === "links-off";
-      updateGroupConfig(userId, groupJid, { linkGuard: on });
+      updateGroupConfig(userId, groupJid, on ? { linkGuard: true, enabled: true } : { linkGuard: false });
       await reply(on ? "🚫 تم منع الروابط في هذه المجموعة." : "✅ تم السماح بالروابط.");
       return { handled: true };
     }
@@ -558,7 +568,6 @@ export async function handleParticipants({ userId, sock, event }) {
   const groupJid = event?.id;
   if (!groupJid?.endsWith("@g.us")) return { handled: false };
   const cfg = getGroupConfig(userId, groupJid);
-  if (!cfg.enabled) return { handled: false };
   const action = String(event?.action || event?.type || "");
   for (const participant of event?.participants || []) {
     const memberJid = jidOf(participant);
@@ -594,11 +603,14 @@ export function attachGroupGuard({ userId, sock, logger }) {
       if (!groupJid?.endsWith("@g.us")) continue;
       const msg = message.message || {};
       const text = msg.conversation || msg.extendedTextMessage?.text || msg.imageMessage?.caption || msg.videoMessage?.caption || "";
-      const selectedCode = msg.listResponseMessage?.singleSelectReply?.selectedRowId
-        || msg.buttonsResponseMessage?.selectedButtonId
-        || msg.templateButtonReplyMessage?.selectedId
-        || msg.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson
-        || "";
+      let selectedCode = "";
+      try { selectedCode = extractInteractiveResponseId(message) || ""; } catch { }
+      if (!selectedCode) {
+        selectedCode = msg.listResponseMessage?.singleSelectReply?.selectedRowId
+          || msg.buttonsResponseMessage?.selectedButtonId
+          || msg.templateButtonReplyMessage?.selectedId
+          || "";
+      }
       void (async () => {
         try {
           // [GROUP-GUARD] ضغط زر من قائمة الأكواد يرسل وصف الأمر وطريقة استخدامه
