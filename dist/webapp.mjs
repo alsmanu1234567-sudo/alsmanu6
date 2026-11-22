@@ -913,9 +913,9 @@ function renderGroupDetails(){
     '<button class="btn btn-s btn-sm" data-link-warning-save>حفظ رسالة التنبيه</button></div>' +
     '<div class="group-detail-block"><div class="group-detail-title">فلتر الكلمات الممنوعة</div>' +
     '<label class="group-message-toggle"><input id="bannedWordsEnabled" type="checkbox" style="width:18px;height:18px;margin:0" '+
-    (detail.groupMessages?.bannedWordsEnabled?"checked":"")+'><span>تفعيل فلتر الكلمات</span></label>' +
-    '<div class="fld"><label for="bannedWords">الكلمات والعبارات الممنوعة</label><textarea id="bannedWords" maxlength="2000" placeholder="كلمة أو عبارة في كل سطر">'+
-    esc((detail.groupMessages?.bannedWords||[]).join("\\n"))+'</textarea><div class="meta">أدخل كلمة أو عبارة في كل سطر، حتى 50 بنداً. تتم المطابقة دون اعتبار للتشكيل أو اختلاف الهمزات.</div></div>' +
+    (detail.groupMessages?.bannedWordsEnabled?"checked":"")+'><span>تفعيل فلتر الكلمات السيئة العربية والإنجليزية</span></label>' +
+    '<div class="fld"><label for="bannedWords">كلمات إضافية للمجموعة (اختياري)</label><textarea id="bannedWords" maxlength="2000" placeholder="كلمة أو عبارة في كل سطر">'+
+    esc((detail.groupMessages?.bannedWords||[]).join("\\n"))+'</textarea><div class="meta">القاعدة العربية والإنجليزية المدمجة تعمل تلقائياً عند التفعيل. أضف حتى 50 كلمة أو عبارة اختيارية، سطراً لكل بند. الفلتر يعتمد على الكلمات لا السياق، وقد يخطئ أو يفوّت بعض الصيغ.</div></div>' +
     '<div class="fld"><label for="bannedWordWarningMessage">رسالة التنبيه عند تعذّر الحذف</label><textarea id="bannedWordWarningMessage" maxlength="1000" placeholder="مثال: الرجاء الالتزام بقواعد المجموعة">'+
     esc(detail.groupMessages?.bannedWordWarningMessage||"")+'</textarea></div>' +
     '<div class="meta" style="white-space:normal">إعداد الفلتر لا يتطلب أدمن. حذف رسالة عضو آخر يتطلب أن يكون البوت مشرفاً؛ وإلا يرسل التنبيه إذا سمحت المجموعة للأعضاء بالكتابة.</div>' +

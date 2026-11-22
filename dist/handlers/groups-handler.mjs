@@ -1,3 +1,4 @@
+import { hasBuiltInProfanity } from "../../services/profanity-filter.mjs";
 import {rememberGroupMessageName,resolveGroupMemberName} from '../../services/group-member-names.mjs';
 import { prepareArticleWithAi } from "../../services/ai/article-ai.mjs";
 import { getMessageCutoff, isMessageAfterCutoff, guardMessageSocket } from "../../engine/message-cutoff.mjs";
@@ -1266,7 +1267,7 @@ async function handleModeratedMessage(userId, sock, message) {
     return;
   }
 
-  if (!bannedWordsEnabled || !findBannedWordMatch(text, settings.bannedWords)) return;
+  if (!bannedWordsEnabled || !(hasBuiltInProfanity(text) || findBannedWordMatch(text, settings.bannedWords))) return;
   let admin = null;
   try {
     if (typeof sock.groupMetadata === "function") {
@@ -1363,6 +1364,7 @@ async function handleGroupParticipantUpdate(userId, sock, event) {
 function ensureModerationListener(userId, sock = findSocket(userId)) {
   if (!sock?.ev?.on || _listeners.has(sock)) return;
   const listener = (event) => {
+    if (event?.type && event.type !== "notify") return;
     for (const message of event?.messages || []) {
       rememberGroupMessageName(sock, message);
       if (!isMessageAfterCutoff(userId, message)) continue;
@@ -1521,9 +1523,6 @@ export async function saveWebGroupWordFilterSettings(userId, groupId, phoneNumbe
     words.push(word);
   }
   if (words.length > 50) throw new Error("يمكن إضافة 50 كلمة أو عبارة كحد أقصى");
-  if (input.enabled && !words.length) {
-    throw new Error("أضف كلمة واحدة على الأقل أو أوقف الفلتر");
-  }
 
   const warningMessage = String(input.warningMessage ?? "").trim();
   if (warningMessage.length > 1_000) throw new Error("رسالة التنبيه تتجاوز 1000 حرف");
