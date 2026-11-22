@@ -88,14 +88,31 @@
     return data;
   }
 
+  let cachedGroups = null;
+
   function groups() {
-    const list = (window.ST && Array.isArray(window.ST.groups) && window.ST.groups) || [];
-    if (list.length) return list;
+    if (Array.isArray(cachedGroups) && cachedGroups.length) return cachedGroups;
+    try {
+      const scope = typeof ST !== "undefined" ? ST : null;
+      if (scope && Array.isArray(scope.groups) && scope.groups.length) return scope.groups;
+    } catch { }
     try {
       const raw = JSON.parse(localStorage.getItem("wa_groups_cache") || "[]");
       return Array.isArray(raw) ? raw : [];
     } catch {
       return [];
+    }
+  }
+
+  async function loadGroups() {
+    if (cachedGroups && cachedGroups.length) return cachedGroups;
+    try {
+      const data = await api("/api/fw/overview");
+      cachedGroups = Array.isArray(data.groups) ? data.groups : [];
+      return cachedGroups;
+    } catch {
+      cachedGroups = groups();
+      return cachedGroups;
     }
   }
 
@@ -121,6 +138,7 @@
   async function load(groupId) {
     const body = document.getElementById("ggBody");
     if (!groupId) {
+      await loadGroups();
       body.innerHTML = `<div class="gg-card"><h3>اختر مجموعة</h3><div class="mut">الحماية تُضبط لكل مجموعة على حدة.</div>
         <select class="gg-sel" id="ggPick"><option value="">— اختر مجموعة —</option>${groups().map((g) => `<option value="${esc(g.id)}">${esc(g.name || g.id)}</option>`).join("")}</select>
         <div class="gg-note">إن لم تظهر مجموعاتك، اضغط «تحديث من واتساب» في قسم المجموعات أولاً.</div></div>`;

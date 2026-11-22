@@ -926,11 +926,16 @@ function renderGroups(v){
       '<div class="grow"><div class="nm">' + esc(g.name) + '</div>' +
       '<div class="meta">👥 ' + (g.members ? g.members + ' عضو' : 'مجموعة واتساب') + '</div></div>' +
       (g.members ? '<span class="cnt">' + g.members + '</span>' : '') +
+      '<span class="btn btn-s btn-sm" data-guard="'+esc(g.id)+'">🛡️</span>' +
       '<span class="btn btn-p btn-sm">⚙️ الخيارات</span>' +
       '</div></div>'
     ).join("");
   }
   v.innerHTML = html;
+  v.querySelectorAll("[data-guard]").forEach(btn=>btn.addEventListener("click", event=>{
+    event.stopPropagation();
+    if(window.GroupGuardUI)window.GroupGuardUI.openFor(btn.dataset.guard);
+  }));
   v.querySelectorAll("[data-group-open]").forEach(card=>{
     card.addEventListener("click", ()=>openGroupDetails(card.dataset.groupOpen));
     card.addEventListener("keydown", event=>{
