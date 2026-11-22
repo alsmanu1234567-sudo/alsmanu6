@@ -1,5 +1,5 @@
 // [ZIP-LITE] إنشاء وقراءة ملفات ZIP بلا أي اعتمادية خارجية (store/deflate).
-import { deflateRawSync, inflateRawSync, crc32 } from "node:zlib";
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 
 const CRC_TABLE = (() => {
   const table = new Int32Array(256);
@@ -112,4 +112,3 @@ export function readZip(buf) {
   return out;
 }
 
-export { crc32 };

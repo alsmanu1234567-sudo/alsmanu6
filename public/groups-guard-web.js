@@ -1,7 +1,16 @@
 /* [GROUP-GUARD-UI] لوحة حماية المجموعات + أوامر المجموعات + تصدير/استيراد الجلسة */
 (function () {
   "use strict";
-  const token = new URLSearchParams(location.search).get("token") || localStorage.getItem("wa_token") || "";
+  function readToken() {
+    const fromQuery = new URLSearchParams(location.search).get("token");
+    if (fromQuery) return fromQuery;
+    try {
+      const scope = typeof TOKEN !== "undefined" ? TOKEN : "";
+      if (scope) return scope;
+    } catch { }
+    return localStorage.getItem("fw_token") || localStorage.getItem("wa_token") || "";
+  }
+  const token = readToken();
 
   const CSS = `
   .gg-wrap{display:grid;gap:14px;padding:2px 0 40px;font-family:inherit}
