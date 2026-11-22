@@ -293019,6 +293019,14 @@ async function _connectQr(sessKey, chatId, userId) {
   userId = userId || _userIdFromSessKey(sessKey); // [MULTI-NUM] المعرّف الحقيق�� لتيليجرام
   const s = sessions.get(sessKey);
   if (!s || s.cancelled) return;
+  // [WA-SINGLE-FLIGHT] اتصالان لنفس الجلسة يُفسدان تشفير Signal (Key used already) ويُغلق واتساب الاتصال بـ428
+  {
+    const _st = s.sock?.ws?.readyState;
+    if (_st === 0 || _st === 1) {
+      try { logger.warn({ userId, sessKey, readyState: _st }, "[WA] تم تجاهل اتصال مكرر لنفس الجلسة"); } catch { }
+      return;
+    }
+  }
   const authDir = getAuthDir(sessKey);
   try {
     const { useMultiFileAuthState: useMultiFileAuthState2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
@@ -293032,10 +293040,12 @@ async function _connectQr(sessKey, chatId, userId) {
       const { connection, lastDisconnect, qr } = update;
       try { logger.info({ userId, sessKey, connection: connection || null, statusCode: lastDisconnect?.error?.output?.statusCode ?? null, hasQr: !!qr }, "[WA] connection update"); } catch { }
       _diagPush(_diag.conn, { t: Date.now(), userId, sessKey, connection: connection || null, statusCode: lastDisconnect?.error?.output?.statusCode ?? null, reason: lastDisconnect?.error?.message ? String(lastDisconnect.error.message).slice(0, 160) : null });
-      const cur = sessions.get(sessKey);
-      if (!cur || cur.cancelled) {
-        sock.ws?.close?.();
-        return;
+      let cur = sessions.get(sessKey);
+      if (cur?.cancelled) { sock.ws?.close?.(); return; }
+      if (!cur) {
+        cur = { state: "reconnecting", chatId: chatId || null, userId, sessKey, retries: 1, wasEverConnected: true, cancelled: false, sock };
+        sessions.set(sessKey, cur);
+        try { logger.warn({ userId, sessKey }, "[WA] خانة جلسة مفقودة عند حدث الاتصال — أُعيد بناؤها"); } catch { }
       }
       if (qr) {
         await sendQrToTelegram(chatId, qr, cur, sessKey);
@@ -293492,14 +293502,14 @@ async function _handleConnected(sock, userId, chatId, qrMsgId, isAutoRestore = f
   workerManager.registerReconnect(userId, async (uid) => {
     await reconnectSession(uid, chatId);
   });
-  if (qrMsgId && botRef) {
+  if (qrMsgId && botRef && chatId) {
     try {
       await botRef.deleteMessage(chatId, qrMsgId);
     } catch {
     }
   }
   // [FIX-AUTO-RESTORE-SPAM] لا نُرسل رسالة "إعادة الاتصال" عند الاستعادة التلقائية الصامتة — فقط الربط الأول يستحق الإشعار
-  if (botRef && (_isFirstEver || !isAutoRestore)) {
+  if (botRef && chatId && (_isFirstEver || !isAutoRestore)) {
     const _connMsg = _isFirstEver
       ? `\u2705 *\u062A\u0645 \u0627\u0644\u0631\u0628\u0637 \u0628\u0646\u062C\u0627\u062D!*\n\n\u{1F4F1} \u0627\u0644\u0631\u0642\u0645: \`${numberFull}\`\n\u{1F50B} \u0627\u0644\u062D\u0627\u0644\u0629: \u0646\u0634\u0637\n\u{1F4B0} +500 \u0646\u0642\u0637\u0629 \u0645\u0643\u0627\u0641\u0623\u0629 \u0627\u0644\u0631\u0628\u0637!\n\n\u064A\u0645\u0643\u0646\u0643 \u0627\u0644\u0622\u0646 \u0625\u062F\u0627\u0631\u0629 \u0627\u0644\u0631\u062F\u0648\u062F \u0627\u0644\u062A\u0644\u0642\u0627\u0626\u064A\u0629 \u0648\u0627\u0644\u0630\u0643\u0627\u0621 \u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064A.`
       : `\u{1F504} *\u062A\u0645\u062A \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644 \u0628\u0646\u062C\u0627\u062D!*\n\n\u{1F4F1} \u0627\u0644\u0631\u0642\u0645: \`${numberFull}\`\n\u{1F50B} \u0627\u0644\u062D\u0627\u0644\u0629: \u0646\u0634\u0637`;
@@ -293507,8 +293517,17 @@ async function _handleConnected(sock, userId, chatId, qrMsgId, isAutoRestore = f
     const custom=_isFirstEver && texts.link_success!==undefined;
     await botRef.sendMessage(chatId, custom?getText('link_success',{number:numberFull}):_connMsg, custom?{}:{parse_mode:'Markdown'});
   }
-  // [MULTI-NUM] نظّف سجل الجلسة المؤقتة بمفتاحها الصحيح وأفرغ علامة الربط الجاري
-  sessions.delete(_effSessKey);
+  // [MULTI-NUM] لا تحذف خانة الجلسة الحيّة: حذفها كان يمنع معالج الإغلاق من إعادة الاتصال نهائياً.
+  {
+    const _live = sessions.get(_effSessKey);
+    if (_live && _live.sock && _live.sock !== sock) { sessions.delete(_effSessKey); }
+    else {
+      const _keep = _live || { state: "connected", chatId, userId, sessKey: _effSessKey, retries: 0, wasEverConnected: true, cancelled: false };
+      _keep.sock = sock; _keep.state = "connected"; _keep.retries = 0; _keep.cancelled = false;
+      if (chatId) _keep.chatId = chatId;
+      sessions.set(_effSessKey, _keep);
+    }
+  }
   if (_pendingConnect.get(String(userId)) === _effSessKey) _pendingConnect.delete(String(userId));
   const _patchSockPhone = (sock.user?.id || "").split(":")[0].split("@")[0].replace(/[^0-9]/g, "");
   // [MULTI-NUM] سجل سوكت هذا الرقم بمفاتيح متعددة (رقم + هوية جلسة) — لا يُلمس سوكت رقم آخر
@@ -293792,6 +293811,36 @@ async function _ensurePipeline() {
 const _diag = { conn: [], trace: [], errors: [] };
 function _diagPush(arr, item, max = 250) { arr.push(item); if (arr.length > max) arr.splice(0, arr.length - max); }
 const _diagPreview = (t) => String(t || "").replace(/\s+/g, " ").slice(0, 120);
+
+// ── [WA-SUPERVISOR] لا يبقى البوت ميتاً: إعادة اتصال تلقائية بتراجع تدريجي بلا حد نهائي ──
+const _waSup = new Map();
+let _waSupStarted = false;
+async function _waSupervisorTick() {
+  const now = Date.now();
+  for (const [key, st0] of [...sessions.entries()]) {
+    if (!st0 || st0.cancelled) continue;
+    const ready = st0.sock?.ws?.readyState;
+    if (ready === 0 || ready === 1) { _waSup.delete(key); continue; }
+    const rec = _waSup.get(key) || { n: 0, at: 0 };
+    const wait = Math.min(15000 * Math.pow(1.6, rec.n), 300000);
+    if (now - rec.at < wait) continue;
+    rec.n++; rec.at = now; _waSup.set(key, rec);
+    try { logger.warn({ sessKey: key, attempts: rec.n, readyState: ready ?? null }, "[WA-SUPERVISOR] إعادة اتصال تلقائية"); } catch { }
+    try { st0.sock?.ws?.terminate?.(); } catch { }
+    try { await _connectQr(key, st0.chatId || null, st0.userId || _userIdFromSessKey(key)); } catch (e) { try { logger.warn({ err: String(e?.message || e).slice(0, 160) }, "[WA-SUPERVISOR] فشل المحاولة"); } catch { } }
+  }
+}
+function _startWaSupervisor() {
+  if (_waSupStarted) return;
+  _waSupStarted = true;
+  const timer = setInterval(() => { _waSupervisorTick().catch(() => { }); }, 30000);
+  if (typeof timer.unref === "function") timer.unref();
+}
+try { _startWaSupervisor(); } catch { }
+// خطأ غير معالج من مكتبة خارجية كان يُسقط العملية ويعيد تشغيل البوت كل دقائق.
+process.on("unhandledRejection", (err) => {
+  try { logger.error({ err: String(err?.message || err).slice(0, 300) }, "[GUARD] خطأ غير معالج — أُبقي البوت شغّالاً"); } catch { }
+});
 
 // ══════════════════════════════════════════════════════════════════
 // [MEMORY-SWEEP] المكنسة الذاتية — تنظيف تلقائي كل 10 دقائق
