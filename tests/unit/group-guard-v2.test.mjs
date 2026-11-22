@@ -99,3 +99,41 @@ test('اللوحة تعرض المفتاحين الجديدين وتسمح بح�
   assert.match(ui, /toggleRow\("audioGuard", "منع الصوت"/);
   assert.match(webapp, /"imageGuard", "audioGuard"/);
 });
+
+test('الترحيب يُرسل مرة واحدة بعد 10 ثوانٍ ويُمدَّد 5 ثوانٍ مع كل موجة', () => {
+  assert.match(guard, /WELCOME_FIRST_DELAY_MS = 10_000/);
+  assert.match(guard, /WELCOME_EXTRA_DELAY_MS = 5_000/);
+  assert.match(guard, /entry\.members\.size === 1 \? WELCOME_FIRST_DELAY_MS : WELCOME_EXTRA_DELAY_MS/);
+  assert.match(guard, /if \(members\.length > entry\.seen\)/);
+  assert.match(guard, /welcomeQueue\.delete/);
+});
+
+test('رسالة الترحيب تذكر كل الأعضاء الجدد بكرت الترحيب الجماعي', async () => {
+  const { renderMentionsAll } = await import('../../services/group-guard.mjs');
+  const text = renderMentionsAll('أهلاً @nem بالمجموعة', ['249111@s.whatsapp.net', '249222@s.whatsapp.net']);
+  assert.equal(text, 'أهلاً @249111 @249222 بالمجموعة');
+  assert.match(guard, /const cardFile = cfg\.cards\.welcome \|\| cfg\.cards\.join/);
+  assert.match(guard, /CARD_KINDS = \["warn1", "warn2", "warn3", "join", "welcome", "leave"\]/);
+});
+
+test('أحداث الأعضاء تُقرأ بأشكالها المختلفة وتُسجَّل في اللوق', () => {
+  assert.match(guard, /event\?\.id \|\| event\?\.jid \|\| event\?\.chatId/);
+  assert.match(guard, /Array\.isArray\(event\?\.participants\)/);
+  assert.match(guard, /\[GROUP-GUARD\] حدث أعضاء المجموعة/);
+  assert.match(guard, /if \(!cfg\.welcome\?\.enabled\) continue;/);
+});
+
+test('مسار الكروت لا يعتمد على مجلد التشغيل وحده', () => {
+  assert.match(guard, /const REPO_ROOT = path\.dirname\(MODULE_DIR\)/);
+  assert.match(guard, /function resolveCardFile/);
+  assert.match(guard, /const resolved = resolveCardFile\(file/);
+  assert.match(guard, /welcome: resolveCardFile\(null, "welcome\.png"\)/);
+});
+
+test('زر ترحيب تجريبي متاح في اللوحة والمسار', () => {
+  const ui = readFileSync(new URL('../../public/groups-guard-web.js', import.meta.url), 'utf8');
+  assert.match(ui, /ggTestWelcome/);
+  assert.match(ui, /guard\/test-welcome/);
+  assert.match(webapp, /api\/fw\/groups\/guard\/test-welcome/);
+  assert.match(webapp, /webGuardTestWelcome/);
+});

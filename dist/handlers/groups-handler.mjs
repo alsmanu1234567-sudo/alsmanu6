@@ -1459,6 +1459,20 @@ export async function getWebGroupInvite(userId, groupId, phoneNumber) {
   return { link: `https://chat.whatsapp.com/${code}` };
 }
 
+/** [GUARD] إرسال ترحيب تجريبي للمجموعة للتأكد أن نظام الترحيب يعمل */
+export async function webGuardTestWelcome(userId, groupId, phoneNumber = null, sampleJids = []) {
+  const id = String(groupId || "").trim();
+  if (!id.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+  const sock = await findSocketForGroup(String(userId), id, phoneNumber);
+  if (!sock) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
+  const guard = await import("../../services/group-guard.mjs");
+  const me = String(sock?.user?.id || "").split(":")[0];
+  const members = Array.isArray(sampleJids) && sampleJids.length ? sampleJids.filter((jid) => String(jid).endsWith("@s.whatsapp.net") || String(jid).endsWith("@lid")) : (me ? [`${me}@s.whatsapp.net`] : []);
+  const result = await guard.sendWelcomeMessage({ userId: String(userId), sock, groupJid: id, members, logger: _deps?.logger });
+  if (!result?.sent) throw new Error(result?.error || "تعذر إرسال الترحيب — تأكد أن البوت مشرف في المجموعة");
+  return { ok: true, count: result.count || members.length };
+}
+
 export async function setWebGroupSetting(userId, groupId, phoneNumber, setting, enabled) {
   userId = String(userId);
   groupId = String(groupId || "").trim();

@@ -129,7 +129,7 @@
     return `/api/fw/groups/guard/card?groupId=${encodeURIComponent(groupId)}&kind=${kind}&token=${encodeURIComponent(token)}&v=${Date.now()}`;
   }
 
-  const CARD_LABELS = { warn1: "تحذير 1 (أصفر)", warn2: "تحذير 2 (أصفر)", warn3: "الإنذار الأخير (أحمر)", join: "كرت الانضمام", leave: "كرت المغادرة" };
+  const CARD_LABELS = { warn1: "تحذير 1 (أصفر)", warn2: "تحذير 2 (أصفر)", warn3: "الإنذار الأخير (أحمر)", welcome: "كرت الترحيب بالجدد", join: "كرت الانضمام", leave: "كرت المغادرة" };
 
   let state = { groupId: "", config: null, warnings: [], commands: [] };
 
@@ -208,7 +208,8 @@
 
         <div class="gg-card">
           <h3>رسالة الترحيب والمغادرة</h3>
-          <div class="mut">اكتب <b>@nem</b> في أي مكان ليُستبدل بمنشن العضو الحقيقي (يظهر أخضر). الكرت يُرسل مع النص في رسالة واحدة.</div>
+          <div class="mut">اكتب <b>@nem</b> في أي مكان ليُستبدل بمنشن الأعضاء الحقيقي (يظهر أخضر).<br>
+          عند دخول شخص: البوت ينتظر <b>10 ثوانٍ</b>، وإن دخل غيرهم ينتظر <b>5 ثوانٍ</b> إضافية، ثم يرسل <b>رسالة ترحيب واحدة</b> بكرت الترحيب بالجدد ويذكرهم كلهم بـ@nem.</div>
           <div class="gg-grid">
             <div>
               ${toggleRow("welcomeEnabled", "رسالة الترحيب", "تُرسل عند دخول عضو", config.welcome?.enabled)}
@@ -221,7 +222,10 @@
               <textarea class="gg-ta" id="ggGoodbye">${esc(config.goodbye?.text || "")}</textarea>
             </div>
           </div>
-          <div class="gg-actions"><button class="gg-btn" id="ggSaveMsgs">حفظ رسائل الترحيب والمغادرة</button></div>
+          <div class="gg-actions">
+            <button class="gg-btn" id="ggSaveMsgs">حفظ رسائل الترحيب والمغادرة</button>
+            <button class="gg-btn alt" id="ggTestWelcome">🧪 ترحيب تجريبي الآن</button>
+          </div>
         </div>
 
         <div class="gg-card">
@@ -306,6 +310,16 @@
       };
       try { state.config = (await api("/api/fw/groups/guard", { groupId: state.groupId, patch })).config; toast("✅ حُفظت الرسائل — @nem سيصبح منشن حقيقي"); }
       catch (error) { toast("❌ " + error.message); }
+    });
+
+    const testWelcome = body.querySelector("#ggTestWelcome");
+    if (testWelcome) testWelcome.addEventListener("click", async () => {
+      testWelcome.disabled = true;
+      try {
+        const data = await api("/api/fw/groups/guard/test-welcome", { groupId: state.groupId });
+        toast(`✅ أُرسل ترحيب تجريبي (${data.count || 1})`);
+      } catch (error) { toast("❌ " + error.message); }
+      finally { testWelcome.disabled = false; }
     });
 
     body.querySelectorAll("[data-card]").forEach((input) => {

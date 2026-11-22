@@ -38,6 +38,7 @@ import {
   deleteWebGroupAutoPost,
   previewWebGroupAutoPost,
   publishWebGroupAutoPostNow,
+  webGuardTestWelcome,
 } from "./handlers/groups-handler.mjs";
 import {ludoEngine,loadLudoHtml} from "../services/ludo-game.mjs";
 import { getSharedState, joinShared, moveShared } from "../services/xo-shared.mjs";
@@ -189,6 +190,10 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/fw/groups/guard/card', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);
     return { ok: true, config: publicGuardConfig(groupGuard.saveCardImage(uid, groupId, String(req.body?.kind || ""), req.body?.dataUrl)) };
+  }));
+  app.post('/api/fw/groups/guard/test-welcome', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    return webGuardTestWelcome(uid, groupId, req.body?.phoneNumber || null, Array.isArray(req.body?.jids) ? req.body.jids : []);
   }));
   app.post('/api/fw/groups/guard/reset', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);

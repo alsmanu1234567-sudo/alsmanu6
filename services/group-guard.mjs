@@ -2,20 +2,42 @@
 // أوامر المجموعة بالنقطة، كروت الانضمام والمغادرة، وقوائم الأكواد.
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { sendInteractive, listButton, extractInteractiveResponseId } from "./interactive.js";
 
-const ROOT = process.cwd();
-const DATA_DIR = path.join(ROOT, "bot-data", "group-guard");
-const CARD_UPLOADS = path.join(ROOT, "bot-data", "cards");
-const PUBLIC_CARDS = path.join(ROOT, "public", "cards");
+// [ROBUST-PATHS] لا نعتمد على process.cwd() وحده: تشغيل البوت قد يكون من مجلد مختلف عن مجلد الكود
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.dirname(MODULE_DIR);
+const DATA_ROOT = (() => {
+  for (const candidate of [path.join(process.cwd(), "bot-data"), path.join(REPO_ROOT, "bot-data")]) {
+    try { if (fs.existsSync(candidate)) return candidate; } catch { }
+  }
+  return path.join(process.cwd(), "bot-data");
+})();
+const DATA_DIR = path.join(DATA_ROOT, "group-guard");
+const CARD_UPLOADS = path.join(DATA_ROOT, "cards");
+const CARD_DIRS = [path.join(REPO_ROOT, "public", "cards"), path.join(process.cwd(), "public", "cards")];
 
-export const CARD_KINDS = ["warn1", "warn2", "warn3", "join", "leave"];
+/** يبحث عن ملف الكرت في مجلد الكود أو مجلد التشغيل */
+function resolveCardFile(file, fallbackName) {
+  const candidates = [];
+  if (file) candidates.push(file);
+  const base = fallbackName || (file ? path.basename(file) : "");
+  if (base) for (const dir of CARD_DIRS) candidates.push(path.join(dir, base));
+  for (const candidate of candidates) {
+    try { if (candidate && fs.existsSync(candidate)) return candidate; } catch { }
+  }
+  return candidates[0] || "";
+}
+
+export const CARD_KINDS = ["warn1", "warn2", "warn3", "join", "welcome", "leave"];
 const DEFAULT_CARDS = {
-  warn1: path.join(PUBLIC_CARDS, "warn-1.png"),
-  warn2: path.join(PUBLIC_CARDS, "warn-2.png"),
-  warn3: path.join(PUBLIC_CARDS, "warn-3.png"),
-  join: path.join(PUBLIC_CARDS, "join.png"),
-  leave: path.join(PUBLIC_CARDS, "leave.png"),
+  warn1: resolveCardFile(null, "warn-1.png"),
+  warn2: resolveCardFile(null, "warn-2.png"),
+  warn3: resolveCardFile(null, "warn-3.png"),
+  join: resolveCardFile(null, "join.png"),
+  welcome: resolveCardFile(null, "welcome.png"),
+  leave: resolveCardFile(null, "leave.png"),
 };
 
 const DEFAULTS = {
@@ -94,7 +116,7 @@ export function getGroupConfig(userId, groupJid) {
   for (const kind of CARD_KINDS) {
     const custom = path.join(CARD_UPLOADS, `${String(userId).replace(/[^\w.-]/g, "")}-${groupJid.replace(/[^\w.-]/g, "")}-${kind}.png`);
     if (fs.existsSync(custom)) cfg.cards[kind] = custom;
-    else if (!cfg.cards[kind] || !fs.existsSync(cfg.cards[kind])) cfg.cards[kind] = DEFAULT_CARDS[kind];
+    else cfg.cards[kind] = resolveCardFile(cfg.cards[kind], path.basename(DEFAULT_CARDS[kind] || `${kind}.png`));
   }
   return cfg;
 }
@@ -231,6 +253,16 @@ export function renderMentions(template, memberJid) {
     .replace(/@\u0639\u0636\u0648/gi, tag);
 }
 
+/** يحوّل @nem إلى منشن لكل الأعضاء الجدد في الرسالة الواحدة */
+export function renderMentionsAll(template, memberJids) {
+  const list = (Array.isArray(memberJids) ? memberJids : []).filter(Boolean).slice(0, 120);
+  const tags = list.map((jid) => `@${String(jid).split("@")[0].split(":")[0]}`).join(" ");
+  return String(template || "")
+    .replace(/@nem@?/gi, tags)
+    .replace(/\{mentions\}/gi, tags)
+    .replace(/@\u0639\u0636\u0648/gi, tags);
+}
+
 export function escalationFor(nextCount, maxWarnings) {
   const max = Math.max(1, Number(maxWarnings) || 3);
   if (nextCount >= max) return "final";
@@ -318,8 +350,9 @@ export function resolveTarget(message, rest) {
 }
 
 async function sendCard(sock, groupJid, file, caption, mentions = []) {
-  const payload = fs.existsSync(file)
-    ? { image: fs.readFileSync(file), caption }
+  const resolved = resolveCardFile(file, file ? path.basename(file) : "");
+  const payload = fs.existsSync(resolved)
+    ? { image: fs.readFileSync(resolved), caption }
     : { text: caption };
   return sock.sendMessage(groupJid, payload, mentions.length ? { mentions } : undefined).catch(() =>
     sock.sendMessage(groupJid, { text: caption }).catch(() => null),
@@ -614,24 +647,96 @@ export async function handleCommand({ userId, sock, message, text }) {
   }
 }
 
-export async function handleParticipants({ userId, sock, event }) {
-  const groupJid = event?.id;
-  if (!groupJid?.endsWith("@g.us")) return { handled: false };
+// ═══ [WELCOME-BATCH] ترحيب واحد لكل الأعضاء الجدد: انتظار 10 ثوانٍ + 5 ثوانٍ لكل موجة جديدة ═══
+const WELCOME_FIRST_DELAY_MS = 10_000;
+const WELCOME_EXTRA_DELAY_MS = 5_000;
+const welcomeQueue = new Map();
+
+function welcomeKey(userId, groupJid) {
+  return `${userId}:${groupJid}`;
+}
+
+function armWelcomeTimer(entry, delay) {
+  clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => {
+    void flushWelcome(entry).catch(() => { });
+  }, delay);
+  if (typeof entry.timer.unref === "function") entry.timer.unref();
+}
+
+function enqueueWelcome({ userId, sock, groupJid, memberJid, logger }) {
+  const key = welcomeKey(userId, groupJid);
+  let entry = welcomeQueue.get(key);
+  if (!entry) {
+    entry = { userId, sock, groupJid, members: new Set(), seen: 0, timer: null, logger };
+    welcomeQueue.set(key, entry);
+    entry.seen = 0;
+  }
+  entry.sock = sock;
+  entry.members.add(memberJid);
+  // أول عضو يبدأ العدّاد 10 ثوانٍ، وأي عضو جديد أثناء الانتظار يمدّد 5 ثوانٍ إضافية
+  armWelcomeTimer(entry, entry.members.size === 1 ? WELCOME_FIRST_DELAY_MS : WELCOME_EXTRA_DELAY_MS);
+  try { logger?.info?.({ groupJid, pending: entry.members.size }, "[GROUP-GUARD] عضو جديد في قائمة انتظار الترحيب"); } catch { }
+}
+
+async function flushWelcome(entry) {
+  const members = [...entry.members];
+  // لو وصل أعضاء جدد بعد آخر فحص: لا ترسل الآن، انتظر 5 ثوانٍ أخرى
+  if (members.length > entry.seen) {
+    entry.seen = members.length;
+    armWelcomeTimer(entry, WELCOME_EXTRA_DELAY_MS);
+    return;
+  }
+  welcomeQueue.delete(welcomeKey(entry.userId, entry.groupJid));
+  if (!members.length) return;
+  await sendWelcomeMessage({ userId: entry.userId, sock: entry.sock, groupJid: entry.groupJid, members, logger: entry.logger });
+}
+
+export async function sendWelcomeMessage({ userId, sock, groupJid, members, logger }) {
   const cfg = getGroupConfig(userId, groupJid);
-  const action = String(event?.action || event?.type || "");
-  for (const participant of event?.participants || []) {
+  const list = (members || []).filter(Boolean);
+  if (!list.length) return { sent: false };
+  const caption = renderMentionsAll(cfg.welcome?.text || "أهلاً وسهلاً @nem", list);
+  const cardFile = cfg.cards.welcome || cfg.cards.join;
+  try {
+    if (cfg.welcome?.card) await sendCard(sock, groupJid, cardFile, caption, list);
+    else await sock.sendMessage(groupJid, { text: caption }, { mentions: list });
+    try { logger?.info?.({ groupJid, count: list.length }, "[GROUP-GUARD] أُرسل ترحيب واحد للمجموعة"); } catch { }
+    return { sent: true, count: list.length };
+  } catch (error) {
+    try { logger?.warn?.({ err: String(error?.message || error).slice(0, 160) }, "[GROUP-GUARD] فشل إرسال الترحيب"); } catch { }
+    return { sent: false, error: String(error?.message || error) };
+  }
+}
+
+/** يُستخدم من زر «ترحيب تجريبي» في الواجهة */
+export async function sendWelcomePreview({ userId, sock, groupJid, memberJids, logger }) {
+  return sendWelcomeMessage({ userId, sock, groupJid, members: memberJids, logger });
+}
+
+export async function handleParticipants({ userId, sock, event, logger }) {
+  const groupJid = event?.id || event?.jid || event?.chatId;
+  if (!String(groupJid || "").endsWith("@g.us")) return { handled: false };
+  const cfg = getGroupConfig(userId, groupJid);
+  const action = String(event?.action || event?.type || "").toLowerCase();
+  const participants = Array.isArray(event?.participants)
+    ? event.participants
+    : (event?.participant ? [event.participant] : []);
+  try {
+    logger?.info?.({ groupJid, action, count: participants.length }, "[GROUP-GUARD] حدث أعضاء المجموعة");
+  } catch { }
+
+  for (const participant of participants) {
     const memberJid = jidOf(participant);
     if (!memberJid) continue;
     if (action === "add") {
       resetWarnings(userId, groupJid, memberJid);
-      if (!cfg.welcome.enabled) continue;
-      const caption = renderMentions(cfg.welcome.text, memberJid);
-      if (cfg.welcome.card) await sendCard(sock, groupJid, cfg.cards.join, caption, [memberJid]);
-      else await sock.sendMessage(groupJid, { text: caption }, { mentions: [memberJid] }).catch(() => { });
+      if (!cfg.welcome?.enabled) continue;
+      enqueueWelcome({ userId, sock, groupJid, memberJid, logger });
     } else if (action === "remove") {
-      if (!cfg.goodbye.enabled) continue;
-      const caption = renderMentions(cfg.goodbye.text, memberJid);
-      if (cfg.goodbye.card) await sendCard(sock, groupJid, cfg.cards.leave, caption, [memberJid]);
+      if (!cfg.goodbye?.enabled) continue;
+      const caption = renderMentions(cfg.goodbye.text || "إلى اللقاء @nem", memberJid);
+      if (cfg.goodbye?.card) await sendCard(sock, groupJid, cfg.cards.leave, caption, [memberJid]);
       else await sock.sendMessage(groupJid, { text: caption }, { mentions: [memberJid] }).catch(() => { });
     }
   }
@@ -688,6 +793,8 @@ export function attachGroupGuard({ userId, sock, logger }) {
   });
 
   sock.ev.on("group-participants.update", (event) => {
-    void handleParticipants({ userId, sock, event }).catch(() => { });
+    void handleParticipants({ userId, sock, event, logger }).catch((error) => {
+      try { logger?.warn?.({ err: String(error?.message || error).slice(0, 160) }, "[GROUP-GUARD] فشل معالجة حدث الأعضاء"); } catch { }
+    });
   });
 }

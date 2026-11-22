@@ -99,13 +99,13 @@ def make_warning(number, accent, accent2, title, subtitle, badge_text, out_name)
 
 def make_event(accent, accent2, title, subtitle, out_name, icon):
     img, d = base_card(accent, accent2)
-    rtl_text(d, (W - 80, 210), title, font(FONT_BLACK, 132), (255, 255, 255), "ra")
+    rtl_text(d, (W - 80, 214), title, fit_font(FONT_BLACK, title, 660, 126), (255, 255, 255), "ra")
     d.rounded_rectangle([W - 700, 372, W - 80, 380], radius=4, fill=accent + (255,))
     rtl_text(d, (W - 80, 410), subtitle, fit_font(FONT_BOLD, subtitle, 660, 44), (224, 230, 238), "ra")
     if icon == "join":
-        d.ellipse([150, 190, 390, 430], outline=accent + (255,), width=8)
-        d.line([(270, 240), (270, 380)], fill=accent + (255,), width=16)
-        d.line([(200, 310), (340, 310)], fill=accent + (255,), width=16)
+        d.ellipse([110, 205, 330, 425], outline=accent + (255,), width=8)
+        d.line([(220, 255), (220, 375)], fill=accent + (255,), width=15)
+        d.line([(160, 315), (280, 315)], fill=accent + (255,), width=15)
     else:
         d.ellipse([150, 190, 390, 430], outline=accent + (255,), width=8)
         d.rounded_rectangle([232, 258, 308, 342], radius=8, fill=accent + (255,))
@@ -128,4 +128,5 @@ make_warning(1, YELLOW, AMBER, "تحذير", "هذا تحذير رقم ١ — ت
 make_warning(2, YELLOW, AMBER, "تحذير", "هذا تحذير رقم ٢ — التحذير القادم يعني الطرد فوراً", "٢", "warn-2.png")
 make_warning(3, RED, CRIMSON, "إنذار أخير", "المخالفة الثالثة — سيتم طردك من المجموعة", "٣", "warn-3.png")
 make_event(GREEN, TEAL, "أهلاً وسهلاً", "نوّرت المجموعة — اقرأ القوانين وشارك باحترام", "join.png", "join")
+make_event(GREEN, TEAL, "أهلاً بالجميع", "انضم أعضاء جدد — نوّرتوا المجموعة جميعاً", "welcome.png", "join")
 make_event(SLATE, BLUE, "إلى اللقاء", "غادرتَ المجموعة — نتمنى لك التوفيق", "leave.png", "leave")
