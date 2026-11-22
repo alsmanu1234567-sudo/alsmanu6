@@ -1,3 +1,4 @@
+import {createServerFiles} from '../services/developer/server-files.mjs';
 import {downloadPublicRepo} from '../services/developer/repository-download.mjs';
 import {randomBytes} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
@@ -5,7 +6,7 @@ import {runShell} from '../services/developer/shell.mjs';
 import {askCodeAI} from '../services/developer/code-ai.mjs';
 import {webappBaseUrl} from './webapp-auth.mjs';
 export function createDeveloperWeb({developerId,github,ai,texts,stats,sites,admin,diagnostics,clock=Date.now}){
- const tokens=new Map(),life=15*60*1000;
+ const tokens=new Map(),life=15*60*1000,serverFiles=createServerFiles();
  const check=uid=>{if(String(uid)!==String(developerId))throw Error('غير مصرح')};
  function issue(uid){check(uid);const base=webappBaseUrl();if(!base||!/^https:\/\//i.test(base))throw Error('اضبط WEBAPP_URL على رابط HTTPS عام أولاً');for(const [key,expiry] of tokens)if(expiry<=clock())tokens.delete(key);tokens.clear();const token=randomBytes(32).toString('base64url');tokens.set(token,clock()+life);return `${base.replace(/\/+$/,'')}/developer-console#${token}`}
  function revoke(uid){check(uid);const count=tokens.size;tokens.clear();return count}
@@ -16,9 +17,16 @@ export function createDeveloperWeb({developerId,github,ai,texts,stats,sites,admi
  function register(app){
   app.get('/developer-console',async(_req,res)=>{res.setHeader('Cache-Control','no-store');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'");res.type('html').send(await readFile(new URL('../public/developer-console.html',import.meta.url),'utf8'))});
   app.get('/developer-console.js',async(_req,res)=>{res.setHeader('Cache-Control','no-store');res.type('application/javascript').send(await readFile(new URL('../public/developer-console.js',import.meta.url),'utf8'))});
+  app.get('/server-explorer.js',async(_req,res)=>{res.setHeader('Cache-Control','no-store');res.type('application/javascript').send(await readFile(new URL('../public/server-explorer.js',import.meta.url),'utf8'))});
   app.get('/api/developer/overview',auth,guarded(async()=>({stats:stats(),githubConfigured:github.hasToken(),model:ai.model(String(developerId)),texts:texts.list()})));
   app.post('/api/developer/shell',auth,guarded(async req=>runShell(req.body?.command)));
   app.get('/api/developer/diagnostics',auth,guarded(async()=>{if(!diagnostics)throw Error('التشخيص غير متاح');return diagnostics.snapshot()}));
+  app.get('/api/developer/server-files',auth,guarded(async req=>serverFiles.list(req.query?.path||undefined)));
+  app.get('/api/developer/server-file',auth,guarded(async req=>serverFiles.read(req.query?.path)));
+  app.post('/api/developer/server-file/save',auth,guarded(async req=>serverFiles.save(req.body?.path,req.body?.content,req.body?.hash)));
+  app.post('/api/developer/server-file/delete',auth,guarded(async req=>serverFiles.remove(req.body?.path)));
+  app.post('/api/developer/server-file/rename',auth,guarded(async req=>serverFiles.renameFile(req.body?.path,req.body?.name)));
+  app.post('/api/developer/server-file/mkdir',auth,guarded(async req=>serverFiles.createFolder(req.body?.path,req.body?.name)));
   app.post('/api/developer/download-repo',auth,guarded(async req=>downloadPublicRepo(req.body?.url)));
   app.post('/api/developer/revoke',auth,guarded(async()=>({ok:true,revoked:revoke(developerId)})));
   app.post('/api/developer/text',auth,guarded(async req=>{const {key,value,reset}=req.body||{};if(!texts.list().includes(key))throw Error('النص غير معروف');if(reset)texts.reset(key);else {if(typeof value!=='string'||value.length>4000)throw Error('النص غير صالح');texts.set(key,value)}return {ok:true}}));
