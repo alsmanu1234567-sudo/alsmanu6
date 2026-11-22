@@ -5,7 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {runShell} from '../services/developer/shell.mjs';
 import {askCodeAI} from '../services/developer/code-ai.mjs';
 import {webappBaseUrl} from './webapp-auth.mjs';
-export function createDeveloperWeb({developerId,github,ai,texts,stats,sites,admin,diagnostics,clock=Date.now}){
+export function createDeveloperWeb({developerId,github,ai,texts,stats,sites,admin,diagnostics,replyDiag,clock=Date.now}){
  const tokens=new Map(),life=15*60*1000,serverFiles=createServerFiles();
  const check=uid=>{if(String(uid)!==String(developerId))throw Error('غير مصرح')};
  function issue(uid){check(uid);const base=webappBaseUrl();if(!base||!/^https:\/\//i.test(base))throw Error('اضبط WEBAPP_URL على رابط HTTPS عام أولاً');for(const [key,expiry] of tokens)if(expiry<=clock())tokens.delete(key);tokens.clear();const token=randomBytes(32).toString('base64url');tokens.set(token,clock()+life);return `${base.replace(/\/+$/,'')}/developer-console#${token}`}
@@ -21,6 +21,8 @@ export function createDeveloperWeb({developerId,github,ai,texts,stats,sites,admi
   app.get('/api/developer/overview',auth,guarded(async()=>({stats:stats(),githubConfigured:github.hasToken(),model:ai.model(String(developerId)),texts:texts.list()})));
   app.post('/api/developer/shell',auth,guarded(async req=>runShell(req.body?.command)));
   app.get('/api/developer/diagnostics',auth,guarded(async()=>{if(!diagnostics)throw Error('التشخيص غير متاح');return diagnostics.snapshot()}));
+  app.get('/api/developer/reply-diag/overview',auth,guarded(async()=>{if(!replyDiag)throw Error('تشخيص الرد غير متاح');return replyDiag.overview(developerId)}));
+  app.post('/api/developer/reply-diag/action',auth,guarded(async req=>{if(!replyDiag)throw Error('تشخيص الرد غير متاح');return replyDiag.action(developerId,req.body?.name,req.body?.payload||{})}));
   app.get('/api/developer/server-files',auth,guarded(async req=>serverFiles.list(req.query?.path||undefined)));
   app.get('/api/developer/server-file',auth,guarded(async req=>serverFiles.read(req.query?.path)));
   app.post('/api/developer/server-file/save',auth,guarded(async req=>serverFiles.save(req.body?.path,req.body?.content,req.body?.hash)));
