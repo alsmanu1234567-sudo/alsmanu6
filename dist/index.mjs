@@ -5,7 +5,7 @@ import {getMessageCutoff as replyCutoff,isMessageAfterCutoff as replyIsFresh} fr
 import {evaluateIncoming} from '../services/messages-settings.mjs';
 import {webappUrlFor} from './webapp-auth.mjs';
 import { sendInteractiveAutoReply, resolveInteractiveAnswer, formatInteractiveFallback } from '../services/auto-reply-interactive.mjs';
-import { setMessageCutoff, advanceMessageCutoff } from "../engine/message-cutoff.mjs";
+import { setMessageCutoff, advanceMessageCutoff, setMessageProcessingPaused } from "../engine/message-cutoff.mjs";
 import { isGeneratedAutoReply, protectAutoReplySocket, matchesReplyTarget } from '../services/auto-reply-routing.mjs';
 // PATCH_MASTER_FIX_APPLIED
 // PATCH_FIXES_V3_APPLIED
@@ -124581,7 +124581,7 @@ function mainMenuKeyboard(points, tier, isDev2 = false) {
   if (isDev2) rows.push([{ text: "\u{1F451} \u0644\u0648\u062D\u0629 \u062A\u062D\u0643\u0645 \u0627\u0644\u0645\u0637\u0648\u0631", callback_data: "dev_panel" }]);
   return { inline_keyboard: rows };
 }
-function connectMenuKeyboard(numbers = [], maxNumbers = 1, cleanHours = 0) {
+function connectMenuKeyboard(numbers = [], maxNumbers = 1, cleanHours = 0, processingPaused = false) {
   const schedLabel = cleanHours > 0
     ? `\u23F0 \u062C\u062F\u0648\u0644\u0629 \u0627\u0644\u062A\u0646\u0638\u064A\u0641: \u0643\u0644 ${cleanHours}\u0633\u0627\u0639\u0629 \u2705`
     : "\u23F0 \u062C\u062F\u0648\u0644\u0629 \u0627\u0644\u062A\u0646\u0638\u064A\u0641 \u0627\u0644\u062A\u0644\u0642\u0627\u0626\u064A";
@@ -124590,8 +124590,9 @@ function connectMenuKeyboard(numbers = [], maxNumbers = 1, cleanHours = 0) {
       [{ text: "\u{1F4F7} QR Code", callback_data: "connect_qr" }, { text: "\u{1F522} \u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062A\u0641", callback_data: "connect_pairing" }],
       [{ text: `\u2795 \u0625\u0636\u0627\u0641\u0629 \u0631\u0642\u0645 (${numbers.length}/${maxNumbers})`, callback_data: "connect_add" }, { text: "\u{1F5D1}\uFE0F \u0641\u0635\u0644 \u0631\u0642\u0645", callback_data: "connect_disconnect" }],
       [{ text: "\u{1F504} \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644", callback_data: "connect_reconnect" }, { text: "\u{1F504} \u062A\u062D\u062F\u064A\u062B \u0627\u0644\u062D\u0627\u0644\u0629", callback_data: "connect_refresh" }],
-      [{ text: "\uD83E\uDDF9 \u062A\u0634\u063A\u064A\u0644 \u0646\u0638\u064A\u0641 (\u0625\u0639\u0627\u062F\u0629 \u0628\u062F\u0621 \u0646\u0638\u064A\u0641\u0629)", callback_data: "connect_clean_restart" }],
+      [{ text: "🧹 تنظيف الرسائل المنتظرة دون فصل واتساب", callback_data: "connect_clean_restart" }],
       [{ text: schedLabel, callback_data: "connect_schedule_clean" }],
+      [{ text: processingPaused ? "▶️ تشغيل معالجة الرسائل" : "⏸ إيقاف معالجة الرسائل", callback_data: processingPaused ? "connect_processing_start" : "connect_processing_stop" }],
       backAndHome()
     ]
   };
@@ -124620,9 +124621,7 @@ function _startCleanSchedule(userId2, hours, bot2, reconnectFn) {
       const _user = getUser(userId2);
       const _chatId = _user.telegramChatId;
       _discardOldMessages(userId2);
-      if (_chatId && bot2) await bot2.sendMessage(_chatId, "🧹 تم تجاهل الرسائل القديمة، وجارٍ إعادة الاتصال.").catch(() => {});
-      if (typeof reconnectFn === 'function') await reconnectFn(userId2, _chatId);
-      if (_chatId && bot2) await bot2.sendMessage(_chatId, "✅ اكتمل التنظيف التلقائي.").catch(() => {});
+      if (_chatId && bot2) await bot2.sendMessage(_chatId, "✅ اكتمل تنظيف طابور الرسائل دون فصل واتساب. تبقى حالة المعالجة كما هي.").catch(() => {});
     } catch (_e) { logger.warn({ _e, userId2 }, "[clean-schedule] error"); }
   }, ms);
   _cleanScheduleTimers.set(userId2, timer);
@@ -293822,11 +293821,12 @@ function registerMessageHandler(sock, userId) {
   }
   _registeredHandlerSocks.add(sock);
   if (getUser(userId).messageCutoffAt) setMessageCutoff(userId, getUser(userId).messageCutoffAt);
+  setMessageProcessingPaused(userId, !!getUser(userId).messageProcessingPaused);
   // [PIPELINE-FIX] dedup من append — نحتفظ به مستقلاً عن الـ pipeline
   sock.ev.on("messages.upsert", ({ messages, type: _appendType }) => {
     if (_appendType !== "append") return;
     for (const _m of messages) {
-      if (_m.key?.fromMe && _m.key?.id && _m.key?.remoteJid) {
+      if (replyIsFresh(userId, _m) && _m.key?.fromMe && _m.key?.id && _m.key?.remoteJid) {
         cacheSentMsg(`${userId}:${_m.key.remoteJid}`, _m.key);
       }
     }
@@ -301024,7 +301024,7 @@ async function showConnect(bot2, chatId, userId) {
     text += `\u2022 ${n.number} ${n.status === "active" ? "\u2705 \u0646\u0634\u0637" : "\u26A0\uFE0F \u063A\u064A\u0631 \u0646\u0634\u0637"}
 `;
   });
-  await bot2.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: connectMenuKeyboard(nums, user.maxNumbers || 1, user.cleanRestartHours || 0) });
+  await bot2.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: connectMenuKeyboard(nums, user.maxNumbers || 1, user.cleanRestartHours || 0, !!user.messageProcessingPaused) });
 }
 async function showReplies2(bot2, chatId, userId) {
   const replies = getUserReplies(userId);
@@ -323177,7 +323177,7 @@ async function showConnect2(bot2, chatId, userId) {
   text += "\n\u0627\u062E\u062A\u0631 \u0637\u0631\u064A\u0642\u0629 \u0627\u0644\u0631\u0628\u0637:";
   await bot2.sendMessage(chatId, text, {
     parse_mode: "Markdown",
-    reply_markup: connectMenuKeyboard(nums, user.maxNumbers || 1, user.cleanRestartHours || 0)
+    reply_markup: connectMenuKeyboard(nums, user.maxNumbers || 1, user.cleanRestartHours || 0, !!user.messageProcessingPaused)
   });
 }
 async function handleLinkingCallback(bot2, chatId, userId, data) {
@@ -323348,79 +323348,24 @@ async function handleLinkingCallback(bot2, chatId, userId, data) {
     return true;
   }
 
-  // [FIX-CLEAN-RESTART v2] إعادة تشغ����ل نظيفة محكمة:
-  // - mutex يمنع التنافس مع connect_reconnect
-  // - يُغلق جميع المفاتيح المرتبطة بالمستخدم (بما فيها userId_+phone)
+  // Stop/resume is independent of the WhatsApp connection and persists across restarts.
+  if (data === "connect_processing_stop" || data === "connect_processing_start") {
+    const pause = data === "connect_processing_stop";
+    // Fence in-flight work and remove pending work before exposing the new state.
+    setMessageProcessingPaused(userId, true);
+    _discardOldMessages(userId);
+    saveUser(userId, { messageProcessingPaused: pause });
+    if (!pause) setMessageProcessingPaused(userId, false);
+    await bot2.sendMessage(chatId, pause
+      ? "⏸ تم إيقاف معالجة رسائل واتساب لهذا الحساب. الرسائل أثناء التوقف لن تُعالَج عند التشغيل. اتصال واتساب لم يُفصل."
+      : "▶️ تم تشغيل المعالجة من الآن؛ الرسائل الأقدم وثانية التشغيل تُتجاهل. اتصال واتساب لم يُفصل.");
+    await showConnect2(bot2, chatId, userId);
+    return true;
+  }
   if (data === "connect_clean_restart") {
-    if (_reconnectLocks.has(userId)) {
-      await bot2.sendMessage(chatId, "\u23F3 \u0639\u0645\u0644\u064A\u0629 \u0625\u0639\u0627\u062F\u0629 \u0627\u062A\u0635\u0627\u0644 \u062C\u0627\u0631\u064A\u0629 \u0628\u0627\u0644\u0641\u0639\u0644 — \u0627\u0646\u062A\u0638\u0631 \u062B\u0648\u0627\u0646\u064A...").catch(() => {});
-      return true;
-    }
-    _reconnectLocks.add(userId);
-    try {
-      _discardOldMessages(userId);
-      await bot2.sendMessage(chatId, "\uD83E\uDDF9 \u062C\u0627\u0631\u064A \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u062A\u0634\u063A\u064A\u0644 \u0627\u0644\u0646\u0638\u064A\u0641\u0629...\n\u26A0\uFE0F \u0633\u064A\u062A\u0645 \u0625\u063A\u0644\u0627\u0642 \u0627\u0644\u062C\u0644\u0633\u0629 \u0648\u062D\u0630\u0641 \u0627\u0644\u0630\u0627\u0643\u0631\u0629 \u0627\u0644\u0645\u0624\u0642\u062A\u0629 \u062B\u0645 \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644 \u062F\u0648\u0646 \u0627\u0633\u062A\u0639\u0627\u062F\u0629 \u0627\u0644\u062A\u0627\u0631\u064A\u062E...");
-
-      // 1. أغلق جميع sockets المرتبطة بالمس��خدم (بما فيها composite keys مثل userId_+phone)
-      const _keysToClose = [];
-      for (const [_k] of inMemoryDB.sessions) {
-        if (_k === userId || _k.startsWith(userId + "_") || _k.startsWith(userId + "+")) {
-          _keysToClose.push(_k);
-        }
-      }
-      for (const _k of _keysToClose) {
-        const _s = inMemoryDB.sessions.get(_k);
-        if (_s) {
-          try { _s.ev?.removeAllListeners?.(); } catch {}
-          try { _s.ws?.terminate?.(); } catch {}
-          try { _s.ws?.close?.(); } catch {}
-          try { _s.end?.(); } catch {}
-        }
-        inMemoryDB.sessions.delete(_k);
-      }
-      logger.info({ userId, closedKeys: _keysToClose.length }, "[clean_restart] closed all sockets");
-
-      // 2. إلغاء أي sessions جارية (كل مفاتيح هذا المستخدم — القديمة والمتعددة)
-      for (const [_sk, _sv] of [...sessions.entries()]) {
-        if (_sk === userId || String(_sk).startsWith(userId + "_")) {
-          _sv.cancelled = true;
-          try { _sv.sock?.ws?.close?.(); } catch {}
-          sessions.delete(_sk);
-        }
-      }
-      // [MULTI-NUM] صفّر سجل سوكتات الأرقام أيضاً — سيعاد بناؤها عند إعادة الاتصال
-      _numberSocks.delete(String(userId));
-
-      // 3. تأخير قصير لضمان إغلاق كامل قبل إعادة الاتصال
-      await new Promise(r => setTimeout(r, 1200));
-
-      // 4. إعادة الاتصال من صفر (ملفات auth موجودة — لا نحتاج QR)
-      await reconnectSession(userId, chatId);
-      // [FIX-CLEAN-VERIFY] تحقق فعلي من نجاح إعادة الاتصال وأخبر المستخدم بالنتيجة
-      // (سابقاً: مع تعدد الأرقام كانت الاستعادة صامتة فيظن المستخدم أن لا شيء حدث)
-      setTimeout(async () => {
-        try {
-          const _nums = getUser(userId).whatsappNumbers || [];
-          const _alive = _nums.filter((n) => !!getSockForPhone(userId, n.number));
-          if (_alive.length > 0) {
-            await bot2.sendMessage(chatId, `\u2705 *اكتمل التشغيل النظيف بنجاح*\n\nالأرقام المتصلة الآن (${_alive.length}/${_nums.length}):\n${_alive.map((n) => `\u{1F7E2} ${n.number}`).join("\n")}`, { parse_mode: "Markdown" }).catch(() => {});
-          } else {
-            await bot2.sendMessage(chatId, "\u26A0\uFE0F لم يكتمل الاتصال بعد التنظيف.\n\nاضغط \u{1F504} إعادة الاتصال للمحاولة مجدداً، أو أعد الربط بالرمز إذا استمرت المشكلة.", {
-              reply_markup: { inline_keyboard: [
-                [{ text: "\u{1F504} \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644", callback_data: "connect_reconnect" }],
-                [{ text: "\u{1F522} \u0631\u0628\u0637 \u0628\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062A\u0641", callback_data: "connect_pairing" }]
-              ] }
-            }).catch(() => {});
-          }
-        } catch {}
-      }, 25e3);
-    } catch (_cre) {
-      logger.warn({ err: _cre?.message, userId }, "[clean_restart] error");
-      await bot2.sendMessage(chatId, "\u274C \u0641\u0634\u0644\u062A \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u062A\u0634\u063A\u064A\u0644. \u062C\u0631\u0651\u0628 '\u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644' \u0628\u062F\u0644\u0627\u064B.").catch(() => {});
-    } finally {
-      // المفتاح يُزال دائماً حتى عند الفشل
-      _reconnectLocks.delete(userId);
-    }
+    _discardOldMessages(userId);
+    await bot2.sendMessage(chatId, "🧹 تم تنظيف الرسائل المنتظرة وتجاهل القديمة دون فصل واتساب. حالة المعالجة لم تتغير.");
+    await showConnect2(bot2, chatId, userId);
     return true;
   }
   if (data === "connect_refresh") {
@@ -323438,7 +323383,8 @@ async function handleLinkingCallback(bot2, chatId, userId, data) {
       reply_markup: connectMenuKeyboard(
         freshUser.whatsappNumbers || [],
         freshUser.maxNumbers || 1,
-        freshUser.cleanRestartHours || 0
+        freshUser.cleanRestartHours || 0,
+        !!freshUser.messageProcessingPaused
       )
     });
     return true;
@@ -323474,12 +323420,12 @@ async function handleLinkingCallback(bot2, chatId, userId, data) {
     if (hours > 0) {
       await bot2.sendMessage(chatId,
         `✅ *تم تفعيل الج��ولة*\n\nسيتم تنفيذ تشغيل نظيف ت��قائي��ً *كل ${hours} ساعة*.`,
-        { parse_mode: "Markdown", reply_markup: connectMenuKeyboard(freshUser2.whatsappNumbers || [], freshUser2.maxNumbers || 1, hours) }
+        { parse_mode: "Markdown", reply_markup: connectMenuKeyboard(freshUser2.whatsappNumbers || [], freshUser2.maxNumbers || 1, hours, !!freshUser2.messageProcessingPaused) }
       );
     } else {
       await bot2.sendMessage(chatId,
         "🔕 *تم إيقاف الجدولة التلقائية.*",
-        { parse_mode: "Markdown", reply_markup: connectMenuKeyboard(freshUser2.whatsappNumbers || [], freshUser2.maxNumbers || 1, 0) }
+        { parse_mode: "Markdown", reply_markup: connectMenuKeyboard(freshUser2.whatsappNumbers || [], freshUser2.maxNumbers || 1, 0, !!freshUser2.messageProcessingPaused) }
       );
     }
     return true;

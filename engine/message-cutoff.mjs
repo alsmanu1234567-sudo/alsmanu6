@@ -1,5 +1,11 @@
 // A clean restart drops queued and replayed messages without touching WhatsApp chats.
 const cutoffs = new Map();
+const pausedUsers = new Set();
+export function setMessageProcessingPaused(userId, paused) {
+  const key = String(userId);
+  if (paused) pausedUsers.add(key); else pausedUsers.delete(key);
+}
+export function isMessageProcessingPaused(userId) { return pausedUsers.has(String(userId)); }
 export function setMessageCutoff(userId, at = Date.now()) {
   const key = String(userId);
   const cutoff = Math.max(cutoffs.get(key) || 0, Number(at) || 0);
@@ -13,6 +19,7 @@ export function advanceMessageCutoff(userId, at = Date.now()) {
 }
 export function getMessageCutoff(userId) { return cutoffs.get(String(userId)) || 0; }
 export function isMessageAfterCutoff(userId, message) {
+  if (isMessageProcessingPaused(userId)) return false;
   const cutoff = getMessageCutoff(userId);
   if (!cutoff) return true;
   const seconds = Number(message?.messageTimestamp);

@@ -82,3 +82,36 @@ test('clean removes queued commands only for the target user',async()=>{
   assert(handled.includes('other'));assert(!handled.some(x=>/^target-1[1-4]$/.test(x)));
   teardown('queue-clean-other');
 });
+
+test('pause drops all notifications including new commands and newsletter; resume rejects replays and runs fresh messages',async()=>{
+ const {setMessageProcessingPaused,advanceMessageCutoff}=await import('../../engine/message-cutoff.mjs');
+ const ev=new EventEmitter(),results=[],uid='paused-scenario';const sock={ev,sendMessage:async(_j,v)=>results.push(v)};
+ setupMsgPipeline(sock,uid,async()=>{},async(m,_u,s)=>s.sendMessage('x',m.key.id));
+ const msg=(id,t,fromMe=false,jid='g@g.us')=>({key:{remoteJid:jid,id,fromMe},messageTimestamp:t});
+ setMessageProcessingPaused(uid,true);advanceMessageCutoff(uid,100500);teardown(uid);
+ ev.emit('messages.upsert',{type:'notify',messages:[msg('during',101),msg('command',101,true)]});
+ ev.emit('messages.upsert',{type:'append',messages:[msg('newsletter',101,false,'n@newsletter')]});
+ advanceMessageCutoff(uid,102500);teardown(uid);setMessageProcessingPaused(uid,false);
+ ev.emit('messages.upsert',{type:'notify',messages:[msg('late-old',101),msg('boundary',102),msg('fresh',103)]});
+ await new Promise(r=>setTimeout(r,30));assert.deepEqual(results,['fresh']);teardown(uid);
+});
+
+test('pause silences guarded output of a running handler and isolates another account',async()=>{
+ const {setMessageProcessingPaused,advanceMessageCutoff}=await import('../../engine/message-cutoff.mjs');
+ const ev=new EventEmitter(),other=new EventEmitter();let release,started;const entered=new Promise(r=>started=r),gate=new Promise(r=>release=r),outputs=[];
+ const sock={ev,sendMessage:async(_j,v)=>outputs.push(v)},sock2={ev:other,sendMessage:sock.sendMessage};
+ setupMsgPipeline(sock,'pause-running',async()=>{},async(m,_u,s)=>{started();await gate;await s.sendMessage('x',m.key.id)});
+ setupMsgPipeline(sock2,'pause-other',async()=>{},async(m,_u,s)=>s.sendMessage('x',m.key.id));
+ const m=id=>({key:{remoteJid:'x',id},messageTimestamp:Math.floor(Date.now()/1000)+2});
+ ev.emit('messages.upsert',{type:'notify',messages:[m('old')]});await entered;
+ setMessageProcessingPaused('pause-running',true);advanceMessageCutoff('pause-running');teardown('pause-running');
+ other.emit('messages.upsert',{type:'notify',messages:[m('other')]});release();await new Promise(r=>setTimeout(r,30));
+ assert.deepEqual(outputs,['other']);setMessageProcessingPaused('pause-running',false);teardown('pause-other');
+});
+
+test('linking controls persist pause and clean does not tear down sockets or reconnect',async()=>{
+ const {readFileSync}=await import('node:fs');const src=readFileSync(new URL('../../dist/index.mjs',import.meta.url),'utf8');
+ const clean=src.slice(src.indexOf('  if (data === "connect_clean_restart")'),src.indexOf('  if (data === "connect_refresh")'));
+ assert.match(clean,/_discardOldMessages\(userId\)/);assert.doesNotMatch(clean,/reconnectSession|removeAllListeners|\.ws\?\.close/);
+ assert.match(src,/messageProcessingPaused: pause/);assert.match(src,/setMessageProcessingPaused\(userId, !!getUser\(userId\)\.messageProcessingPaused\)/);
+});
