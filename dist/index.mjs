@@ -7,6 +7,7 @@ import {webappUrlFor} from './webapp-auth.mjs';
 import { sendInteractiveAutoReply, resolveInteractiveAnswer, formatInteractiveFallback } from '../services/auto-reply-interactive.mjs';
 import { setMessageCutoff, advanceMessageCutoff, setMessageProcessingPaused } from "../engine/message-cutoff.mjs";
 import { isGeneratedAutoReply, protectAutoReplySocket, matchesReplyTarget } from '../services/auto-reply-routing.mjs';
+import { attachGroupGuard } from '../services/group-guard.mjs';
 // PATCH_MASTER_FIX_APPLIED
 // PATCH_FIXES_V3_APPLIED
 // RUNTIME_BAILEYS_EXTERNAL_PATCH_V3
@@ -293889,6 +293890,8 @@ function registerMessageHandler(sock, userId) {
     return;
   }
   _registeredHandlerSocks.add(sock);
+  // [GROUP-GUARD] أوامر المجموعات بالنقطة + الحماية بالتحذيرات والكروت
+  try { attachGroupGuard({ userId, sock, logger }); } catch (e) { try { logger.warn({ err: String(e?.message || e) }, "[GROUP-GUARD] تعذر تثبيت حماية المجموعات"); } catch { } }
   // [PAUSE-SESSION-SCOPED] التوقف لا يُستعاد بعد إعادة التشغيل: كان يترك البوت صامتاً بلا أي خطأ.
   const _restoredCutoff = Number(getUser(userId).messageCutoffAt) || 0;
   if (_restoredCutoff > Date.now() - 24 * 60 * 60 * 1000 && _restoredCutoff < Date.now() + 60000) setMessageCutoff(userId, _restoredCutoff);
@@ -329890,7 +329893,7 @@ try {
   init_my_msgs();
   init_ai_manager();
   const aiWebService = createAiWebService({getUser,saveUser,getUserNumbers,updateNumber,ai:ai_manager_exports,clearMemory:uid=>{let count=0;for(const key of [...conversationHistory.keys()]) if(key.startsWith(`${uid}_`) || [ `rule_${uid}`, `test_${uid}`, `webtest_${uid}` ].includes(key)){conversationHistory.delete(key);count++;}return count;}});
-  registerWebApp(app, { devDiag: createDevDiagService(), statusService:_statusMod.getStatusService(), memberService:createGroupMemberManager({inMemoryDB,getUser,getBot:()=>botRef}), messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber,getUser,saveUser}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
+  registerWebApp(app, { sessionBridge: { reconnect: (uid) => reconnectSession(uid, null) }, devDiag: createDevDiagService(), statusService:_statusMod.getStatusService(), memberService:createGroupMemberManager({inMemoryDB,getUser,getBot:()=>botRef}), messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber,getUser,saveUser}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
   // [SESSION-RESOLVER] ربط قسم التحويلات بمخزن جلسات البوت الرئيسي —
   // نفس الطريقة التي تجلب بها بقية أقسام البوت المجموعات (مفاتيح userId و userId_+رقم)
   const { setForwardSessionResolver, setForwardGroupsProvider } = await import("./forward.mjs");

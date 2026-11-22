@@ -1,5 +1,8 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, existsSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as groupGuard from "../services/group-guard.mjs";
+import { createZip, readZip } from "../services/zip-lite.mjs";
 // ═══════════════════════════════════════════════════════════════════
 // webapp.mjs — واجهة ويب داخلية لإدارة التحويلات
 // تعمل داخل نفس خادم البوت — لا تحتاج أي شيء خارجي
@@ -64,12 +67,12 @@ function guard(handler) {
 }
 
 // ─── التسجيل في تطبيق Express ──────────────────────────────────────
-export function registerWebApp(app, { replyService, aiService, myMsgsService, siteGenService, messagesService, memberService, statusService, devDiag } = {}) {
+export function registerWebApp(app, { replyService, aiService, myMsgsService, siteGenService, messagesService, memberService, statusService, devDiag, sessionBridge } = {}) {
   // JSON body parsing خاص بمسارات الويب آب فقط (لا يؤثر على بقية البوت)
   const parseJson = (req, res, next) => {
     if (req.headers["content-type"]?.includes("application/json") && !req.body) {
       let raw = "";
-      req.on("data", (c) => { raw += c; if (raw.length > 6e6) req.destroy(); });
+      req.on("data", (c) => { raw += c; if (raw.length > 26e6) req.destroy(); });
       req.on("end", () => {
         try { req.body = raw ? JSON.parse(raw) : {}; } catch { req.body = {}; }
         next();
@@ -146,6 +149,138 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/member-manager/delete-list',parseJson,guard(async(uid,req)=>membersWeb().removeList(uid,req.body?.id)));
   app.post('/api/member-manager/start',parseJson,guard(async(uid,req)=>membersWeb().createJob(uid,req.body)));
   app.post('/api/member-manager/control',parseJson,guard(async(uid,req)=>membersWeb().control(uid,req.body?.id,req.body?.action)));
+  // ═══ [GROUP-GUARD] حماية المجموعات: تحذيرات تصاعدية، كروت، أوامر النقطة ═══
+  const guardGroupId = (req) => {
+    const id = String(req.body?.groupId || req.query?.groupId || "").trim();
+    if (!id.endsWith("@g.us")) throw new Error("اختر مجموعة أولاً");
+    return id;
+  };
+  const publicGuardConfig = (config) => {
+    const cards = {};
+    for (const [kind, file] of Object.entries(config.cards || {})) {
+      try { cards[kind] = Boolean(file) && existsSync(file); } catch { cards[kind] = false; }
+    }
+    const { cards: _drop, ...rest } = config;
+    return { ...rest, cards, cardVersion: Date.now() };
+  };
+  app.get('/groups-guard-web.js', (_req, res) => { res.setHeader('Content-Type', 'application/javascript; charset=utf-8'); res.setHeader('Cache-Control', 'no-store'); res.end(readFileSync(fileURLToPath(new URL("../public/groups-guard-web.js", import.meta.url)))); });
+  app.get('/api/fw/groups/guard', guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    return { groupId, config: publicGuardConfig(groupGuard.getGroupConfig(uid, groupId)), warnings: groupGuard.listWarnings(uid, groupId), commands: groupGuard.commandsCatalog() };
+  }));
+  app.get('/api/fw/groups/guard/card', guard(async (uid, req, res) => {
+    const groupId = guardGroupId(req);
+    const kind = String(req.query?.kind || "warn1");
+    const file = groupGuard.getGroupConfig(uid, groupId).cards?.[kind];
+    if (!file || !existsSync(file)) throw new Error("لا يوجد كرت بهذا النوع");
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "no-store");
+    res.end(readFileSync(file));
+  }));
+  app.post('/api/fw/groups/guard', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    const patch = req.body?.patch || {};
+    const allowed = {};
+    for (const key of ["enabled", "linkGuard", "wordGuard", "stickerGuard", "kickOnLimit", "maxWarnings", "stickerWarnEvery", "kickDelaySec", "words", "welcome", "goodbye"]) {
+      if (key in patch) allowed[key] = patch[key];
+    }
+    return { groupId, config: publicGuardConfig(groupGuard.updateGroupConfig(uid, groupId, allowed)) };
+  }));
+  app.post('/api/fw/groups/guard/card', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    return { ok: true, config: publicGuardConfig(groupGuard.saveCardImage(uid, groupId, String(req.body?.kind || ""), req.body?.dataUrl)) };
+  }));
+  app.post('/api/fw/groups/guard/reset', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    const cleared = groupGuard.resetWarnings(uid, groupId, req.body?.memberJid || null);
+    return { ok: true, cleared, warnings: groupGuard.listWarnings(uid, groupId) };
+  }));
+
+  // ═══ [SESSION-PORT] تصدير واستيراد جلسة واتساب كملف مضغوط ═══
+  const sessionRoot = () => process.env.WA_SESSIONS_ROOT || join(process.cwd(), "wa-sessions");
+  const sessionDirsFor = (uid) => {
+    try {
+      return readdirSync(sessionRoot()).filter((name) => {
+        try { return statSync(join(sessionRoot(), name)).isDirectory() && (name === String(uid) || name.startsWith(`${uid}_`)); } catch { return false; }
+      });
+    } catch { return []; }
+  };
+  app.get('/api/session/list', guard(async (uid) => ({
+    sessions: sessionDirsFor(uid).map((key) => ({ key, phone: key.includes("_") ? key.split("_").pop() : key })),
+  })));
+  app.get('/api/session/export', guard(async (uid, req, res) => {
+    const dirs = sessionDirsFor(uid);
+    if (!dirs.length) throw new Error("لا توجد جلسة محفوظة لهذا الحساب بعد");
+    const wanted = String(req.query?.key || "");
+    const key = dirs.includes(wanted) ? wanted : dirs[0];
+    const base = join(sessionRoot(), key);
+    const files = [];
+    const walk = (dir, prefix) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) walk(full, rel);
+        else {
+          try {
+            if (statSync(full).size > 20 * 1024 * 1024) continue;
+            files.push({ name: rel, data: readFileSync(full) });
+          } catch { }
+        }
+      }
+    };
+    walk(base, "");
+    if (!files.some((file) => file.name === "creds.json" || file.name.endsWith("/creds.json"))) {
+      throw new Error("الجلسة غير مكتملة (creds.json مفقود) — أعد ربط الرقم أولاً");
+    }
+    const zip = createZip(files);
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="wa-session-${key}.zip"`);
+    res.setHeader("Cache-Control", "no-store");
+    res.end(zip);
+  }));
+  app.post('/api/session/import', parseJson, guard(async (uid, req) => {
+    const raw = String(req.body?.zipBase64 || "").replace(/^data:[^;]*;base64,/, "");
+    if (!raw) throw new Error("لم يتم إرسال ملف الجلسة");
+    const zipBuf = Buffer.from(raw, "base64");
+    if (!zipBuf.length) throw new Error("الملف فارغ");
+    if (zipBuf.length > 24 * 1024 * 1024) throw new Error("حجم الملف يتجاوز 24 ميغابايت");
+    const entries = readZip(zipBuf);
+    const creds = entries.find((entry) => entry.name === "creds.json" || entry.name.endsWith("/creds.json"));
+    if (!creds) throw new Error("الملف لا يحتوي جلسة واتساب (creds.json مفقود)");
+    let phone = String(req.body?.phone || "").replace(/\D/g, "");
+    if (!phone) {
+      try {
+        const parsed = JSON.parse(creds.data.toString("utf8"));
+        phone = String(parsed?.me?.id || "").split("@")[0].split(":")[0].replace(/\D/g, "");
+      } catch { }
+    }
+    if (!phone || phone.length < 8) throw new Error("تعذر تحديد رقم الجلسة؛ اكتب الرقم مع رمز الدولة");
+    const key = `${uid}_${phone}`;
+    const target = join(sessionRoot(), key);
+    try { if (existsSync(target)) rmSync(target, { recursive: true, force: true }); } catch { }
+    mkdirSync(target, { recursive: true });
+    let written = 0;
+    for (const entry of entries) {
+      const name = entry.name.replace(/\\/g, "/").replace(/^\.?\//, "");
+      if (!name || name.includes("..") || name.startsWith("/")) continue;
+      const dest = join(target, name);
+      if (!dest.startsWith(target)) continue;
+      mkdirSync(join(dest, ".."), { recursive: true });
+      writeFileSync(dest, entry.data);
+      written += 1;
+    }
+    if (!written) throw new Error("لم يُكتب أي ملف من الأرشيف");
+    let reconnected = false;
+    try {
+      if (typeof sessionBridge?.reconnect === "function") {
+        await sessionBridge.reconnect(uid);
+        reconnected = true;
+      }
+    } catch (error) {
+      return { ok: true, key, written, reconnected, warning: String(error?.message || error).slice(0, 160) };
+    }
+    return { ok: true, key, written, reconnected };
+  }));
 
   const messagesWeb = () => {if(!messagesService)throw Error('قسم الرسائل غير جاهز');return messagesService;};
   app.get('/messages-web.js',(_req,res)=>{res.setHeader('Content-Type','application/javascript; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(readFileSync(fileURLToPath(new URL('../public/messages-web.js',import.meta.url))));});
@@ -553,6 +688,7 @@ body{background:radial-gradient(ellipse at 5% 0%,rgba(192,141,255,.18),transpare
   <button class="tab" data-tab="ai">✦ الذكاء</button>
   <button class="tab" data-tab="messages">💬 الرسائل</button>
   <button class="tab" data-tab="mymsgs">📨 رسائلي</button>
+  <button class="tab" data-tab="sessions">🔗 ربط الجلسة</button>
 </div>
 
 <div class="container">
@@ -568,6 +704,7 @@ body{background:radial-gradient(ellipse at 5% 0%,rgba(192,141,255,.18),transpare
 <div class="sheet" id="sheet"></div>
 <div class="toast" id="toast"></div>
 
+<script src="/groups-guard-web.js"></script>
 <script>
 const TG = window.Telegram?.WebApp;
 if (TG) { try { TG.ready(); TG.expand(); } catch(e){} }
@@ -577,7 +714,7 @@ const TOKEN = qs.get("token") || localStorage.getItem("fw_token") || "";
 if (qs.get("token")) localStorage.setItem("fw_token", qs.get("token"));
 
 let ST = { numbers:[], channels:[], groups:[], rules:[], waConnected:false };
-let TAB = ["dashboard","messages","groups","members","replies","channels","ai","mymsgs","status"].includes(qs.get("section")) ? qs.get("section") : "rules";
+let TAB = ["dashboard","messages","groups","members","replies","channels","ai","mymsgs","status","sessions"].includes(qs.get("section")) ? qs.get("section") : "rules";
 let Q = "";
 const picCache = {};
 
@@ -669,7 +806,7 @@ async function addChannel(jsonStr){
 
 // ─── التبويبات ──────────────────────────────────────────────────
 function selectTab(tab, shouldRender=true){
-  TAB = ["dashboard", "messages", "groups", "members", "channels", "replies", "ai", "mymsgs", "status"].includes(tab) ? tab : "rules";
+  TAB = ["dashboard", "messages", "groups", "members", "channels", "replies", "ai", "mymsgs", "status", "sessions"].includes(tab) ? tab : "rules";
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("act", t.dataset.tab===TAB));
   document.getElementById("fab").style.display = TAB==="rules" ? "" : "none";
   document.getElementById("srchIn").placeholder = TAB==="groups"
@@ -704,6 +841,7 @@ function render(){
   if (TAB === "mymsgs") return window.MyMsgsUI ? window.MyMsgsUI.render(v, Q) : (v.innerHTML = '<div class="empty">جارٍ تحميل رسائلي…</div>');
   if (TAB === "ai") return window.AiUI ? window.AiUI.render(v, Q) : (v.innerHTML = '<div class="empty">جارٍ تحميل قسم الذكاء…</div>');
   if (TAB === "replies") return window.RepliesUI ? window.RepliesUI.render(v, Q) : (v.innerHTML = '<div class="empty">جارٍ تحميل قسم الردود…</div>');
+  if (TAB === "sessions") return window.SessionUI ? window.SessionUI.render(v) : (v.innerHTML = '<div class="empty">جارٍ تحميل قسم الجلسات…</div>');
   renderGroups(v);
 }
 
@@ -775,7 +913,10 @@ async function delChannel(id){
 function renderGroups(v){
   const items = filt(ST.groups);
   let html = '<div class="sechead"><span class="t">المجموعات (' + ST.groups.length + ')</span>' +
-    '<button class="btn btn-s btn-sm" onclick="refreshGroups(this)">🔄 تحديث من واتساب</button></div>';
+    '<button class="btn btn-s btn-sm" onclick="refreshGroups(this)">🔄 تحديث من واتساب</button>' +
+    '<button class="btn btn-s btn-sm" onclick="window.GroupGuardUI&&window.GroupGuardUI.open()">🛡️ الحماية والتحذيرات</button>' +
+    '<button class="btn btn-s btn-sm" onclick="window.GroupGuardUI&&window.GroupGuardUI.docs()">📖 أوامر المجموعات</button></div>' +
+    '<div id="ggRoot"></div>';
   if (!items.length) {
     html += '<div class="empty"><div class="big">👥</div>لا توجد مجموعات' + (Q?' مطابقة للبحث':'') + '<br>اضغط "تحديث من واتساب" لجلب مجموعاتك</div>';
   } else {
