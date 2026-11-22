@@ -111,6 +111,7 @@ export async function handleCallback(bot, query) {
   ) {
     if (userId !== String(_deps.DEVELOPER_ID)) {await bot.sendMessage(chatId,'غير مصرح');return true;}
     if (data === 'dev_servercontrol') {await _deps.showServerControlMenu(bot,chatId,userId);return true;}
+    if (data === 'dev_serverlink_text') {await _deps.sendServerControlLinkText(bot,chatId,userId);return true;}
     if (data === 'dev_serverlink_stop') {await _deps.stopServerControlLink(bot,chatId,userId);return true;}
     if (/^dev_serverlink_\d+$/.test(data)) {await _deps.openServerControl(bot,chatId,userId,Number(data.slice('dev_serverlink_'.length)));return true;}
     if (data === 'dev_open_web') {await _deps.openDeveloperWeb(bot,chatId,userId);return true;}
