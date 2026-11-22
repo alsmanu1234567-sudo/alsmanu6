@@ -1,7 +1,7 @@
 import {sendCarouselAutoReply,carouselAnswer,carouselFallback} from '../services/auto-reply-carousel.mjs';
 import {waitForTyping,typingSettings,startTyping} from '../services/reply-typing.mjs';
 import {deleteSentMessages} from '../services/fast-message-delete.mjs';
-import {getMessageCutoff as replyCutoff,isMessageAfterCutoff as replyIsFresh,isMessageProcessingPaused,getProcessingDiagnostics} from '../engine/message-cutoff.mjs';
+import {getMessageCutoff as replyCutoff,isMessageAfterCutoff as replyIsFresh,isMessageProcessingPaused,getProcessingDiagnostics,clearMessageCutoff} from '../engine/message-cutoff.mjs';
 import {evaluateIncoming} from '../services/messages-settings.mjs';
 import {webappUrlFor} from './webapp-auth.mjs';
 import { sendInteractiveAutoReply, resolveInteractiveAnswer, formatInteractiveFallback } from '../services/auto-reply-interactive.mjs';
@@ -293031,6 +293031,7 @@ async function _connectQr(sessKey, chatId, userId) {
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
       try { logger.info({ userId, sessKey, connection: connection || null, statusCode: lastDisconnect?.error?.output?.statusCode ?? null, hasQr: !!qr }, "[WA] connection update"); } catch { }
+      _diagPush(_diag.conn, { t: Date.now(), userId, sessKey, connection: connection || null, statusCode: lastDisconnect?.error?.output?.statusCode ?? null, reason: lastDisconnect?.error?.message ? String(lastDisconnect.error.message).slice(0, 160) : null });
       const cur = sessions.get(sessKey);
       if (!cur || cur.cancelled) {
         sock.ws?.close?.();
@@ -293784,7 +293785,13 @@ async function _ensurePipeline() {
   _pipelineStats    = pipelineMod.getPipelineStats;
   _fwApplyFn        = fwMod.applyForwardRules;
   _pipelineTeardown = pipelineMod.teardown; // [PIPELINE-FIX v2]
+  try { pipelineMod.setTraceHook((e) => _diagPush(_diag.trace, { t: Date.now(), ...e })); } catch { }
 }
+
+// ── [DEV-DIAG] حلقات تشخيص في الذاكرة: آخر أحداث الاتصال والرسائل والأخطاء ──
+const _diag = { conn: [], trace: [], errors: [] };
+function _diagPush(arr, item, max = 250) { arr.push(item); if (arr.length > max) arr.splice(0, arr.length - max); }
+const _diagPreview = (t) => String(t || "").replace(/\s+/g, " ").slice(0, 120);
 
 // ══════════════════════════════════════════════════════════════════
 // [MEMORY-SWEEP] المكنسة الذاتية — تنظيف تلقائي كل 10 دقائق
@@ -301191,6 +301198,94 @@ async function openServerControl(bot2,chatId,userId,minutes){
   try{const {launchServerControl}=await import('../services/developer/server-control-launcher.mjs');const result=await launchServerControl({directory:dir,base:process.cwd(),minutes});await bot2.sendMessage(chatId,'🔴 رابط لوحة السيرفر المستقلة؛ لا تشاركه. ينتهي في '+new Date(result.expiry).toLocaleString('ar')+'.'+(result.provider==='localtunnel'&&result.password?'\nإذا ظهرت صفحة حماية النفق أدخل هذا العنوان: '+result.password:''),{reply_markup:{inline_keyboard:[[{text:'🖥 فتح لوحة السيرفر',url:result.url}],[{text:'📋 إرسال الرابط كنص',callback_data:'dev_serverlink_text'}],[{text:'🔒 إيقاف الرابط',callback_data:'dev_serverlink_stop'}]]}})}catch(e){await bot2.sendMessage(chatId,'تعذر إنشاء رابط السيرفر: '+String(e.message||e).slice(0,300));}
 }
 async function sendServerControlLinkText(bot2,chatId,userId){if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId))return;try{const dir=process.env.BOT_SERVER_CONTROL_DIR;if(!dir)throw Error('لوحة السيرفر غير مهيأة');const {getServerControlLink}=await import('../services/developer/server-control-launcher.mjs');const url=await getServerControlLink(dir);await bot2.sendMessage(chatId,url?'🔐 رابط التحكم الكامل؛ لا تشاركه:\n'+url:'لا يوجد رابط صالح محفوظ؛ أنشئ رابطاً جديداً.',{disable_web_page_preview:true})}catch(e){await bot2.sendMessage(chatId,'تعذر إرسال الرابط: '+e.message)}}
+function createDevDiagService() {
+  const devOnly = (uid) => { if (String(uid) !== String(DEVELOPER_ID)) throw Error("هذه الصفحة للمطور فقط"); };
+  const sockOf = (uid) => {
+    const byNum = _numberSocks.get(String(uid));
+    if (byNum && byNum.size) { for (const [, sk] of byNum) if (sk?.ws?.readyState === 1) return sk; for (const [, sk] of byNum) return sk; }
+    const raw = inMemoryDB.sessions.get(String(uid));
+    return raw?.sock || raw || null;
+  };
+  const sockState = (sock) => { const r = sock?.ws?.readyState; return r === 1 ? "open" : r === 0 ? "connecting" : r === 2 ? "closing" : r === 3 ? "closed" : "none"; };
+  async function overview(uid) {
+    devOnly(uid);
+    const d = getProcessingDiagnostics(uid);
+    let pipeline = {}; try { pipeline = (await import('../engine/msg-pipeline.mjs')).getPipelineStats(); } catch { }
+    const user = getUser(uid);
+    const sessionsList = [];
+    try { for (const [k, v] of sessions) { if (!(k === String(uid) || String(k).startsWith(uid + '_') || String(k).startsWith(uid + '+'))) continue; sessionsList.push({ key: k, state: v?.state || null, cancelled: !!v?.cancelled, retries: v?.retries ?? null, readyState: sockState(v?.sock), since: v?.connectedAt || null }); } } catch { }
+    const sock = sockOf(uid);
+    return {
+      ok: true,
+      now: Date.now(),
+      bot: { pid: process.pid, node: process.version, uptimeSec: Math.round(process.uptime()), rssMB: Math.round(process.memoryUsage().rss / 1048576), startedAt: BOT_START_TS * 1000 },
+      owner: { id: String(uid), name: user?.firstName || null },
+      socket: { state: sockState(sock), hasUser: !!sock?.user?.id, me: String(sock?.user?.id || "").split(":")[0] || null },
+      numbers: (user?.whatsappNumbers || []).map((n) => ({ number: n.number, status: n.status, sessionId: n.sessionId, active: String(n.number || "").replace(/\D/g, "") === String(sock?.user?.id || "").split(":")[0].split("@")[0] })),
+      processing: { paused: d.paused, cutoff: d.cutoff || 0, cutoffAgeMs: d.cutoffAgeMs || 0, incoming: d.incoming, pausedDrops: d.pausedDrops, staleDrops: d.staleDrops, lastIncomingAt: d.lastIncomingAt, lastDropAt: d.lastDropAt },
+      pipeline: { received: pipeline.received || 0, commands: pipeline.commands || 0, notify: pipeline.notify || 0, newsletter: pipeline.newsletter || 0, dropped: pipeline.dropped || 0, handlerErrors: pipeline.handlerErrors || 0, lanes: pipeline.lanes || null, inflight: pipeline.commandsInflight || 0 },
+      sessions: sessionsList,
+      conn: _diag.conn.slice(-40).reverse(),
+      trace: _diag.trace.slice(-60).reverse()
+    };
+  }
+  async function action(uid, name, payload = {}) {
+    devOnly(uid);
+    const sock = sockOf(uid);
+    switch (String(name)) {
+      case "resume": { setMessageProcessingPaused(uid, false); saveUser(uid, { messageProcessingPaused: false }); return { ok: true, message: "تم تشغيل معالجة الرسائل" }; }
+      case "pause": { setMessageProcessingPaused(uid, true); saveUser(uid, { messageProcessingPaused: false }); return { ok: true, message: "تم إيقاف المعالجة (ينتهي التوقف عند إعادة التشغيل)" }; }
+      case "reset-cutoff": { clearMessageCutoff(uid); saveUser(uid, { messageCutoffAt: 0 }); return { ok: true, message: "تم تصفير نقطة القطع؛ الرسائل الجديدة ستُعالج" }; }
+      case "clear-queues": { let n = 0; try { n = _pipelineTeardown ? _pipelineTeardown(String(uid)) : 0; } catch { } return { ok: true, message: `تم إلغاء ${n} مهمة معلّقة` }; }
+      case "clear-dedup": {
+        let n = 0; try { for (const k of [...msgCache.keys()]) if (String(k).startsWith(String(uid))) { msgCache.delete(k); n++; } for (const k of [...userSentMsgCache.keys()]) if (String(k).startsWith(String(uid))) { userSentMsgCache.delete(k); n++; } } catch { }
+        return { ok: true, message: `تم تفريغ ${n} مدخلاً من ذاكرة التكرار` };
+      }
+      case "reconnect": {
+        const dead = [];
+        for (const [k, v] of [...sessions.entries()]) {
+          if (!(k === String(uid) || String(k).startsWith(uid + '_') || String(k).startsWith(uid + '+'))) continue;
+          const st = v?.sock?.ws?.readyState;
+          if (st !== 1 && st !== 0) { dead.push(k); try { v?.sock?.ws?.terminate?.(); } catch { } sessions.delete(k); }
+        }
+        try { inMemoryDB.sessions.delete(String(uid)); _numberSocks.delete(String(uid)); } catch { }
+        await reconnectSession(uid, null);
+        return { ok: true, message: `أُعيد توصيل الجلسات${dead.length ? " (نُظّفت " + dead.length + " خانة ميتة)" : ""}` };
+      }
+      case "refresh-groups": {
+        if (!sock) throw Error("لا يوجد سوكت واتساب في الذاكرة");
+        const groups = await sock.groupFetchAllParticipating();
+        const count = Object.keys(groups || {}).length;
+        try { inMemoryDB.groupsCache.set(String(uid), Object.values(groups || {}).map((g) => ({ id: g.id, subject: g.subject }))); } catch { }
+        return { ok: true, message: `تم تحديث ${count} مجموعة من واتساب` };
+      }
+      case "send-test": {
+        const to = String(payload.to || "").replace(/\D/g, "");
+        const text = String(payload.text || "✅ رسالة اختبار من لوحة التشخيص").slice(0, 500);
+        if (!/^\d{7,15}$/.test(to)) throw Error("أدخل رقماً دولياً صحيحاً بدون + أو مسافات");
+        if (!sock) throw Error("لا يوجد سوكت واتساب في الذاكرة؛ اضغط إعادة الاتصال أولاً");
+        const res = await sock.sendMessage(to + "@s.whatsapp.net", { text });
+        return { ok: true, message: `تم الإرسال إلى +${to}`, id: res?.key?.id || null };
+      }
+      case "self-check": {
+        const out = [];
+        out.push({ name: "سوكت واتساب", ok: sockState(sock) === "open", detail: sockState(sock) });
+        out.push({ name: "هوية الرقم", ok: !!sock?.user?.id, detail: sock?.user?.id || "غير متاح" });
+        out.push({ name: "المعالجة غير متوقفة", ok: !getProcessingDiagnostics(uid).paused, detail: getProcessingDiagnostics(uid).paused ? "متوقفة" : "تعمل" });
+        out.push({ name: "نقطة القطع", ok: !getProcessingDiagnostics(uid).cutoff, detail: getProcessingDiagnostics(uid).cutoff ? new Date(getProcessingDiagnostics(uid).cutoff).toISOString() : "لا توجد" });
+        try { const g = await sock.groupFetchAllParticipating(); out.push({ name: "قراءة من واتساب", ok: true, detail: Object.keys(g || {}).length + " مجموعة" }); }
+        catch (e) { out.push({ name: "قراءة من واتساب", ok: false, detail: String(e?.message || e).slice(0, 120) }); }
+        let p = {}; try { p = (await import('../engine/msg-pipeline.mjs')).getPipelineStats(); } catch { }
+        out.push({ name: "طابور الإشعارات", ok: (p.lanes?.notify?.pending || 0) < 200, detail: `${p.lanes?.notify?.pending || 0} منتظرة / ${p.lanes?.notify?.running || 0} تعمل` });
+        return { ok: true, checks: out, message: out.every((c) => c.ok) ? "كل الفحوصات سليمة" : "توجد فحوصات فاشلة" };
+      }
+      case "clear-trace": { _diag.trace.length = 0; _diag.conn.length = 0; return { ok: true, message: "تم تفريغ سجل التشخيص" }; }
+      default: throw Error("إجراء غير معروف");
+    }
+  }
+  return { overview, action };
+}
+
 async function reportProcessingHealth(bot2,chatId,userId){
   if(String(userId)!==String(DEVELOPER_ID)){await bot2.sendMessage(chatId,'هذا التقرير للمطور فقط.');return;}
   try{
@@ -329746,7 +329841,7 @@ try {
   init_my_msgs();
   init_ai_manager();
   const aiWebService = createAiWebService({getUser,saveUser,getUserNumbers,updateNumber,ai:ai_manager_exports,clearMemory:uid=>{let count=0;for(const key of [...conversationHistory.keys()]) if(key.startsWith(`${uid}_`) || [ `rule_${uid}`, `test_${uid}`, `webtest_${uid}` ].includes(key)){conversationHistory.delete(key);count++;}return count;}});
-  registerWebApp(app, { statusService:_statusMod.getStatusService(), memberService:createGroupMemberManager({inMemoryDB,getUser,getBot:()=>botRef}), messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber,getUser,saveUser}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
+  registerWebApp(app, { devDiag: createDevDiagService(), statusService:_statusMod.getStatusService(), memberService:createGroupMemberManager({inMemoryDB,getUser,getBot:()=>botRef}), messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber,getUser,saveUser}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
   // [SESSION-RESOLVER] ربط قسم التحويلات بمخزن جلسات البوت الرئيسي —
   // نفس الطريقة التي تجلب بها بقية أقسام البوت المجموعات (مفاتيح userId و userId_+رقم)
   const { setForwardSessionResolver, setForwardGroupsProvider } = await import("./forward.mjs");

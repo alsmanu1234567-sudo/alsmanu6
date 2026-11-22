@@ -18,6 +18,7 @@ export function advanceMessageCutoff(userId, at = Date.now()) {
   return setMessageCutoff(userId, Math.max(Number(at) || 0, old + 1));
 }
 export function getMessageCutoff(userId) { return cutoffs.get(String(userId)) || 0; }
+export function clearMessageCutoff(userId) { cutoffs.delete(String(userId)); }
 // Lightweight diagnostics: why messages are being ignored (no message content kept).
 const diagnostics = new Map();
 function diag(userId) {

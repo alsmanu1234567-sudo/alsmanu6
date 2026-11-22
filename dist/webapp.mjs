@@ -64,7 +64,7 @@ function guard(handler) {
 }
 
 // ─── التسجيل في تطبيق Express ──────────────────────────────────────
-export function registerWebApp(app, { replyService, aiService, myMsgsService, siteGenService, messagesService, memberService, statusService } = {}) {
+export function registerWebApp(app, { replyService, aiService, myMsgsService, siteGenService, messagesService, memberService, statusService, devDiag } = {}) {
   // JSON body parsing خاص بمسارات الويب آب فقط (لا يؤثر على بقية البوت)
   const parseJson = (req, res, next) => {
     if (req.headers["content-type"]?.includes("application/json") && !req.body) {
@@ -77,10 +77,22 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     } else next();
   };
 
+  // ─── صفحة تشخيص الرد (للمطور) ───────────────────────────────────
+  if (devDiag) {
+    app.get("/dev-diag", (req, res) => {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.end(readFileSync(fileURLToPath(new URL("../public/dev-diag.html", import.meta.url))));
+    });
+    app.get("/api/dev-diag/overview", guard(async (uid) => devDiag.overview(uid)));
+    app.post("/api/dev-diag/action", parseJson, guard(async (uid, req) => devDiag.action(uid, req.body?.name, req.body?.payload || {})));
+  }
+
   app.get("/webapp", (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
-    const navigation = '<a class="btn btn-s btn-sm" style="margin-top:10px;text-decoration:none" href="/group-world" onclick="location.href=\'/group-world\'+location.search;return false">🌍 عالم المجموعات</a>';
+    const navigation = '<a class="btn btn-s btn-sm" style="margin-top:10px;text-decoration:none" href="/group-world" onclick="location.href=\'/group-world\'+location.search;return false">🌍 عالم المجموعات</a>\n  <a class="btn btn-s btn-sm" style="margin-top:10px;text-decoration:none" href="/dev-diag" onclick="location.href=\'/dev-diag\'+location.search;return false">🩺 تشخيص الرد</a>';
     res.end(HTML_PAGE.replace('<div class="hdr">', `<div class="hdr">\n  ${navigation}`));
   });
 

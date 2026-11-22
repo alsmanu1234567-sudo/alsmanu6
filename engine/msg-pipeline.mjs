@@ -1,4 +1,9 @@
-import { getMessageCutoff, isMessageAfterCutoff, guardMessageSocket, noteIncoming, getProcessingDiagnostics } from "./message-cutoff.mjs";
+import { getMessageCutoff, isMessageAfterCutoff, guardMessageSocket, noteIncoming, getProcessingDiagnostics, isMessageProcessingPaused } from "./message-cutoff.mjs";
+
+// خطّاف تتبّع اختياري للوحة التشخيص (لا يستهلك شيئاً إن لم يُضبط).
+let _trace = null;
+export function setTraceHook(fn) { _trace = typeof fn === "function" ? fn : null; }
+const _preview = (t) => String(t || "").replace(/\s+/g, " ").slice(0, 90);
 /**
  * engine/msg-pipeline.mjs — v2
  * ─────────────────────────────────────────────────────────────────
@@ -199,6 +204,7 @@ export function teardown(userId) {
 let _handlerErrors = 0, _lastHandlerLog = 0;
 function _logHandlerError(userId, stage, err) {
   _handlerErrors++;
+  if (_trace) _trace({ userId, action: "error", stage, message: String(err?.message || err).slice(0, 200) });
   const now = Date.now();
   if (now - _lastHandlerLog < 15000) return;
   _lastHandlerLog = now;
@@ -212,7 +218,11 @@ export function getProcessingErrors() { return _handlerErrors; }
 function _routeMessage(sock, userId, msg, type, isNewsletter, applyForward, mainHandler) {
   const jid = msg.key?.remoteJid || "";
   noteIncoming(userId);
-  if (!jid || !isMessageAfterCutoff(userId, msg)) return;
+  if (!jid || !isMessageAfterCutoff(userId, msg)) {
+    if (_trace) _trace({ userId, jid, fromMe: !!msg.key?.fromMe, type, action: isMessageProcessingPaused(userId) ? "dropped-paused" : "dropped-cutoff" });
+    return;
+  }
+  if (_trace) _trace({ userId, jid, fromMe: !!msg.key?.fromMe, type, action: "accepted" });
 
   const us = _uStat(userId);
 

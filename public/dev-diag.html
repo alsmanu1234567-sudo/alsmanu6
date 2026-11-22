@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>تشخيص الرد — لوحة المطور</title>
+<style>
+:root{--bg:#0b0708;--panel:#150e10;--panel2:#1d1315;--line:#3a2329;--red:#e2374a;--red2:#ff5d6c;--text:#f3e6e8;--muted:#b3989d;--ok:#3ecf8e;--warn:#f5b942;--bad:#ff4d5e}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#2a0f14 0,var(--bg) 60%);color:var(--text);font:15px/1.6 system-ui,"Segoe UI",Tahoma,sans-serif;padding:18px 16px 60px}
+.wrap{max-width:1180px;margin:auto}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:22px;margin:0;display:flex;align-items:center;gap:10px}
+h1 span.dot{width:11px;height:11px;border-radius:50%;background:var(--red);box-shadow:0 0 14px var(--red)}
+.sub{color:var(--muted);font-size:12.5px}
+.pill{border:1px solid var(--line);background:#1a1013;color:var(--muted);border-radius:999px;padding:6px 12px;font-size:12px;display:inline-flex;gap:7px;align-items:center}
+.pill b{color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px}
+.card{background:linear-gradient(160deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:16px;padding:15px 16px;box-shadow:0 18px 40px #0006}
+.card h2{font-size:12px;letter-spacing:1.4px;color:var(--red2);margin:0 0 10px;text-transform:uppercase}
+.kv{display:flex;justify-content:space-between;gap:10px;font-size:13.5px;padding:5px 0;border-bottom:1px dashed #331f24}
+.kv:last-child{border:0}
+.kv span{color:var(--muted)}
+.big{font-size:30px;font-weight:800;letter-spacing:-.5px;line-height:1.1}
+meter{width:100%}
+.state{display:inline-flex;align-items:center;gap:8px;font-weight:700}
+.s-open{color:var(--ok)}.s-bad{color:var(--bad)}.s-warn{color:var(--warn)}
+section{margin-top:20px}
+section > h3{font-size:15px;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+section > h3 em{color:var(--muted);font-style:normal;font-size:12px;font-weight:400}
+.tools{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+button{font:inherit;cursor:pointer;border-radius:12px;border:1px solid var(--line);background:#22151a;color:var(--text);padding:11px 13px;text-align:right;transition:.15s;display:flex;gap:10px;align-items:center}
+button:hover{background:#2c1a20;border-color:#5c3038;transform:translateY(-1px)}
+button.primary{background:linear-gradient(150deg,#a81d2c,#7d1220);border-color:#b7273a}
+button.primary:hover{background:linear-gradient(150deg,#c02134,#8d1524)}
+button.ghost{background:transparent}
+button:disabled{opacity:.5;cursor:not-allowed;transform:none}
+button i{font-style:normal;font-size:17px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{padding:7px 8px;border-bottom:1px solid #2b1a1f;text-align:right;vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:11px;letter-spacing:.6px}
+code{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:#ffd9de;direction:ltr;display:inline-block}
+.scroll{max-height:290px;overflow:auto;border:1px solid var(--line);border-radius:12px;background:#100b0d}
+.tag{border-radius:6px;padding:1px 7px;font-size:11px;border:1px solid}
+.t-ok{color:#9df3cd;border-color:#1f6b4c;background:#0e2a20}
+.t-drop{color:#ffd0d5;border-color:#7a2a35;background:#2b1116}
+.t-err{color:#ffd7a1;border-color:#7a5520;background:#2b1f0e}
+input,textarea{font:inherit;width:100%;background:#120c0e;border:1px solid var(--line);color:var(--text);border-radius:10px;padding:10px 12px;margin:4px 0 8px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.msg{margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:#170f12;font-size:13px;min-height:20px}
+.msg.ok{border-color:#1f6b4c;background:#0e2a20}
+.msg.bad{border-color:#7a2a35;background:#2b1116}
+.checks li{list-style:none;padding:7px 0;border-bottom:1px dashed #331f24;font-size:13px}
+footer{margin-top:26px;color:#7d646a;font-size:11.5px;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div>
+    <h1><span class="dot"></span> تشخيص الرد</h1>
+    <div class="sub">صفحة المطور — تعرض حالة خط معالجة واتساب وتصلح الأعطال الشائعة</div>
+  </div>
+  <div class="row">
+    <span class="pill" id="autoPill">تحديث تلقائي: <b id="autoState">مفعّل</b></span>
+    <button class="ghost" id="toggleAuto" style="padding:8px 12px"><i>⏸</i> إيقاف</button>
+    <button class="ghost" id="copyReport" style="padding:8px 12px"><i>⧉</i> نسخ تقرير</button>
+  </div>
+</header>
+
+<div class="grid">
+  <div class="card">
+    <h2>حالة الاتصال</h2>
+    <div class="big state" id="socketState">—</div>
+    <div class="kv"><span>الرقم المتصل</span><b id="me">—</b></div>
+    <div class="kv"><span>الجلسات المسجّلة</span><b id="sessionCount">—</b></div>
+    <div class="kv"><span>آخر حدث اتصال</span><b id="lastConn">—</b></div>
+  </div>
+  <div class="card">
+    <h2>معالجة الرسائل</h2>
+    <div class="big state" id="procState">—</div>
+    <div class="kv"><span>آخر رسالة واردة</span><b id="lastIncoming">—</b></div>
+    <div class="kv"><span>استُقبلت</span><b id="incomingCount">—</b></div>
+    <div class="kv"><span>متجاهَلة (توقف/قطع)</span><b id="droppedCount">—</b></div>
+  </div>
+  <div class="card">
+    <h2>الطابور والإحصاءات</h2>
+    <div class="kv"><span>notify منتظرة</span><b id="qNotify">—</b></div>
+    <div class="kv"><span>أوامر تعمل الآن</span><b id="qCommands">—</b></div>
+    <div class="kv"><span>مُهمَلة بالطابور</span><b id="qDropped">—</b></div>
+    <div class="kv"><span>أخطاء المعالجات</span><b id="qErrors">—</b></div>
+  </div>
+  <div class="card">
+    <h2>البوت</h2>
+    <div class="kv"><span>العملية</span><b id="pid">—</b></div>
+    <div class="kv"><span>يعمل منذ</span><b id="uptime">—</b></div>
+    <div class="kv"><span>الذاكرة</span><b id="rss">—</b></div>
+    <div class="kv"><span>Node</span><b id="nodev">—</b></div>
+  </div>
+</div>
+
+<section>
+  <h3>🛠 أدوات الإصلاح <em>كل أداة تنفّذ فوراً على السيرفر</em></h3>
+  <div class="tools" id="tools">
+    <button class="primary" data-act="reconnect"><i>🔄</i><span>إعادة توصيل واتساب<br><small style="color:#f4c8ce">يُنظّف الخانات الميتة ويعيد الربط</small></span></button>
+    <button data-act="resume"><i>▶️</i><span>تشغيل المعالجة<br><small style="color:var(--muted)">إن كانت متوقفة</small></span></button>
+    <button data-act="pause"><i>⏸</i><span>إيقاف المعالجة مؤقتاً<br><small style="color:var(--muted)">ينتهي عند إعادة التشغيل</small></span></button>
+    <button data-act="reset-cutoff"><i>✂️</i><span>تصفير نقطة القطع<br><small style="color:var(--muted)">تجاهل الرسائل القديمة يتوقف</small></span></button>
+    <button data-act="clear-queues"><i>🧹</i><span>إفراغ الطوابير<br><small style="color:var(--muted)">إلغاء المهام المعلّقة</small></span></button>
+    <button data-act="clear-dedup"><i>🗂</i><span>تفريغ ذاكرة التكرار<br><small style="color:var(--muted)">إن كانت الرسائل تُعدّ مكررة</small></span></button>
+    <button data-act="refresh-groups"><i>👥</i><span>اختبار قراءة المجموعات<br><small style="color:var(--muted)">يثبت أن الاتصال حيّ</small></span></button>
+    <button data-act="self-check"><i>🩺</i><span>فحص شامل<br><small style="color:var(--muted)">يعرض سبب المشكلة</small></span></button>
+    <button data-act="clear-trace"><i>♻️</i><span>تفريغ سجل التشخيص</span></button>
+  </div>
+  <div class="msg" id="actionMsg">جاهز.</div>
+  <ul class="checks" id="checks" hidden></ul>
+</section>
+
+<section>
+  <h3>✉️ إرسال رسالة اختبار من الرقم المتصل</h3>
+  <div class="card">
+    <div class="row">
+      <div style="flex:1;min-width:180px"><label class="sub">الرقم الدولي بدون +</label><input id="testTo" placeholder="249123456789" inputmode="numeric"></div>
+      <div style="flex:2;min-width:220px"><label class="sub">النص</label><input id="testText" value="✅ اختبار من لوحة التشخيص"></div>
+      <button class="primary" id="sendTest" style="align-self:end"><i>➤</i> إرسال</button>
+    </div>
+    <div class="sub">إن وصلت الرسالة فالإرسال سليم والمشكلة في استقبال/توجيه الرسائل الواردة.</div>
+  </div>
+</section>
+
+<section>
+  <h3>📈 سجل الاتصال <em>آخر 40 حدثاً من واتساب</em></h3>
+  <div class="scroll"><table><thead><tr><th>الوقت</th><th>الحدث</th><th>الرمز</th><th>الجلسة</th></tr></thead><tbody id="connRows"></tbody></table></div>
+</section>
+
+<section>
+  <h3>🔎 تتبّع الرسائل الواردة <em>قرار المعالجة لكل رسالة بعد التحديث</em></h3>
+  <div class="scroll"><table><thead><tr><th>الوقت</th><th>المحادثة</th><th>النوع</th><th>القرار</th></tr></thead><tbody id="traceRows"></tbody></table></div>
+</section>
+
+<footer>تُحدَّث الصفحة تلقائياً كل 3 ثوانٍ · الرابط سرّي ويمنح تحكماً كاملاً بالبوت — لا تشاركه</footer>
+</div>
+<script>
+(()=>{
+const token=new URLSearchParams(location.search).get('token')||'';
+const $=id=>document.getElementById(id);
+const api=(path,body)=>fetch('/api/dev-diag/'+path,{method:body?'POST':'GET',headers:{'x-webapp-token':token,...(body?{'content-type':'application/json'}:{})},body:body?JSON.stringify(body):undefined,cache:'no-store'}).then(async r=>{const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||('HTTP '+r.status));return d});
+let live=true,timer=null,last=null;
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ago=ms=>{if(!ms)return '—';const d=Date.now()-ms;if(d<0)return 'الآن';if(d<60000)return Math.round(d/1000)+' ثانية';if(d<3600000)return Math.round(d/60000)+' دقيقة';if(d<86400000)return Math.round(d/3600000)+' ساعة';return Math.round(d/86400000)+' يوم'};
+const clock=t=>t?new Date(t).toLocaleTimeString('ar-EG',{hour12:false}):'—';
+const stateWord={open:['🟢 متصل','s-open'],connecting:['🟡 يتصل…','s-warn'],closing:['🟠 يُغلق','s-warn'],closed:['🔴 مغلق','s-bad'],none:['⚪ لا سوكت','s-bad']};
+function render(d){
+  last=d;
+  const [word,cls]=stateWord[d.socket.state]||['⚪ غير معروف','s-bad'];
+  $('socketState').textContent=word;$('socketState').className='big state '+cls;
+  $('me').textContent=d.socket.me||'—';
+  $('sessionCount').textContent=(d.sessions||[]).length;
+  const c0=(d.conn||[])[0];
+  $('lastConn').textContent=c0?`${c0.connection||'—'}${c0.statusCode?` (${c0.statusCode})`:''} · ${ago(c0.t)}`: '—';
+  $('procState').textContent=d.processing.paused?'⏸ متوقفة':'✅ تعمل';
+  $('procState').className='big state '+(d.processing.paused?'s-bad':'s-open');
+  $('lastIncoming').textContent=d.processing.lastIncomingAt?ago(d.processing.lastIncomingAt)+' مضت':'لم تُستقبل بعد';
+  $('incomingCount').textContent=d.processing.incoming;
+  $('droppedCount').textContent=`${d.processing.pausedDrops} / ${d.processing.staleDrops}`;
+  const lane=d.pipeline.lanes?.notify||{};
+  $('qNotify').textContent=`${lane.pending||0} (تعمل ${lane.running||0})`;
+  $('qCommands').textContent=d.pipeline.inflight||0;
+  $('qDropped').textContent=d.pipeline.dropped||0;
+  $('qErrors').textContent=d.pipeline.handlerErrors||0;
+  $('pid').textContent=d.bot.pid;
+  $('uptime').textContent=Math.floor(d.bot.uptimeSec/60)+' دقيقة';
+  $('rss').textContent=d.bot.rssMB+' MB';
+  $('nodev').textContent=d.bot.node;
+  $('connRows').innerHTML=(d.conn||[]).map(e=>`<tr><td>${clock(e.t)}</td><td>${esc(e.connection||'—')}</td><td><code>${esc(e.statusCode??'—')}</code></td><td><code>${esc((e.sessKey||'').slice(-14))}</code></td></tr>`).join('')||'<tr><td colspan="4" class="sub">لا توجد أحداث بعد</td></tr>';
+  $('traceRows').innerHTML=(d.trace||[]).map(e=>{const a=e.action||'—';const t=a==='accepted'?'t-ok':a==='error'?'t-err':'t-drop';return `<tr><td>${clock(e.t)}</td><td><code>${esc((e.jid||'—').slice(0,34))}</code></td><td>${e.fromMe?'من نفسي':'واردة'} ${esc(e.type||'')}</td><td><span class="tag ${t}">${esc(a)}</span>${e.stage?' '+esc(e.stage):''}${e.message?' · '+esc(e.message):''}</td></tr>`}).join('')||'<tr><td colspan="4" class="sub">لا يوجد تتبّع بعد — أرسل رسالة واتساب ثم حدّث</td></tr>';
+}
+async function refresh(){try{const d=await api('overview');render(d)}catch(e){$('actionMsg').className='msg bad';$('actionMsg').textContent='تعذر التحديث: '+e.message}}
+function loop(){clearTimeout(timer);if(live)timer=setTimeout(async()=>{await refresh();loop()},3000)}
+$('toggleAuto').onclick=()=>{live=!live;$('autoState').textContent=live?'مفعّل':'موقوف';$('toggleAuto').innerHTML=live?'<i>⏸</i> إيقاف':'<i>▶️</i> تشغيل';loop()};
+$('copyReport').onclick=async()=>{if(!last)return;const txt=JSON.stringify(last,null,2);try{await navigator.clipboard.writeText(txt);$('actionMsg').className='msg ok';$('actionMsg').textContent='تم نسخ التقرير.'}catch{$('actionMsg').textContent=txt.slice(0,400)}};
+document.querySelectorAll('[data-act]').forEach(btn=>btn.onclick=async()=>{
+  const act=btn.dataset.act;
+  if(['pause','clear-queues','reconnect'].includes(act)&&!confirm('تنفيذ: '+btn.textContent.trim().split('\n')[0]+'؟'))return;
+  document.querySelectorAll('[data-act]').forEach(b=>b.disabled=true);
+  $('actionMsg').className='msg';$('actionMsg').textContent='جارٍ التنفيذ…';
+  try{
+    const r=await api('action',{name:act});
+    $('actionMsg').className='msg ok';$('actionMsg').textContent=r.message||'تم.';
+    if(r.checks){$('checks').hidden=false;
+      $('checks').innerHTML=r.checks.map(c=>`<li>${c.ok?'<span class="tag t-ok">سليم</span>':'<span class="tag t-drop">فاشل</span>'} ${esc(c.name)} — <code>${esc(c.detail)}</code></li>`).join('');
+    } else $('checks').hidden=true;
+    await refresh();
+  }catch(e){$('actionMsg').className='msg bad';$('actionMsg').textContent=e.message}
+  finally{document.querySelectorAll('[data-act]').forEach(b=>b.disabled=false)}
+});
+$('sendTest').onclick=async()=>{
+  const to=$('testTo').value.replace(/\D/g,''),text=$('testText').value;
+  if(!to)return $('actionMsg').textContent='أدخل الرقم أولاً';
+  $('sendTest').disabled=true;$('actionMsg').className='msg';$('actionMsg').textContent='جارٍ الإرسال…';
+  try{const r=await api('action',{name:'send-test',payload:{to,text}});$('actionMsg').className='msg ok';$('actionMsg').textContent=r.message}
+  catch(e){$('actionMsg').className='msg bad';$('actionMsg').textContent=e.message}
+  finally{$('sendTest').disabled=false}
+};
+refresh();loop();
+})();
+</script>
+</body>
+</html>
