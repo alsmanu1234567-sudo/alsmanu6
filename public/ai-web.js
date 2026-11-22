@@ -25,6 +25,7 @@
     v.querySelectorAll('[data-num]').forEach(btn=>btn.onclick=()=>action(async()=>{const i=Number(btn.dataset.num);await api('/api/ai/number',{id:data.numbers[i].id,aiEnabled:el('en-'+i).checked,aiPrompt:val('prompt-'+i),aiTargets:val('targets-'+i),aiGroups:val('groups-'+i),scheduleFrom:val('from-'+i),scheduleTo:val('to-'+i)});toast('تم حفظ إعداد الرقم')}));
     el('ai-test-btn').onclick=()=>action(async()=>{el('ai-answer').textContent='جارٍ انتظار الرد…';try{const r=await api('/api/ai/test',{text:val('ai-test')});el('ai-answer').textContent=r.reply}catch(err){el('ai-answer').textContent=err.message}});
     el('ai-clear').onclick=()=>action(async()=>{if(!confirm('مسح ذاكرة محادثات الذكاء؟'))return;const r=await api('/api/ai/memory/clear',{});toast('تم مسح '+r.count+' محادثة')});
+    if(window.AiCardUI)window.AiCardUI.mount(v);
     watch(v,q);
   }
   async function watch(v,q){clearTimeout(poll);try{const s=await api('/api/ai/scan-status');const p=el('ai-progress');if(!p)return;if(s.state==='running'){p.textContent=`جارٍ الفحص: ${s.done} / ${s.total||'…'}؛ انتظر النماذج البطيئة.`;poll=setTimeout(()=>watch(v,q),2000)}else if(s.state==='done'){if(!list?.verified){await refresh();render(v,q)}else p.textContent=`اكتمل الفحص: ${s.count} مستجيب من ${s.total}.`}else if(s.state==='error')p.textContent='فشل الفحص: '+s.error}catch{}}

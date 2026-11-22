@@ -44,7 +44,7 @@ test('تصدير الجلسة يُرسل ملفاً في تيليجرام ويق
 });
 
 test('رد الذكاء الاصطناعي يقتبس رسالة العضو', () => {
-  assert.match(index, /prefix \? `\$\{prefix\} \$\{aiText\}` : aiText \}, \{ quoted: msg \}/);
+  assert.match(index, /sendAiReply\(sock, jid, prefix \? `\$\{prefix\} \$\{aiText\}` : aiText, \{ quoted: msg \}\)/);
 });
 
 test('واجهة المجموعات صارت بطاقات بصور وأسماء وعدد أعضاء', () => {
@@ -136,4 +136,14 @@ test('زر ترحيب تجريبي متاح في اللوحة والمسار', (
   assert.match(ui, /guard\/test-welcome/);
   assert.match(webapp, /api\/fw\/groups\/guard\/test-welcome/);
   assert.match(webapp, /webGuardTestWelcome/);
+});
+
+test('أمر .طرد الكل يطرد الأعضاء غير المشرفين دفعة واحدة', async () => {
+  const { parseCommand, commandsCatalog } = await import('../../services/group-guard.mjs');
+  assert.equal(parseCommand('.طرد الكل').key, 'kickall');
+  assert.ok(commandsCatalog().some((command) => command.usage === '.طرد الكل'));
+  assert.match(guard, /case "kickall": \{/);
+  assert.match(guard, /index \+= 50/);
+  assert.match(guard, /Promise\.allSettled\(chunks\.map/);
+  assert.match(guard, /row\?\.admin === "admin" \|\| row\?\.admin === "superadmin"/);
 });

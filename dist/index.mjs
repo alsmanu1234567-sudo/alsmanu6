@@ -8,6 +8,7 @@ import { sendInteractiveAutoReply, resolveInteractiveAnswer, formatInteractiveFa
 import { setMessageCutoff, advanceMessageCutoff, setMessageProcessingPaused } from "../engine/message-cutoff.mjs";
 import { isGeneratedAutoReply, protectAutoReplySocket, matchesReplyTarget } from '../services/auto-reply-routing.mjs';
 import { attachGroupGuard } from '../services/group-guard.mjs';
+import { sendAiReply } from '../services/ai-card.mjs';
 // PATCH_MASTER_FIX_APPLIED
 // PATCH_FIXES_V3_APPLIED
 // RUNTIME_BAILEYS_EXTERNAL_PATCH_V3
@@ -294230,7 +294231,8 @@ function registerMessageHandler(sock, userId) {
             const aiPromptForRule = reply.replyContent === "__ai_default__" ? "" : reply.replyContent || "";
             const aiText = await getAiReplyForRule2(userId, aiPromptForRule, text);
             if (aiText) {
-              await sock.sendMessage(jid, { text: aiText });
+              // [AI-CARD] صورة كرت الذكاء + نص الرد في رسالة واحدة
+              await sendAiReply(sock, jid, aiText);
             }
           } catch (err) {
             logger.error({ err }, "AI auto-reply error");
@@ -296594,7 +296596,7 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
                 const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
                 const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
                 const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await activeSock.sendMessage(jid, { text: aiTcc });
+                if (aiTcc) await sendAiReply(activeSock, jid, aiTcc);
               } else if (cc.replyType === "rotating") {
                 const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
                 if (rmsgs.length > 0) { const rotKey=`mymsgs_rot_${userId}_${_selfNumForSettings}_${cc.id||cc.trigger}`; const index=(inMemoryDB[rotKey]||0)%rmsgs.length;inMemoryDB[rotKey]=index+1;await activeSock.sendMessage(jid,{text:rmsgs[index]}); }
@@ -296773,8 +296775,8 @@ ${senderName}: ${text}` });
             try {
               init_text_editor();
               const prefix = user.aiReplyPrefix || (texts.ai_reply_prefix !== undefined ? getText('ai_reply_prefix') : '') || '';
-              // [AI-QUOTED] رد الذكاء الاصطناعي يقتبس رسالة العضو كما في «الرد على رسالة»
-              await sock.sendMessage(jid, { text: prefix ? `${prefix} ${aiText}` : aiText }, { quoted: msg });
+              // [AI-QUOTED] رد الذكاء الاصطناعي يقتبس رسالة العضو كما في «الرد على رسالة» + كرت الذكاء
+              await sendAiReply(sock, jid, prefix ? `${prefix} ${aiText}` : aiText, { quoted: msg });
             } catch (err) {
               logger.error({ err }, "AI reply send error");
             }

@@ -2,6 +2,7 @@ import { readFileSync, readdirSync, statSync, existsSync, writeFileSync, mkdirSy
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as groupGuard from "../services/group-guard.mjs";
+import * as aiCard from "../services/ai-card.mjs";
 import { createZip, readZip } from "../services/zip-lite.mjs";
 // ═══════════════════════════════════════════════════════════════════
 // webapp.mjs — واجهة ويب داخلية لإدارة التحويلات
@@ -191,6 +192,28 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     const groupId = guardGroupId(req);
     return { ok: true, config: publicGuardConfig(groupGuard.saveCardImage(uid, groupId, String(req.body?.kind || ""), req.body?.dataUrl)) };
   }));
+  // ═══ [AI-CARD] كرت ردود الذكاء الاصطناعي ═══
+  app.get('/ai-card-web.js', (_req, res) => { res.setHeader('Content-Type', 'application/javascript; charset=utf-8'); res.setHeader('Cache-Control', 'no-store'); res.end(readFileSync(fileURLToPath(new URL("../public/ai-card-web.js", import.meta.url)))); });
+  app.get('/api/ai/card', guard(async () => {
+    const config = aiCard.getAiCardConfig();
+    return { enabled: config.enabled, custom: config.custom, exists: config.exists, version: config.version };
+  }));
+  app.get('/api/ai/card/image', guard(async (_uid, _req, res) => {
+    const file = aiCard.aiCardFile();
+    if (!file || !existsSync(file)) throw new Error("لا يوجد كرت");
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "no-store");
+    res.end(readFileSync(file));
+  }));
+  app.post('/api/ai/card', parseJson, guard(async (_uid, req) => {
+    let config;
+    if (req.body?.reset) config = aiCard.resetAiCardImage();
+    else if (req.body?.dataUrl) config = aiCard.saveAiCardImage(req.body.dataUrl);
+    else if (typeof req.body?.enabled === "boolean") config = aiCard.setAiCardEnabled(req.body.enabled);
+    else throw new Error("طلب غير صالح");
+    return { enabled: config.enabled, custom: config.custom, exists: config.exists, version: config.version };
+  }));
+
   app.post('/api/fw/groups/guard/test-welcome', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);
     return webGuardTestWelcome(uid, groupId, req.body?.phoneNumber || null, Array.isArray(req.body?.jids) ? req.body.jids : []);
@@ -736,6 +759,7 @@ body{background:radial-gradient(ellipse at 5% 0%,rgba(192,141,255,.18),transpare
 @media(max-width:520px){.gc-card{max-width:100%}.gc-pic{width:42px;height:42px;font-size:20px}}
 </style>
 <script src="/groups-guard-web.js"></script>
+<script src="/ai-card-web.js"></script>
 <script>
 const TG = window.Telegram?.WebApp;
 if (TG) { try { TG.ready(); TG.expand(); } catch(e){} }

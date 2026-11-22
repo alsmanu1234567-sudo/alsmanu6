@@ -271,6 +271,7 @@ export function escalationFor(nextCount, maxWarnings) {
 
 const COMMANDS = [
   { key: "kick", aliases: ["طرد", "كيك"], usage: ".طرد @العضو", description: "يطرد العضو فوراً مع كرت أحمر", adminOnly: true },
+  { key: "kickall", aliases: ["طرد-الكل", "طرد الكل", "كيك-الكل"], usage: ".طرد الكل", description: "يطرد كل الأعضاء (غير المشرفين) في ثانية واحدة", adminOnly: true },
   { key: "add", aliases: ["اضافه", "اضافة", "add"], usage: ".اضافة 249xxxxxxxxx", description: "يضيف رقماً برمز الدولة إلى المجموعة", adminOnly: true },
   { key: "mute", aliases: ["كتم"], usage: ".كتم", description: "يغلق الدردشة فلا يكتب إلا المشرفون", adminOnly: true },
   { key: "open", aliases: ["فتح"], usage: ".فتح", description: "يفتح الدردشة للجميع", adminOnly: true },
@@ -494,7 +495,7 @@ async function sendCodesList(sock, groupJid) {
     id: `gcmd:${command.key}`,
   });
   const sections = [
-    { title: "أوامر الأعضاء", rows: list.filter((c) => ["kick", "add", "warn", "reset"].includes(c.key)).map(toRow) },
+    { title: "أوامر الأعضاء", rows: list.filter((c) => ["kick", "kickall", "add", "warn", "reset"].includes(c.key)).map(toRow) },
     { title: "أوامر الدردشة", rows: list.filter((c) => ["mute", "open", "admin"].includes(c.key)).map(toRow) },
     { title: "الفلاتر", rows: list.filter((c) => c.key.startsWith("stickers") || c.key.startsWith("links") || c.key.startsWith("images") || c.key.startsWith("audio")).map(toRow) },
     { title: "نظام الحماية", rows: list.filter((c) => c.key.startsWith("guard") || c.key === "warnings").map(toRow) },
@@ -572,6 +573,38 @@ export async function handleCommand({ userId, sock, message, text }) {
       }
       resetWarnings(userId, groupJid, target);
       return { handled: true };
+    }
+    case "kickall": {
+      // [KICK-ALL] دفعة واحدة متوازية: كل الأعضاء غير المشرفين في أقل من ثانية
+      let meta = null;
+      try { meta = await sock.groupMetadata(groupJid); } catch { }
+      const botJid = jidOf(sock?.user?.id || sock?.user?.jid || "");
+      const botNumber = botJid.split("@")[0].split(":")[0];
+      const rows = Array.isArray(meta?.participants) ? meta.participants : [];
+      const targets = rows
+        .filter((row) => {
+          const jid = jidOf(row?.id || row?.jid);
+          if (!jid) return false;
+          if (row?.admin === "admin" || row?.admin === "superadmin") return false;
+          if (jid === botJid || jid.split("@")[0].split(":")[0] === botNumber) return false;
+          return true;
+        })
+        .map((row) => jidOf(row?.id || row?.jid));
+      if (!targets.length) {
+        await reply("لا يوجد أعضاء غير مشرفين لطردهم.");
+        return { handled: true };
+      }
+      const chunks = [];
+      for (let index = 0; index < targets.length; index += 50) chunks.push(targets.slice(index, index + 50));
+      const started = Date.now();
+      const results = await Promise.allSettled(chunks.map((chunk) => sock.groupParticipantsUpdate(groupJid, chunk, "remove")));
+      const failed = results.filter((item) => item.status === "rejected").length;
+      const elapsed = ((Date.now() - started) / 1000).toFixed(2);
+      await sendCard(sock, groupJid, cfg.cards.warn3, `🚫 *تم طرد الأعضاء*
+عدد المطرودين: *${targets.length}*
+المدة: ${elapsed} ثانية${failed ? `
+دفعات فشلت: ${failed}` : ""}`, []);
+      return { handled: true, kicked: targets.length, failed, elapsed };
     }
     case "add": {
       const number = String(rest || "").replace(/\D/g, "");

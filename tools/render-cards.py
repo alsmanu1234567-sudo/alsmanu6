@@ -115,6 +115,8 @@ def make_event(accent, accent2, title, subtitle, out_name, icon):
     print("saved", out_name)
 
 
+PURPLE = (139, 92, 246)
+VIOLET = (76, 29, 149)
 YELLOW = (255, 193, 7)
 AMBER = (255, 140, 0)
 RED = (229, 57, 53)
@@ -124,6 +126,33 @@ TEAL = (6, 148, 162)
 SLATE = (96, 125, 139)
 BLUE = (30, 90, 160)
 
+def make_ai_card(out_name):
+    w, h = 960, 420
+    img = vertical_gradient((w, h), (18, 14, 32), (34, 22, 58)).convert("RGB")
+    img = Image.blend(img, glow((w, h), VIOLET, (210, 210), 430), 0.6)
+    img = Image.blend(img, glow((w, h), (0, 0, 0), (w - 90, 40), 300), 0.3)
+    img = img.convert("RGBA")
+    img.alpha_composite(stripes((w, h), PURPLE + (10,)))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([14, 14, w - 14, h - 14], radius=28, outline=PURPLE + (150,), width=3)
+    # رأس روبوت
+    cx, cy = 168, 210
+    d.rounded_rectangle([cx - 84, cy - 66, cx + 84, cy + 70], radius=34, fill=PURPLE + (255,))
+    d.rounded_rectangle([cx - 52, cy - 34, cx + 52, cy + 34], radius=20, fill=(20, 16, 36))
+    d.ellipse([cx - 36, cy - 18, cx - 12, cy + 6], fill=PURPLE + (255,))
+    d.ellipse([cx + 12, cy - 18, cx + 36, cy + 6], fill=PURPLE + (255,))
+    d.rounded_rectangle([cx - 26, cy + 40, cx + 26, cy + 54], radius=7, fill=(20, 16, 36))
+    d.line([(cx, cy - 66), (cx, cy - 96)], fill=PURPLE + (255,), width=7)
+    d.ellipse([cx - 12, cy - 112, cx + 12, cy - 88], fill=PURPLE + (255,))
+    rtl_text(d, (w - 60, 150), "رد الذكاء الاصطناعي", font(FONT_BLACK, 62), (255, 255, 255), "ra")
+    d.rounded_rectangle([w - 560, 232, w - 60, 238], radius=3, fill=PURPLE + (255,))
+    rtl_text(d, (w - 60, 268), "إجابة مولّدة تلقائياً — قد تحتاج مراجعة", fit_font(FONT_BOLD, "إجابة مولّدة تلقائياً — قد تحتاج مراجعة", 500, 30), (222, 214, 245), "ra")
+    os.makedirs(OUT, exist_ok=True)
+    img.convert("RGB").save(os.path.join(OUT, out_name), quality=95)
+    print("saved", out_name)
+
+
+make_ai_card("ai.png")
 make_warning(1, YELLOW, AMBER, "تحذير", "هذا تحذير رقم ١ — تكرار المخالفة يعرّضك للطرد", "١", "warn-1.png")
 make_warning(2, YELLOW, AMBER, "تحذير", "هذا تحذير رقم ٢ — التحذير القادم يعني الطرد فوراً", "٢", "warn-2.png")
 make_warning(3, RED, CRIMSON, "إنذار أخير", "المخالفة الثالثة — سيتم طردك من المجموعة", "٣", "warn-3.png")
