@@ -137,7 +137,28 @@ if (typeof _wdTimer.unref === "function") _wdTimer.unref();
  * يُسجّل messages.upsert على السوكت ويوجّه الرسائل عبر الـ lanes.
  */
 export function setupMsgPipeline(sock, userId, applyForward, mainHandler, hooks = {}) {
-  const { heartbeat = () => {}, resetRetries = () => {} } = hooks;
+  const { heartbeat = () => {}, resetRetries = () => {}, onSocketSilent = () => {} } = hooks;
+
+  // [WA-SOCKET-WATCHDOG] كانت السوكت تموت بصمت: لا حدث close ولا إعادة اتصال،
+  // فيبقى البوت «شغّالاً» على تيليجرام ولا يستقبل أي رسالة واتساب إلى الأبد.
+  // نراقب readyState فعلياً ونطلب إعادة الاتصال بعد ثلاث فحوصات متتالية.
+  let _silentChecks = 0, _deadReported = false;
+  const _sockWatch = setInterval(() => {
+    const ws = sock.ws;
+    if (!ws) return; // لم تُفتح بعد — close handler سيتولى الفشل
+    const state = typeof ws.readyState === "number" ? ws.readyState : 1;
+    if (state === 1) { _silentChecks = 0; _deadReported = false; return; }
+    if (state === 0) return; // CONNECTING
+    _silentChecks++;
+    if (_silentChecks >= 3 && !_deadReported) {
+      _deadReported = true;
+      process.stderr.write(`[WA-WATCHDOG] سوكت واتساب غير متصل (readyState=${state}) دون حدث close — نطلب إعادة الاتصال للمستخدم ${String(userId).slice(0, 8)}…\n`);
+      try { onSocketSilent(); } catch { }
+    }
+  }, Number(process.env.WA_WATCHDOG_MS) || 20000);
+  if (typeof _sockWatch.unref === "function") _sockWatch.unref();
+  const _stopWatch = () => clearInterval(_sockWatch);
+  sock.ev.on("connection.update", (u) => { if (u?.connection === "close") _stopWatch(); });
 
   sock.ev.on("messages.upsert", ({ messages, type }) => {
     _stats.received++;

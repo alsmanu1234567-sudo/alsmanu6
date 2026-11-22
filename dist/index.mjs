@@ -293030,6 +293030,7 @@ async function _connectQr(sessKey, chatId, userId) {
     sock.ev.on("creds.update", saveCreds);
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
+      try { logger.info({ userId, sessKey, connection: connection || null, statusCode: lastDisconnect?.error?.output?.statusCode ?? null, hasQr: !!qr }, "[WA] connection update"); } catch { }
       const cur = sessions.get(sessKey);
       if (!cur || cur.cancelled) {
         sock.ws?.close?.();
@@ -293046,7 +293047,7 @@ async function _connectQr(sessKey, chatId, userId) {
         await _handleConnected(sock, userId, chatId, cur.qrMsgId, !!cur.isAutoRestore, sessKey);
         return;
       }
-      if (connection === "close") {
+      if (connection === "close") { try {
         const { DisconnectReason: DR } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         workerManager.setWhatsAppConnected(userId, false);
@@ -293093,6 +293094,7 @@ async function _connectQr(sessKey, chatId, userId) {
           sessions.delete(sessKey);
           workerManager.setWorkerStatus(userId, "stopped");
         }
+      } catch (_closeErr) { logger.error({ err: _closeErr?.message, userId, sessKey }, "[WA] فشل معالج إغلاق الاتصال"); try { setTimeout(() => _connectQr(sessKey, chatId, userId), 5000); } catch { } }
       }
     });
   } catch (err) {
@@ -293636,7 +293638,16 @@ async function reconnectSession(userId, chatId) {
   }
   if (botRef && chatId) await botRef.sendMessage(chatId, `\u{1F504} \u062C\u0627\u0631\u064A \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644 \u0628${sessKeys.length > 1 ? sessKeys.length + " \u0623\u0631\u0642\u0627\u0645" : "\u0648\u0627\u062A\u0633\u0627\u0628"}...`).catch(() => {});
   for (const sessKey of sessKeys) {
-    if (sessions.has(sessKey)) continue;
+    // [RECONNECT-DEAD-SOCK] الخانة القديمة كانت تمنع إعادة الاتصال نهائياً:
+    // زر «إعادة الاتصال» لا يفعل شيئاً لأن المفتاح ما زال مسجلاً بسوكت ميت.
+    if (sessions.has(sessKey)) {
+      const _ex = sessions.get(sessKey);
+      const _st = _ex?.sock?.ws?.readyState;
+      if (!_ex?.cancelled && (_st === 1 || _st === 0)) continue;
+      try { _ex?.sock?.ws?.terminate?.(); } catch { }
+      sessions.delete(sessKey);
+      logger.warn({ userId: uid, sessKey, readyState: _st ?? null }, "[WA] خانة جلسة ميتة — سيُعاد توصيلها");
+    }
     const session = {
       state: "reconnecting",
       chatId,
@@ -293858,6 +293869,22 @@ function registerMessageHandler(sock, userId) {
         resetRetries: () => {
           const _curS = sessions.get(userId);
           if (_curS && _curS.retries > 0) { _curS.retries = 0; sessions.set(userId, _curS); }
+        },
+        // [WA-SOCKET-WATCHDOG] سوكت ميت بلا حدث close: أغلقه وأعد الاتصال من الجلسة المحفوظة
+        onSocketSilent: () => {
+          try { logger.warn({ userId }, "[WA-WATCHDOG] إعادة اتصال قسرية لسوكت واتساب صامت"); } catch { }
+          try { sock.ws?.terminate?.(); } catch { }
+          try { sock.ws?.close?.(); } catch { }
+          // احذف خانات الجلسات الميتة المرتبطة بهذا السوكت حتى يُعاد بناؤها فعلاً
+          try {
+            for (const [k, v] of [...sessions.entries()]) {
+              if (v && v.sock === sock) sessions.delete(k);
+            }
+            _registeredHandlerSocks.delete?.(sock);
+            inMemoryDB.sessions.delete(userId);
+            _numberSocks.delete(String(userId));
+          } catch { }
+          setTimeout(() => { try { reconnectSession(userId, null).catch(() => { }); } catch { } }, 2000);
         },
       }
     );
@@ -301169,14 +301196,14 @@ async function reportProcessingHealth(bot2,chatId,userId){
   try{
     const d=getProcessingDiagnostics(userId),user=getUser(userId);
     const sockets=[];
-    try{for(const [k,v] of sessions){if(k===userId||String(k).startsWith(userId+'_')||String(k).startsWith(userId+'+'))sockets.push(k)}}catch{}
+    try{for(const [k,v] of sessions){if(k===userId||String(k).startsWith(userId+'_')||String(k).startsWith(userId+'+')){const rs=v?.sock?.ws?.readyState;sockets.push(k+(rs===1?' 🟢':rs===0?' 🟡 اتصال جارٍ':rs===undefined?' ⚪ لا سوكت':' 🔴 منقطع'))}}}catch{}
     const nums=(user.whatsappNumbers||[]).map(n=>n.number+' '+(n.status==='active'?'✅':'⚠️'));
     const ago=ms=>ms>0?Math.round(ms/1000)+' ثانية':'—';
     let pipeline={};try{pipeline=(await import('../engine/msg-pipeline.mjs')).getPipelineStats()}catch{}
     const lines=[
       '🩺 *تشخيص معالجة الرسائل*',
       '• معالجة الرسائل: '+(d.paused?'⏸ *متوقفة* — لن يُرد على أي رسالة حتى تشغيلها من زر الاتصال':'✅ تعمل'),
-      '• جلسات واتساب النشطة: '+sockets.length+(nums.length?' ('+nums.join(' · ')+')':''),
+      '• جلسات واتساب: '+(sockets.length?sockets.join(' · '):'لا توجد')+(nums.length?'\n• الأرقام: '+nums.join(' · '):''),
       '• آخر رسالة واردة: '+(d.lastIncomingAt?ago(Date.now()-d.lastIncomingAt)+' مضت':'لم تُستقبل أي رسالة منذ التشغيل'),
       '• رسائل مُستقبَلة: '+d.incoming,
       '• متجاهَلة بسبب التوقف: '+d.pausedDrops+' · بسبب القَطع: '+d.staleDrops,
@@ -301184,7 +301211,8 @@ async function reportProcessingHealth(bot2,chatId,userId){
       '• الطابور: '+(pipeline.notify!==undefined?`notify ${pipeline.notify||0} · أوامر ${pipeline.commands||0} · مُهمَل ${pipeline.dropped||0}`:'غير متاح'),
       '• أخطاء معالجات: '+(pipeline.handlerErrors||0),
     ];
-    if(sockets.length===0)lines.push('\n⚠️ لا توجد جلسة واتساب متصلة: البوت لن يستقبل رسائل. أعد الربط من لوحة الاتصال.');
+    if(sockets.length===0)lines.push('\n⚠️ لا توجد جلسة واتساب في الذاكرة: البوت لن يستقبل رسائل. اضغط 🔄 إعادة الاتصال أو أعد الربط.');
+    else if(/🔴|⚪/.test(sockets.join(' ')))lines.push('\n⚠️ السوكت غير متصل فعلياً: اضغط 🔄 إعادة الاتصال (أو انتظر المشرف التلقائي).');
     else if(d.paused)lines.push('\n🔧 الحل: لوحة الاتصال ← ▶️ تشغيل معالجة الرسائل.');
     else if(d.incoming===0)lines.push('\n⚠️ لم تُستقبل أي رسالة بعد التشغيل: تحقق من اتصال الرقم ومن أن الرسائل تصل للرقم الصحيح.');
     else if(d.staleDrops>0&&d.pausedDrops===0)lines.push('\n🔧 تُتجاهل الرسائل لأن وقتها أقدم من نقطة القطع أو من وقت تشغيل البوت؛ اضغط 🧹 تنظيف الرسائل المنتظرة ثم أرسل رسالة جديدة.');
