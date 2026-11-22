@@ -25,6 +25,8 @@ const DEFAULTS = {
   wordGuard: false,
   words: [],
   stickerGuard: false,
+  imageGuard: false,
+  audioGuard: false,
   stickerWarnEvery: 5,
   maxWarnings: 3,
   kickDelaySec: 30,
@@ -106,7 +108,7 @@ export function updateGroupConfig(userId, groupJid, patch = {}) {
       next[key] = { ...(current[key] || {}), ...(value || {}) };
     } else if (key === "words") {
       next.words = (Array.isArray(value) ? value : []).map((w) => String(w).trim()).filter(Boolean).slice(0, 100);
-    } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "kickOnLimit"].includes(key)) {
+    } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "kickOnLimit"].includes(key)) {
       next[key] = Boolean(value);
     } else if (["maxWarnings", "stickerWarnEvery", "kickDelaySec"].includes(key)) {
       next[key] = Math.max(1, Math.min(50, Number(value) || DEFAULTS[key]));
@@ -244,6 +246,10 @@ const COMMANDS = [
   { key: "admin", aliases: ["ادمن", "مشرف"], usage: ".ادمن @العضو", description: "يجعل العضو مشرفاً أو يزيل الإشراف إذا كان مشرفاً", adminOnly: true },
   { key: "stickers-off", aliases: ["منع-الملصقات", "منع الملصقات"], usage: ".منع الملصقات", description: "يحذف كل ملصق من غير المشرفين، وكل 5 ملصقات تحذير", adminOnly: true },
   { key: "stickers-on", aliases: ["تفعيل-الملصقات", "تفعيل الملصقات"], usage: ".تفعيل الملصقات", description: "يعيد تشغيل الملصقات ويصفّر العدّاد", adminOnly: true },
+  { key: "images-off", aliases: ["منع-الصور", "منع الصور"], usage: ".منع الصور", description: "يحذف أي صورة يرسلها غير المشرفين مع تنبيه", adminOnly: true },
+  { key: "images-on", aliases: ["تفعيل-الصور", "تفعيل الصور"], usage: ".تفعيل الصور", description: "يسمح بالصور من جديد", adminOnly: true },
+  { key: "audio-off", aliases: ["منع-الصوت", "منع الصوت", "منع-الفويس", "منع الفويس"], usage: ".منع الصوت", description: "يحذف الرسائل الصوتية والفويس من غير المشرفين", adminOnly: true },
+  { key: "audio-on", aliases: ["تفعيل-الصوت", "تفعيل الصوت", "تفعيل-الفويس", "تفعيل الفويس"], usage: ".تفعيل الصوت", description: "يسمح بالرسائل الصوتية من جديد", adminOnly: true },
   { key: "links-off", aliases: ["منع-الروابط", "منع الروابط"], usage: ".منع الروابط", description: "يحذف أي رابط ويرسل تحذيراً تصاعدياً", adminOnly: true },
   { key: "links-on", aliases: ["تفعيل-الروابط", "تفعيل الروابط"], usage: ".تفعيل الروابط", description: "يوقف حذف الروابط", adminOnly: true },
   { key: "reset", aliases: ["ترك"], usage: ".ترك @العضو  أو  .ترك الكل", description: "يصفر مخالفات عضو واحد أو الجميع", adminOnly: true },
@@ -277,6 +283,20 @@ export function parseCommand(text) {
 }
 
 /* ─────────────── منطق التنفيذ ─────────────── */
+
+function unwrapMedia(message) {
+  let current = message || {};
+  for (let depth = 0; depth < 6; depth += 1) {
+    const wrapped = current.ephemeralMessage?.message
+      || current.viewOnceMessage?.message
+      || current.viewOnceMessageV2?.message
+      || current.viewOnceMessageV2Extension?.message
+      || current.documentWithCaptionMessage?.message;
+    if (!wrapped || wrapped === current) break;
+    current = wrapped;
+  }
+  return current;
+}
 
 function jidOf(input) {
   const value = String(input || "").trim();
@@ -387,6 +407,22 @@ export async function handleModeration({ userId, sock, message, cfg }) {
   const msg = message.message || {};
   const text = msg.conversation || msg.extendedTextMessage?.text || msg.imageMessage?.caption || msg.videoMessage?.caption || "";
   const isSticker = Boolean(msg.stickerMessage);
+  const media = unwrapMedia(msg);
+  const isImage = Boolean(media.imageMessage);
+  const isAudio = Boolean(media.audioMessage);
+  const memberTag = `@${memberJid.split("@")[0].split(":")[0]}`;
+
+  if (cfg.imageGuard && isImage) {
+    await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+    await sock.sendMessage(groupJid, { text: `🖼️ الصور ممنوعة في هذه المجموعة ${memberTag} — حُذفت الصورة لحماية القروب.` }, { mentions: [memberJid] }).catch(() => { });
+    return { handled: true, action: "image-deleted" };
+  }
+
+  if (cfg.audioGuard && isAudio) {
+    await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+    await sock.sendMessage(groupJid, { text: `🎤 الرسائل الصوتية ممنوعة في هذه المجموعة ${memberTag} — حُذف المقطع الصوتي.` }, { mentions: [memberJid] }).catch(() => { });
+    return { handled: true, action: "audio-deleted" };
+  }
 
   if (cfg.stickerGuard && isSticker) {
     const count = bumpStickers(userId, groupJid, memberJid);
@@ -427,7 +463,7 @@ async function sendCodesList(sock, groupJid) {
   const sections = [
     { title: "أوامر الأعضاء", rows: list.filter((c) => ["kick", "add", "warn", "reset"].includes(c.key)).map(toRow) },
     { title: "أوامر الدردشة", rows: list.filter((c) => ["mute", "open", "admin"].includes(c.key)).map(toRow) },
-    { title: "الفلاتر", rows: list.filter((c) => c.key.startsWith("stickers") || c.key.startsWith("links")).map(toRow) },
+    { title: "الفلاتر", rows: list.filter((c) => c.key.startsWith("stickers") || c.key.startsWith("links") || c.key.startsWith("images") || c.key.startsWith("audio")).map(toRow) },
     { title: "نظام الحماية", rows: list.filter((c) => c.key.startsWith("guard") || c.key === "warnings").map(toRow) },
   ].filter((section) => section.rows.length);
   try {
@@ -543,6 +579,20 @@ export async function handleCommand({ userId, sock, message, text }) {
       updateGroupConfig(userId, groupJid, on ? { stickerGuard: true, enabled: true } : { stickerGuard: false });
       if (!on) resetStickerCounters(userId, groupJid);
       await reply(on ? "🚫 تم منع الملصقات. كل 5 ملصقات = تحذير." : "✅ تم تفعيل الملصقات وبدأ العدّاد من جديد.");
+      return { handled: true };
+    }
+    case "images-off":
+    case "images-on": {
+      const on = parsed.key === "images-off";
+      updateGroupConfig(userId, groupJid, on ? { imageGuard: true, enabled: true } : { imageGuard: false });
+      await reply(on ? "🖼️ تم منع الصور: أي صورة من غير المشرفين تُحذف." : "✅ تم السماح بالصور.");
+      return { handled: true };
+    }
+    case "audio-off":
+    case "audio-on": {
+      const on = parsed.key === "audio-off";
+      updateGroupConfig(userId, groupJid, on ? { audioGuard: true, enabled: true } : { audioGuard: false });
+      await reply(on ? "🎤 تم منع الصوت: أي رسالة صوتية من غير المشرفين تُحذف." : "✅ تم السماح بالرسائل الصوتية.");
       return { handled: true };
     }
     case "links-off":

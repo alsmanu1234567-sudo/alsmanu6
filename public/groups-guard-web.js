@@ -184,6 +184,8 @@
             ${toggleRow("linkGuard", "منع الروابط", "حذف الرابط + تحذير تصاعدي", config.linkGuard)}
             ${toggleRow("wordGuard", "الكلمات الممنوعة", "حذف الرسالة + تحذير عند وجود كلمة ممنوعة", config.wordGuard)}
             ${toggleRow("stickerGuard", "منع الملصقات", "حذف الملصقات من غير المشرفين", config.stickerGuard)}
+            ${toggleRow("imageGuard", "منع الصور", "حذف أي صورة يرسلها غير المشرفين مع تنبيه", config.imageGuard)}
+            ${toggleRow("audioGuard", "منع الصوت", "حذف الرسائل الصوتية والفويس من غير المشرفين", config.audioGuard)}
             ${toggleRow("kickOnLimit", "الطرد عند الحد", "طرد تلقائي بعد بلوغ عدد التحذيرات", config.kickOnLimit)}
           </div>
 

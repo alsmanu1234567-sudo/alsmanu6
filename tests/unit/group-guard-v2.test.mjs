@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { getGroupConfig, detectLink } from '../../services/group-guard.mjs';
+import { getGroupConfig, detectLink, parseCommand } from '../../services/group-guard.mjs';
 
 const index = readFileSync(new URL('../../dist/index.mjs', import.meta.url), 'utf8');
 const webapp = readFileSync(new URL('../../dist/webapp.mjs', import.meta.url), 'utf8');
@@ -71,4 +71,31 @@ test('بحث المجموعات يتجاهل التشكيل والتطويل و�
   assert.match(webapp, /function nrmSearch/);
   assert.match(webapp, /\\u0640/);
   assert.match(webapp, /includes\(compact\)/);
+});
+
+test('حماية حذف الصور والصوت مضافة كأنواع حماية', () => {
+  const config = getGroupConfig('000000000', '120363000000000001@g.us');
+  assert.equal(config.imageGuard, false);
+  assert.equal(config.audioGuard, false);
+  assert.match(guard, /if \(cfg\.imageGuard && isImage\)/);
+  assert.match(guard, /if \(cfg\.audioGuard && isAudio\)/);
+  assert.match(guard, /function unwrapMedia/);
+  assert.match(guard, /action: "image-deleted"/);
+  assert.match(guard, /action: "audio-deleted"/);
+});
+
+test('أوامر منع الصور والصوت تعمل وتشغّل الحماية', () => {
+  assert.equal(parseCommand('.منع الصور').key, 'images-off');
+  assert.equal(parseCommand('.تفعيل الصور').key, 'images-on');
+  assert.equal(parseCommand('.منع الصوت').key, 'audio-off');
+  assert.equal(parseCommand('.تفعيل الصوت').key, 'audio-on');
+  assert.match(guard, /imageGuard: true, enabled: true/);
+  assert.match(guard, /audioGuard: true, enabled: true/);
+});
+
+test('اللوحة تعرض المفتاحين الجديدين وتسمح بحفظهما', () => {
+  const ui = readFileSync(new URL('../../public/groups-guard-web.js', import.meta.url), 'utf8');
+  assert.match(ui, /toggleRow\("imageGuard", "منع الصور"/);
+  assert.match(ui, /toggleRow\("audioGuard", "منع الصوت"/);
+  assert.match(webapp, /"imageGuard", "audioGuard"/);
 });
