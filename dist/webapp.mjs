@@ -657,14 +657,14 @@ async function addChannel(jsonStr){
 
 // ─── التبويبات ──────────────────────────────────────────────────
 function selectTab(tab, shouldRender=true){
-  TAB = ["dashboard", "messages", "groups", "members", "channels", "replies", "ai", "mymsgs"].includes(tab) ? tab : "rules";
+  TAB = ["dashboard", "messages", "groups", "members", "channels", "replies", "ai", "mymsgs", "status"].includes(tab) ? tab : "rules";
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("act", t.dataset.tab===TAB));
   document.getElementById("fab").style.display = TAB==="rules" ? "" : "none";
   document.getElementById("srchIn").placeholder = TAB==="groups"
     ? "ابحث باسم المجموعة أو معرّفها…"
     : TAB==="channels" ? "ابحث بالاسم… أو الصق رابط قناة واتساب" : TAB==="replies" ? "ابحث عن رد أو مفتاح…" : TAB==="ai" ? "ابحث عن نموذج أو رقم…" : TAB==="mymsgs" ? "ابحث عن ميزة…" : "ابحث باسم القاعدة…";
   const title = document.querySelector(".hdr h1");
-  if (title?.firstChild) title.firstChild.nodeValue = TAB==="groups" ? "👥 إدارة المجموعات " : TAB==="replies" ? "💬 الردود التلقائية " : TAB==="ai" ? "✦ الذكاء الاصطناعي " : TAB==="mymsgs" ? "📨 رسائلي " : "📡 إدارة التحويلات ";
+  if (title?.firstChild) title.firstChild.nodeValue = TAB==="status" ? "📸 الحالات " : TAB==="groups" ? "👥 إدارة المجموعات " : TAB==="replies" ? "💬 الردود التلقائية " : TAB==="ai" ? "✦ الذكاء الاصطناعي " : TAB==="mymsgs" ? "📨 رسائلي " : "📡 إدارة التحويلات ";
   if (shouldRender) render();
 }
 

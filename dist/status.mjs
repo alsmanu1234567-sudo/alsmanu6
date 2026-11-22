@@ -74,7 +74,7 @@ ${sock ? "\u2705 \u0648\u0627\u062A\u0633\u0627\u0628 \u0645\u062A\u0635\u0644" 
   if (data === "status_send_video") {
     if (!sock) { await bot2.sendMessage(chatId, "\u274C \u0631\u0628\u0637 \u0648\u0627\u062A\u0633\u0627\u0628 \u0623\u0648\u0644\u0627\u064B"); return true; }
     setState(userId, "awaiting_status_video");
-    await bot2.sendMessage(chatId, `\u{1F3AC} *\u0625\u0631\u0633\u0627\u0644 \u062D\u0627\u0644\u0629 \u0641\u064A\u062F\u064A\u0648*\n\n\u0623\u0631\u0633\u0644 \u0627\u0644\u0641\u064A\u062F\u064A\u0648 \u0645\u0628\u0627\u0634\u0631\u0629\u064B \u0645\u0646 \u062A\u064A\u0644\u064A\u063A\u0631\u0627\u0645:\n\n\u{1F4A1} \u0627\u0644\u062D\u062F \u0627\u0644\u0623\u0642\u0635\u0649 15 \u062B\u0627\u0646\u064A\u0629 \u0644\u062D\u0627\u0644\u0627\u062A \u0648\u0627\u062A\u0633\u0627\u0628`, { parse_mode: "Markdown", reply_markup: cancelKeyboard() });
+    await bot2.sendMessage(chatId, '🎬 أرسل الفيديو بصيغة MP4، ويفضّل كملف للحفاظ على الجودة. لا يفرض البوت حداً على المدة؛ قد يرفض واتساب الفيديو أو يغيّر جودته. تيليجرام قد يقيّد حجم الملفات القابلة للتنزيل.', { reply_markup: cancelKeyboard() });
     return true;
   }
   if (data === "status_send_colored") {

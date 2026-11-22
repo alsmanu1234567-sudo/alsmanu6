@@ -296578,8 +296578,17 @@ ${senderName}: ${text}` });
       }
       await runAutoReplies(sock, msg, text, senderName);
   }
+  // Status recipients must come from this socket's synced contacts and status privacy, not chat history.
+  const rememberStatusContacts = list => {
+    if (!Array.isArray(list)) return;
+    sock.__statusContacts ||= new Set();
+    for (const c of list) if (c?.name && typeof c.id === "string" && /@(s\.whatsapp\.net|lid)$/.test(c.id)) sock.__statusContacts.add(c.id);
+  };
+  sock.ev.on("settings.update", setting => { if (setting?.setting === "statusPrivacy" && setting.value) sock.__statusPrivacy = setting.value; });
+  sock.ev.on("messaging-history.set", data => rememberStatusContacts(data?.contacts));
   // مزامنة جهات الاتصال من واتساب تلقائياً
   sock.ev.on("contacts.upsert", (cList) => {
+    rememberStatusContacts(cList);
     if (!Array.isArray(cList)) return;
     for (const c of cList) {
       if (c && c.id && c.id.endsWith("@s.whatsapp.net")) {
