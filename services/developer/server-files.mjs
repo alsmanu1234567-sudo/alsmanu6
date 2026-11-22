@@ -1,4 +1,4 @@
-import {readdir, lstat, realpath, open, unlink, mkdir, rename, link} from 'node:fs/promises';
+import {readdir, lstat, realpath, open, unlink, mkdir, rename, link, copyFile} from 'node:fs/promises';
 import {constants} from 'node:fs';
 import path from 'node:path';
 import {createHash,randomBytes} from 'node:crypto';
@@ -20,5 +20,7 @@ export function createServerFiles({home=process.cwd()}={}){
  async function remove(input){const {actual,stat}=await existing(input);permitted(actual);if(!stat.isFile())throw Error('الحذف متاح للملفات العادية فقط وليس المجلدات');await unlink(actual);return {ok:true}}
  async function createFolder(dir,name){const {actual,stat}=await existing(dir);permitted(actual);if(!stat.isDirectory())throw Error('المسار ليس مجلداً');const target=path.join(actual,basenameCheck(name));permitted(target);await mkdir(target);return {ok:true,path:target}}
  async function renameFile(input,name){const {actual,stat}=await existing(input);permitted(actual);if(!stat.isFile())throw Error('إعادة التسمية للملفات العادية فقط');const target=path.join(path.dirname(actual),basenameCheck(name));permitted(target);try{await lstat(target);throw Error('الاسم الجديد موجود بالفعل')}catch(e){if(e.code!=='ENOENT')throw e}await link(actual,target);try{await unlink(actual)}catch(e){await unlink(target).catch(()=>{});throw e}return {ok:true,path:target}}
- return {list,read,save,remove,createFolder,renameFile};
+ async function transfer(input,dir,mode){const src=await existing(input),dst=await existing(dir);permitted(src.actual);permitted(dst.actual);if(!src.stat.isFile()||!dst.stat.isDirectory()||!['copy','move'].includes(mode))throw Error('النقل والنسخ للملفات العادية فقط');const target=path.join(dst.actual,path.basename(src.actual));permitted(target);if(target===src.actual)throw Error('الملف موجود بالفعل في هذا المجلد');await copyFile(src.actual,target,constants.COPYFILE_EXCL|constants.COPYFILE_FICLONE);if(mode==='move'){try{const check=await existing(src.actual);if(check.stat.ino!==src.stat.ino||check.stat.dev!==src.stat.dev||check.stat.size!==src.stat.size||check.stat.mtimeMs!==src.stat.mtimeMs)throw Error('تغيّر الملف أثناء النقل؛ احتفظنا بالنسختين');await unlink(src.actual)}catch(e){throw e}}return {ok:true,path:target}}
+ async function download(input){const {actual,stat}=await existing(input);permitted(actual);if(!stat.isFile())throw Error('اختر ملفاً عادياً');const fd=await open(actual,constants.O_RDONLY|constants.O_NOFOLLOW);try{const current=await fd.stat();if(!current.isFile()||current.ino!==stat.ino||current.dev!==stat.dev)throw Error('تغيّر الملف؛ أعد المحاولة');return {fd,name:path.basename(actual),size:current.size}}catch(e){await fd.close();throw e}}
+ return {list,read,save,remove,createFolder,renameFile,transfer,download};
 }

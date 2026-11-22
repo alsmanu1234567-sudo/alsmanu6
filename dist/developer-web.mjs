@@ -27,7 +27,9 @@ export function createDeveloperWeb({developerId,github,ai,texts,stats,sites,admi
   app.post('/api/developer/server-file/delete',auth,guarded(async req=>serverFiles.remove(req.body?.path)));
   app.post('/api/developer/server-file/rename',auth,guarded(async req=>serverFiles.renameFile(req.body?.path,req.body?.name)));
   app.post('/api/developer/server-file/mkdir',auth,guarded(async req=>serverFiles.createFolder(req.body?.path,req.body?.name)));
-  app.post('/api/developer/download-repo',auth,guarded(async req=>downloadPublicRepo(req.body?.url)));
+  app.post('/api/developer/server-file/transfer',auth,guarded(async req=>serverFiles.transfer(req.body?.path,req.body?.directory,req.body?.mode)));
+  app.get('/api/developer/server-file/download',auth,async(req,res)=>{try{const f=await serverFiles.download(req.query?.path);res.setHeader('Content-Type','application/octet-stream');res.setHeader('Content-Disposition',"attachment; filename=download; filename*=UTF-8''"+encodeURIComponent(f.name));res.setHeader('Content-Length',f.size);const stream=f.fd.createReadStream();stream.on('error',()=>res.destroy());stream.pipe(res)}catch(e){res.status(400).json({error:String(e.message||'تعذر التنزيل').slice(0,300)})}});
+  app.post('/api/developer/download-repo',auth,guarded(async req=>{const directory=req.body?.directory;if(directory){const checked=await serverFiles.list(directory);return downloadPublicRepo(req.body?.url,{root:checked.path})}return downloadPublicRepo(req.body?.url)}));
   app.post('/api/developer/revoke',auth,guarded(async()=>({ok:true,revoked:revoke(developerId)})));
   app.post('/api/developer/text',auth,guarded(async req=>{const {key,value,reset}=req.body||{};if(!texts.list().includes(key))throw Error('النص غير معروف');if(reset)texts.reset(key);else {if(typeof value!=='string'||value.length>4000)throw Error('النص غير صالح');texts.set(key,value)}return {ok:true}}));
   app.get('/api/developer/text',auth,guarded(async req=>{const key=String(req.query.key||'');if(!texts.list().includes(key))throw Error('النص غير معروف');return {key,value:texts.get(key)}}));
