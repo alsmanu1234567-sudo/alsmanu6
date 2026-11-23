@@ -61048,8 +61048,9 @@ var require_bson = __commonJS({
       };
       static {
         this.resetState();
-        const { startupSnapshot } = globalThis?.process?.getBuiltinModule("v8") ?? {};
-        if (startupSnapshot?.isBuildingSnapshot()) {
+        // [NODE19-COMPAT] process.getBuiltinModule متاح في Node 22+ فقط — نحرسه بدون كسر الإقلاع
+        const startupSnapshot = (() => { try { return globalThis?.process?.getBuiltinModule?.("v8")?.startupSnapshot ?? null; } catch { return null; } })();
+        if (startupSnapshot?.isBuildingSnapshot?.()) {
           startupSnapshot?.addDeserializeCallback(this.resetState);
         }
       }
@@ -111876,7 +111877,8 @@ var require_tracing = __commonJS({
     "use strict";
     var dc;
     try {
-      dc = typeof process !== "undefined" && "getBuiltinModule" in process ? process.getBuiltinModule("node:diagnostics_channel") : __require("node:diagnostics_channel");
+      // [NODE19-COMPAT] استخدام آمن لدالة Node 22+ مع رجوع للاستيراد العادي
+      dc = (typeof process !== "undefined" && typeof process.getBuiltinModule === "function") ? process.getBuiltinModule("node:diagnostics_channel") : __require("node:diagnostics_channel");
     } catch {
     }
     var hasTracingChannel = !!dc && typeof dc.tracingChannel === "function";

@@ -13,6 +13,7 @@ import { loadConfig, applyDefaults } from "../core/config.mjs";
 import { ensure as ensurePackages, missingDeclaredPackages } from "../infrastructure/package-manager.mjs";
 import { ensureYtDlp, ensureFfmpegStatic } from "../infrastructure/binary-manager.mjs";
 import { spawnBot } from "../infrastructure/process-manager.mjs";
+import { ensureNodeCompatibility } from "./compat.mjs";
 import {
   getExternalDepsDir,
   describeExternalDeps,
@@ -228,6 +229,17 @@ async function main() {
     await ensureDependenciesOnce();
   }
   ensureBundleUsesInstalledBaileys();
+  // [NODE19-COMPAT] ترقيع توافق الباندل مع Node 18/19 تلقائياً قبل التشغيل
+  try {
+    const compat = ensureNodeCompatibility(BASE_DIR);
+    if (compat.changed) ok(`تم ترقيع توافق Node تلقائياً: ${compat.applied.join(", ")}`);
+    else if (compat.reason === "already-safe") ok("توافق Node سليم (لا حاجة لترقيع)");
+  } catch (error) {
+    wrn(`تعذر فحص توافق Node: ${error.message}`);
+  }
+  if (Number(String(process.versions.node).split(".")[0]) < 20) {
+    wrn(`Node ${process.versions.node} قديم نسبياً — البوت يعمل بترقيع توافق، والأفضل Node 20 أو أحدث.`);
+  }
   if (process.argv.includes("--check-only")) {
     ok("فحص bootstrap اكتمل دون تشغيل البوت");
     return;
