@@ -926,7 +926,9 @@ async function commandReply(sock, groupId, memberId, message, text, isBotOwner =
     });
   }
 
-  if (commandToken === ".قبول" && args) {
+  // [ACCEPT-REQUESTS] لا نخطف أمر قبول طلبات الانضمام من حماية المجموعات
+  const _approvalWords = new Set(["الكل", "كل", "الطلبات", "طلبات", "all", "requests"]);
+  if (commandToken === ".قبول" && args && !_approvalWords.has(String(args).trim().toLowerCase())) {
     const mentioned = message?.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
     const challengeName = argsList.find((item) => item.startsWith("THE_LEGENDARY_"));
     if (challengeName) {

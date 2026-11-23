@@ -533,6 +533,7 @@ const COMMANDS = [
   { key: "goodbye-off", aliases: ["ايقاف-المغادرة", "إيقاف المغادرة"], usage: ".إيقاف المغادرة", description: "يوقف رسالة المغادرة", adminOnly: true },
   { key: "welcome-test", aliases: ["اختبار-الترحيب", "اختبار الترحيب"], usage: ".اختبار الترحيب", description: "يرسل ترحيباً الآن للتأكد أن الترحيب يعمل", adminOnly: true },
   { key: "welcome-status", aliases: ["حالة-الترحيب", "حالة الترحيب", "الترحيب"], usage: ".حالة الترحيب", description: "يعرض حالة الترحيب والمغادرة وآخر حدث أعضاء", adminOnly: false },
+  { key: "accept", aliases: ["قبول", "قبول-الكل", "قبول الكل", "قبول-الطلبات", "قبول الطلبات", "accept"], usage: ".قبول", description: "يقبل كل طلبات الانضمام المعلّقة في المجموعة دفعة واحدة", adminOnly: true },
 ];
 
 export function commandsCatalog() {
@@ -705,11 +706,19 @@ export function mentionText(jid) {
   return `@${value.split("@")[0].split(":")[0]}`;
 }
 
+// [BARE-JID] معرّف واتساب يحمل لاحقة الجهاز (:12) — نقارن الرقم المجرد دائماً
+function bareJidOf(value) {
+  return jidOf(value).split("@")[0].split(":")[0];
+}
+
 async function isGroupAdmin(sock, groupJid, memberJid) {
   try {
     const metadata = await sock.groupMetadata(groupJid);
     const rows = Array.isArray(metadata?.participants) ? metadata.participants : [];
-    const row = rows.find((item) => jidOf(item?.id || item?.jid) === jidOf(memberJid));
+    const bare = bareJidOf(memberJid);
+    if (!bare) return false;
+    const row = rows.find((item) => bareJidOf(item?.id || item?.jid) === bare
+      || bareJidOf(item?.phoneNumber || item?.pn || item?.lid) === bare);
     return row?.admin === "admin" || row?.admin === "superadmin";
   } catch {
     return false;
@@ -720,8 +729,13 @@ async function botIsAdmin(sock, groupJid) {
   try {
     const metadata = await sock.groupMetadata(groupJid);
     const rows = Array.isArray(metadata?.participants) ? metadata.participants : [];
-    const me = jidOf(sock?.user?.id || sock?.user?.jid);
-    const row = rows.find((item) => jidOf(item?.id || item?.jid) === me || jidOf(item?.id).split("@")[0] === me.split("@")[0]);
+    const me = bareJidOf(sock?.user?.id || sock?.user?.jid);
+    const meLid = bareJidOf(sock?.user?.lid);
+    if (!me && !meLid) return false;
+    const row = rows.find((item) => {
+      const ids = [item?.id, item?.jid, item?.phoneNumber, item?.pn, item?.lid].map(bareJidOf);
+      return ids.includes(me) || (meLid && ids.includes(meLid));
+    });
     return row?.admin === "admin" || row?.admin === "superadmin";
   } catch {
     return false;
@@ -1206,6 +1220,51 @@ export async function handleCommand({ userId, sock, message, text }) {
       }
       updateGroupConfig(userId, groupJid, { whitelist: [...list, who] });
       await reply(`🤍 ${mention || "العضو"} في القائمة البيضاء — الحمايات لا تُطبَّق عليه.`, targetMentions);
+      return { handled: true };
+    }
+    // ═══ [ACCEPT-REQUESTS] قبول كل طلبات الانضمام المعلّقة ═══
+    case "accept": {
+      if (!(await botIsAdmin(sock, groupJid))) {
+        await reply("👑 لازم أكون *مشرفاً* في المجموعة حتى أقدر أقبل طلبات الانضمام.");
+        return { handled: true };
+      }
+      if (typeof sock.groupRequestParticipantsList !== "function") {
+        await reply("⚠️ نسخة واتساب الحالية لا تدعم قراءة طلبات الانضمام.");
+        return { handled: true };
+      }
+      let requests = [];
+      try {
+        requests = await sock.groupRequestParticipantsList(groupJid);
+      } catch (error) {
+        await reply(`⚠️ تعذر جلب طلبات الانضمام: ${String(error?.message || error).slice(0, 120)}`);
+        return { handled: true };
+      }
+      const jids = [...new Set((Array.isArray(requests) ? requests : [])
+        .map((row) => (typeof row === "string" ? row : row?.jid || row?.id || row?.phone_number || row?.pn))
+        .filter(Boolean))];
+      if (!jids.length) {
+        await reply("👍 لا توجد طلبات انضمام معلّقة الآن.");
+        return { handled: true };
+      }
+      let approved = 0;
+      let failed = 0;
+      for (let index = 0; index < jids.length; index += 20) {
+        const batch = jids.slice(index, index + 20);
+        try {
+          const result = await sock.groupRequestParticipantsUpdate(groupJid, batch, "approve");
+          const rows = Array.isArray(result) ? result : [];
+          if (!rows.length) { approved += batch.length; continue; }
+          for (const row of rows) {
+            if (String(row?.status || "200") === "200") approved++;
+            else failed++;
+          }
+        } catch {
+          failed += batch.length;
+        }
+      }
+      noteGuardEvent(userId, groupJid, "approved", { reason: "طلبات انضمام", text: `${approved}/${jids.length}` });
+      const extras = [failed ? `· تعذر ${failed}` : "", jids.length > approved + failed ? `· الإجمالي ${jids.length}` : ""].filter(Boolean).join(" ");
+      await reply(`✅ تم قبول *${approved}* طلب انضمام${extras ? ` ${extras}` : ""}.`);
       return { handled: true };
     }
     case "welcome-on":

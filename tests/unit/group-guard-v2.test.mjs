@@ -470,3 +470,52 @@ test('أوامر الترحيب والمغادرة الجديدة موجودة �
   assert.match(ui, /دخول اليوم/);
   assert.match(ui, /lastEventAt/);
 });
+
+test('أمر .قبول يقبل كل طلبات الانضمام المعلّقة فعلياً', async () => {
+  const guard = await import('../../services/group-guard.mjs');
+  assert.equal(guard.parseCommand('.قبول').key, 'accept');
+  assert.equal(guard.parseCommand('.قبول الكل').key, 'accept');
+  assert.ok(guard.commandsCatalog().some((c) => c.usage === '.قبول'), 'الأمر يجب أن يظهر في قائمة الأوامر');
+
+  const uid = `test-accept-${Date.now()}`;
+  const gid = '120363000000000555@g.us';
+  const pending = [
+    { jid: '249911111111@s.whatsapp.net', phone_number: '249911111111@s.whatsapp.net' },
+    { jid: '249922222222@s.whatsapp.net' },
+    { jid: '249933333333@s.whatsapp.net' },
+  ];
+  const approvedBatches = [];
+  const sent = [];
+  const sock = {
+    user: { id: '249000000000:1@s.whatsapp.net' },
+    groupMetadata: async () => ({ participants: [{ id: '249000000000@s.whatsapp.net', admin: 'admin' }] }),
+    groupRequestParticipantsList: async () => pending,
+    groupRequestParticipantsUpdate: async (jid, batch, action) => {
+      approvedBatches.push({ jid, batch, action });
+      return batch.map((member) => ({ status: '200', jid: member }));
+    },
+    sendMessage: async (jid, payload) => { sent.push(payload); return {}; },
+  };
+  const result = await guard.handleCommand({
+    userId: uid,
+    sock,
+    message: { key: { remoteJid: gid, fromMe: true, id: 'X1', participant: '249000000000@s.whatsapp.net' } },
+    text: '.قبول',
+  });
+  assert.equal(result.handled, true);
+  assert.equal(approvedBatches.length, 1);
+  assert.equal(approvedBatches[0].action, 'approve');
+  assert.deepEqual(approvedBatches[0].batch, pending.map((row) => row.jid));
+  assert.match(sent.at(-1).text, /تم قبول \*3\* طلب انضمام/);
+
+  try {
+    const fs = await import('node:fs');
+    fs.rmSync(new URL(`../../bot-data/group-guard/${uid}.json`, import.meta.url), { force: true });
+  } catch { }
+});
+
+test('أمر .قبول لا يتشابك مع تحديات عالم المجموعة', () => {
+  const world = readFileSync(new URL('../../dist/handlers/group-world-handler.mjs', import.meta.url), 'utf8');
+  assert.match(world, /\[ACCEPT-REQUESTS\]/);
+  assert.match(world, /_approvalWords\.has\(String\(args\)\.trim\(\)\.toLowerCase\(\)\)/);
+});
