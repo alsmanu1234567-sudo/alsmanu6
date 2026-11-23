@@ -40,6 +40,7 @@ import {
   previewWebGroupAutoPost,
   publishWebGroupAutoPostNow,
   webGuardTestWelcome,
+  webGuardReAdd,
 } from "./handlers/groups-handler.mjs";
 import {ludoEngine,loadLudoHtml} from "../services/ludo-game.mjs";
 import { getSharedState, joinShared, moveShared } from "../services/xo-shared.mjs";
@@ -168,7 +169,7 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.get('/groups-guard-web.js', (_req, res) => { res.setHeader('Content-Type', 'application/javascript; charset=utf-8'); res.setHeader('Cache-Control', 'no-store'); res.end(readFileSync(fileURLToPath(new URL("../public/groups-guard-web.js", import.meta.url)))); });
   app.get('/api/fw/groups/guard', guard(async (uid, req) => {
     const groupId = guardGroupId(req);
-    return { groupId, config: publicGuardConfig(groupGuard.getGroupConfig(uid, groupId)), warnings: groupGuard.listWarnings(uid, groupId), commands: groupGuard.commandsCatalog() };
+    return { groupId, config: publicGuardConfig(groupGuard.getGroupConfig(uid, groupId)), warnings: groupGuard.listWarnings(uid, groupId), kicked: groupGuard.listKicked(uid, groupId), commands: groupGuard.commandsCatalog() };
   }));
   app.get('/api/fw/groups/guard/card', guard(async (uid, req, res) => {
     const groupId = guardGroupId(req);
@@ -214,6 +215,15 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     return { enabled: config.enabled, custom: config.custom, exists: config.exists, version: config.version };
   }));
 
+  app.post('/api/fw/groups/guard/readd', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    return webGuardReAdd(uid, groupId, String(req.body?.jid || ""), req.body?.phoneNumber || null);
+  }));
+  app.post('/api/fw/groups/guard/kicked/remove', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    const left = groupGuard.removeKicked(uid, groupId, String(req.body?.jid || ""));
+    return { ok: true, kicked: left };
+  }));
   app.post('/api/fw/groups/guard/test-welcome', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);
     return webGuardTestWelcome(uid, groupId, req.body?.phoneNumber || null, Array.isArray(req.body?.jids) ? req.body.jids : []);

@@ -21,7 +21,7 @@ test('two sockets can never be opened for the same session key', () => {
 });
 
 test('silent reconnects with no chatId cannot throw a Telegram error', () => {
-  assert.match(src, /if \(botRef && chatId && \(_isFirstEver \|\| !isAutoRestore\)\)/);
+  assert.match(src, /if \(botRef && chatId && \(_isFirstEver \|\| \(!isAutoRestore && shouldSendReconnectNotice\(_effSessKey, numberFull\)\)\)\)/);
   assert.match(src, /if \(qrMsgId && botRef && chatId\)/);
 });
 

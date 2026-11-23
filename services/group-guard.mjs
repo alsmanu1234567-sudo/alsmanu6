@@ -63,7 +63,7 @@ const timers = new Map();
 const pendingKicks = new Map();
 
 function emptyState(userId) {
-  return { userId: String(userId), groups: {}, warnings: {}, stickers: {}, updatedAt: Date.now() };
+  return { userId: String(userId), groups: {}, warnings: {}, stickers: {}, kicked: {}, updatedAt: Date.now() };
 }
 
 function fileFor(userId) {
@@ -82,6 +82,7 @@ export function getState(userId) {
   state.groups = state.groups && typeof state.groups === "object" ? state.groups : {};
   state.warnings = state.warnings && typeof state.warnings === "object" ? state.warnings : {};
   state.stickers = state.stickers && typeof state.stickers === "object" ? state.stickers : {};
+  state.kicked = state.kicked && typeof state.kicked === "object" ? state.kicked : {};
   store.set(key, state);
   return state;
 }
@@ -180,6 +181,37 @@ export function resetWarnings(userId, groupJid, memberJid = null) {
   delete state.warnings[groupJid][memberJid];
   persist(userId);
   return before;
+}
+
+/** [KICKED-LOG] سجل من طُردوا بسبب مخالفات — مع السبب والعدد */
+export function listKicked(userId, groupJid) {
+  const state = getState(userId);
+  const rows = Array.isArray(state.kicked?.[groupJid]) ? state.kicked[groupJid] : [];
+  return rows
+    .filter((row) => row && row.jid)
+    .map((row) => ({ jid: row.jid, name: row.name || "", reason: row.reason || "مخالفة القوانين", count: Number(row.count) || 0, at: Number(row.at) || 0 }))
+    .sort((a, b) => b.at - a.at)
+    .slice(0, 200);
+}
+
+export function recordKicked(userId, groupJid, entry = {}) {
+  if (!entry.jid) return;
+  const state = getState(userId);
+  const bucket = (state.kicked[groupJid] = Array.isArray(state.kicked[groupJid]) ? state.kicked[groupJid] : []);
+  const index = bucket.findIndex((row) => row.jid === entry.jid);
+  const next = { jid: entry.jid, name: entry.name || "", reason: entry.reason || "مخالفة القوانين", count: Number(entry.count) || 0, at: Date.now() };
+  if (index >= 0) bucket[index] = next;
+  else bucket.unshift(next);
+  state.kicked[groupJid] = bucket.slice(0, 200);
+  persist(userId);
+}
+
+export function removeKicked(userId, groupJid, memberJid) {
+  const state = getState(userId);
+  const bucket = Array.isArray(state.kicked?.[groupJid]) ? state.kicked[groupJid] : [];
+  state.kicked[groupJid] = bucket.filter((row) => row.jid !== memberJid);
+  persist(userId);
+  return state.kicked[groupJid];
 }
 
 export function bumpStickers(userId, groupJid, memberJid) {
@@ -386,25 +418,54 @@ function phoneJidFromRow(row) {
   return "";
 }
 
-/** يعيد معرّفاً بصيغة رقم الهاتف إن أمكن، وإلا يعيد الأصل */
-export async function resolveMentionJid(sock, groupJid, memberJid) {
+/** صف العضو داخل المجموعة كما تراه واتساب (LID أو رقم) */
+async function findParticipantRow(sock, groupJid, memberJid) {
   const original = jidOf(memberJid);
-  if (!original) return "";
-  if (original.endsWith("@s.whatsapp.net")) return original;
+  if (!original) return null;
   const bare = original.split("@")[0].split(":")[0];
   const rows = await groupParticipants(sock, groupJid);
   for (const row of rows) {
     const rowId = jidOf(row?.id || row?.jid);
-    const rowAlt = jidOf(row?.phoneNumber || row?.pn);
+    const rowAlt = jidOf(row?.phoneNumber || row?.pn || row?.lid);
     const rowBare = rowId.split("@")[0].split(":")[0];
-    if (rowId === original || rowAlt === original || (bare && rowBare === bare)) {
-      const resolved = phoneJidFromRow(row);
-      if (resolved) return resolved;
-    }
+    const altBare = rowAlt.split("@")[0].split(":")[0];
+    if (rowId === original || rowAlt === original || (bare && (rowBare === bare || altBare === bare))) return row;
   }
-  // احتياط: لو المعرّف يحمل رقماً بالفعل نستخدمه
+  return null;
+}
+
+/**
+ * يعيد معرّف المنشن الذي يفهمه واتساب داخل هذه المجموعة.
+ * [MENTION-NAME] الأهم أن يطابق المعرّف صيغة العضو في المجموعة (LID أو رقم) —
+ * عندها يعرض واتساب اسم الشخص بالأخضر لا رقمه.
+ */
+export async function resolveMentionJid(sock, groupJid, memberJid) {
+  const original = jidOf(memberJid);
+  if (!original) return "";
+  const row = await findParticipantRow(sock, groupJid, original);
+  if (row) {
+    const rowId = jidOf(row?.id || row?.jid);           // الصيغة التي تراها المجموعة
+    const phone = phoneJidFromRow(row);                  // رقم الهاتف إن وُجد
+    return rowId || phone || original;
+  }
+  const bare = original.split("@")[0].split(":")[0];
   if (/^\d{8,15}$/.test(bare)) return `${bare}@s.whatsapp.net`;
   return original;
+}
+
+/** يبني نص المنشن + قائمة المعرّفات (نمرّر الصيغتين معاً لواتساب) */
+export async function mentionFor(sock, groupJid, memberJid) {
+  const primary = await resolveMentionJid(sock, groupJid, memberJid);
+  const row = await findParticipantRow(sock, groupJid, memberJid);
+  const mentions = [];
+  const push = (value) => {
+    const jid = jidOf(value);
+    if (jid && !mentions.includes(jid)) mentions.push(jid);
+  };
+  push(primary);
+  if (row) { push(row?.id); push(row?.phoneNumber || row?.pn); }
+  push(jidOf(memberJid));
+  return { jid: primary, token: mentionText(primary), mentions };
 }
 
 /** نص المنشن الظاهر في الرسالة (يجب أن يطابق الرقم) */
@@ -450,10 +511,17 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
   const level = escalationFor(count, cfg.maxWarnings);
   const max = cfg.maxWarnings;
   const kind = level === "first" ? "warn1" : level === "second" ? "warn2" : "warn3";
-  // [LID-FIX] منشن حقيقي (أخضر) بدل رقم طويل أو كلمة «عضو»
-  const targetJid = await resolveMentionJid(sock, groupJid, memberJid);
-  const mention = mentionText(targetJid);
-  const reasonText = reason === "link" ? "نشر رابط" : reason === "word" ? "كلمة ممنوعة" : reason === "sticker" ? "نشر ملصقات" : "مخالفة القوانين";
+  // [MENTION-NAME] منشن يفهمه واتساب فيعرض الاسم لا الرقم
+  const m = await mentionFor(sock, groupJid, memberJid);
+  const targetJid = m.jid;
+  const mention = m.token;
+  const reasonText = reason === "link" ? "نشر رابط"
+    : reason === "word" ? "كلمة ممنوعة"
+    : reason === "sticker" ? "نشر ملصقات ممنوعة"
+    : reason === "image" ? "نشر صورة ممنوعة"
+    : reason === "audio" ? "إرسال رسالة صوتية ممنوعة"
+    : reason === "manual" ? "تحذير يدوي من الإدارة"
+    : "مخالفة القوانين";
   let caption;
   if (level === "final") {
     caption = `🚫 *إنذار أخير* ${mention}\nالسبب: ${reasonText}\nعدد التحذيرات: ${count}/${max}\n${cfg.kickOnLimit && delayKick ? `سيتم طردك من المجموعة بعد ${cfg.kickDelaySec} ثانية بسبب تكرار المخالفة.` : "وصلت للحد الأقصى من التحذيرات."}`;
@@ -461,24 +529,37 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
     caption = `⚠️ *تحذير رقم ${count}* ${mention}\nالسبب: ${reasonText}\nلديك ${max - count} تحذير قبل الطرد.`;
   }
 
-  await sendCard(sock, groupJid, cfg.cards[kind], caption, [targetJid]);
+  await sendCard(sock, groupJid, cfg.cards[kind], caption, m.mentions);
 
   let kicked = false;
+  const pendingKey = `${groupJid}:${targetJid}`;
+  const pendingKeyRaw = `${groupJid}:${memberJid}`;
   if (level === "final" && cfg.kickOnLimit) {
-    const delay = delayKick ? Math.max(0, Number(cfg.kickDelaySec) || 0) * 1000 : 0;
+    // [KICK-NOW] لو في مخالفة جديدة أثناء عدّاد الـ30 ثانية: نلغي العدّاد ونطرده فوراً
+    const existing = pendingKicks.get(pendingKey) || pendingKicks.get(pendingKeyRaw);
+    if (existing) {
+      clearTimeout(existing);
+      pendingKicks.delete(pendingKey);
+      pendingKicks.delete(pendingKeyRaw);
+    }
     const run = async () => {
+      pendingKicks.delete(pendingKey);
+      pendingKicks.delete(pendingKeyRaw);
       try {
-        await sock.groupParticipantsUpdate(groupJid, [memberJid], "remove");
+        await sock.groupParticipantsUpdate(groupJid, [targetJid || memberJid], "remove");
         kicked = true;
+        recordKicked(userId, groupJid, { jid: targetJid || memberJid, reason: reasonText, count });
       } catch (error) {
         await sock.sendMessage(groupJid, { text: `تعذر طرد ${mention}: ${String(error?.message || error).slice(0, 120)}` }).catch(() => { });
       }
     };
+    const delay = existing ? 0 : (delayKick ? Math.max(0, Number(cfg.kickDelaySec) || 0) * 1000 : 0);
     if (delay === 0) await run();
     else {
-      const timer = setTimeout(run, delay);
+      const timer = setTimeout(() => { void run(); }, delay);
       if (typeof timer.unref === "function") timer.unref();
-      pendingKicks.set(`${groupJid}:${memberJid}`, timer);
+      pendingKicks.set(pendingKey, timer);
+      if (pendingKeyRaw !== pendingKey) pendingKicks.set(pendingKeyRaw, timer);
     }
   }
   return { count, level, kicked, max };
@@ -500,18 +581,19 @@ export async function handleModeration({ userId, sock, message, cfg }) {
   const media = unwrapMedia(msg);
   const isImage = Boolean(media.imageMessage);
   const isAudio = Boolean(media.audioMessage);
-  const resolvedMember = await resolveMentionJid(sock, groupJid, memberJid);
-  const memberTag = mentionText(resolvedMember);
+  const memberMention = await mentionFor(sock, groupJid, memberJid);
+  const resolvedMember = memberMention.jid;
+  const memberTag = memberMention.token;
 
   if (cfg.imageGuard && isImage) {
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
-    await sock.sendMessage(groupJid, { text: `🖼️ الصور ممنوعة في هذه المجموعة ${memberTag} — حُذفت الصورة لحماية القروب.` }, { mentions: [resolvedMember] }).catch(() => { });
+    await sock.sendMessage(groupJid, { text: `🖼️ الصور ممنوعة في هذه المجموعة ${memberTag} — حُذفت الصورة لحماية القروب.` }, { mentions: memberMention.mentions }).catch(() => { });
     return { handled: true, action: "image-deleted" };
   }
 
   if (cfg.audioGuard && isAudio) {
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
-    await sock.sendMessage(groupJid, { text: `🎤 الرسائل الصوتية ممنوعة في هذه المجموعة ${memberTag} — حُذف المقطع الصوتي.` }, { mentions: [resolvedMember] }).catch(() => { });
+    await sock.sendMessage(groupJid, { text: `🎤 الرسائل الصوتية ممنوعة في هذه المجموعة ${memberTag} — حُذف المقطع الصوتي.` }, { mentions: memberMention.mentions }).catch(() => { });
     return { handled: true, action: "audio-deleted" };
   }
 
@@ -523,7 +605,7 @@ export async function handleModeration({ userId, sock, message, cfg }) {
       await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "sticker", delayKick: true });
       return { handled: true, action: "sticker-warning", count };
     }
-    await sock.sendMessage(groupJid, { text: `🚫 الملصقات ممنوعة في هذه المجموعة حتى إشعار آخر — لحماية القروب من الملصقات المشبوهة.\n${memberTag} (${count}/${every})`, }, { mentions: [resolvedMember] }).catch(() => { });
+    await sock.sendMessage(groupJid, { text: `🚫 الملصقات ممنوعة في هذه المجموعة حتى إشعار آخر — لحماية القروب من الملصقات المشبوهة.\n${memberTag} (${count}/${every})`, }, { mentions: memberMention.mentions }).catch(() => { });
     return { handled: true, action: "sticker-deleted", count };
   }
 
@@ -586,8 +668,10 @@ export async function handleCommand({ userId, sock, message, text }) {
   const rest = parsed.rest;
   const rawTarget = resolveTarget(message, rest);
   // [LID-FIX] تحويل معرّف LID إلى رقم حقيقي حتى يظهر المنشن أخضر بالاسم
-  const target = rawTarget ? await resolveMentionJid(sock, groupJid, rawTarget) : "";
-  const mention = mentionText(target);
+  const targetMention = rawTarget ? await mentionFor(sock, groupJid, rawTarget) : null;
+  const target = targetMention ? targetMention.jid : "";
+  const mention = targetMention ? targetMention.token : "";
+  const targetMentions = targetMention ? targetMention.mentions : [];
   const reply = (body, mentions = []) => sock.sendMessage(groupJid, { text: body }, mentions.length ? { mentions } : undefined).catch(() => null);
 
   switch (parsed.key) {
@@ -603,7 +687,8 @@ export async function handleCommand({ userId, sock, message, text }) {
       }
       const who = await resolveMentionJid(sock, groupJid, rawWho);
       const count = warningCount(userId, groupJid, who) || warningCount(userId, groupJid, rawWho);
-      await reply(`📊 عدد مخالفات ${mentionText(who)}: *${count}/${cfg.maxWarnings}*`, [who]);
+      const whoMention = await mentionFor(sock, groupJid, who);
+      await reply(`📊 عدد مخالفات ${whoMention.token}: *${count}/${cfg.maxWarnings}*`, whoMention.mentions);
       return { handled: true };
     }
     case "reset": {
@@ -619,7 +704,7 @@ export async function handleCommand({ userId, sock, message, text }) {
         return { handled: true };
       }
       const before = resetWarnings(userId, groupJid, target);
-      await reply(`✅ تم تصفير مخالفات ${mention} (كانت ${before}). لا تكرر المخالفة.`, [target]);
+      await reply(`✅ تم تصفير مخالفات ${mention} (كانت ${before}). لا تكرر المخالفة.`, targetMentions);
       return { handled: true };
     }
     case "warn": {
@@ -629,12 +714,13 @@ export async function handleCommand({ userId, sock, message, text }) {
     }
     case "kick": {
       if (!target) { await reply("حدد العضو: `.طرد @العضو`"); return { handled: true }; }
-      await sendCard(sock, groupJid, cfg.cards.warn3, `🚫 تم طرد ${mention} من المجموعة بسبب مخالفة القوانين.`, [target]);
+      await sendCard(sock, groupJid, cfg.cards.warn3, `🚫 تم طرد ${mention} من المجموعة بسبب مخالفة القوانين.`, targetMentions);
       try {
         await sock.groupParticipantsUpdate(groupJid, [target], "remove");
       } catch (error) {
         await reply(`تعذر الطرد: ${String(error?.message || error).slice(0, 140)}`);
       }
+      recordKicked(userId, groupJid, { jid: target, reason: "طرد يدوي بأمر .طرد", count: warningCount(userId, groupJid, target) });
       resetWarnings(userId, groupJid, target);
       return { handled: true };
     }
@@ -697,7 +783,7 @@ export async function handleCommand({ userId, sock, message, text }) {
       const already = await isGroupAdmin(sock, groupJid, target);
       try {
         await sock.groupParticipantsUpdate(groupJid, [target], already ? "demote" : "promote");
-        await reply(already ? `⬇️ تم إزالة الإشراف عن ${mention}` : `⬆️ تم تعيين ${mention} مشرفاً`, [target]);
+        await reply(already ? `⬇️ تم إزالة الإشراف عن ${mention}` : `⬆️ تم تعيين ${mention} مشرفاً`, targetMentions);
       } catch (error) {
         await reply(`تعذر التغيير: ${String(error?.message || error).slice(0, 140)}`);
       }
@@ -831,17 +917,25 @@ export async function handleParticipants({ userId, sock, event, logger }) {
   for (const participant of participants) {
     const memberJid = jidOf(participant);
     if (!memberJid) continue;
-    // [LID-FIX] نحوّل المعرّف إلى رقم الهاتف حتى يظهر المنشن بالاسم لا برقم طويل
-    const resolvedJid = await resolveMentionJid(sock, groupJid, memberJid);
+    const memberMention = await mentionFor(sock, groupJid, memberJid);
+    const resolvedJid = memberMention.jid;
     if (action === "add") {
-      resetWarnings(userId, groupJid, resolvedJid);
+      // [WARN-PERSIST] المخالفات تبقى محفوظة حتى لو خرج وعاد — لا تُصفَّر تلقائياً
+      const previous = warningCount(userId, groupJid, resolvedJid) || warningCount(userId, groupJid, jidOf(memberJid));
+      if (previous > 0) {
+        await sock.sendMessage(groupJid, {
+          text: `⚠️ ${memberMention.token} لاحظنا عودتك للمجموعة ولديك *${previous}* مخالفة سابقة مسجّلة (الحد ${cfg.maxWarnings}).\nالمخالفات محفوظة ولا تُصفَّر إلا بإدارة المجموعة — تجنّب تكرار المخالفة حتى لا يتم طردك.`,
+        }, { mentions: memberMention.mentions }).catch(() => { });
+        continue; // لا نرسل رسالة ترحيب لمن لديه مخالفات سابقة
+      }
       if (!cfg.welcome?.enabled) continue;
       enqueueWelcome({ userId, sock, groupJid, memberJid: resolvedJid, logger });
     } else if (action === "remove") {
+      // [WARN-PERSIST] لا نمسح المخالفات عند الخروج
       if (!cfg.goodbye?.enabled) continue;
       const caption = renderMentions(cfg.goodbye.text || "إلى اللقاء @nem", resolvedJid);
-      if (cfg.goodbye?.card) await sendCard(sock, groupJid, cfg.cards.leave, caption, [resolvedJid]);
-      else await sock.sendMessage(groupJid, { text: caption }, { mentions: [resolvedJid] }).catch(() => { });
+      if (cfg.goodbye?.card) await sendCard(sock, groupJid, cfg.cards.leave, caption, memberMention.mentions);
+      else await sock.sendMessage(groupJid, { text: caption }, { mentions: memberMention.mentions }).catch(() => { });
     }
   }
   return { handled: true };

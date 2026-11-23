@@ -131,7 +131,7 @@
 
   const CARD_LABELS = { warn1: "تحذير 1 (أصفر)", warn2: "تحذير 2 (أصفر)", warn3: "الإنذار الأخير (أحمر)", welcome: "كرت الترحيب بالجدد", join: "كرت الانضمام", leave: "كرت المغادرة" };
 
-  let state = { groupId: "", config: null, warnings: [], commands: [] };
+  let state = { groupId: "", config: null, warnings: [], kicked: [], commands: [] };
 
   function modal(title) {
     ensureStyle();
@@ -156,7 +156,7 @@
     }
     body.innerHTML = `<div class="gg-card">جارٍ التحميل…</div>`;
     const data = await api(`/api/fw/groups/guard?groupId=${encodeURIComponent(groupId)}`);
-    state = { groupId, config: data.config, warnings: data.warnings || [], commands: data.commands || [] };
+    state = { groupId, config: data.config, warnings: data.warnings || [], kicked: data.kicked || [], commands: data.commands || [] };
     render(body);
   }
 
@@ -256,6 +256,23 @@
             <button class="gg-btn alt" id="ggDocs">📖 أوامر المجموعات</button>
           </div>
         </div>
+
+        <div class="gg-card">
+          <h3>🚪 سجل المطرودين</h3>
+          <div class="mut">${(state.kicked || []).length ? "من طُرد بسبب مخالفات، مع السبب وعدد المخالفات — تقدر ترجعه بضغطة." : "لا يوجد أحد مطروح بسبب مخالفات 👌"}</div>
+          ${(state.kicked || []).length ? `<table class="gg-tbl"><thead><tr><th>العضو</th><th>السبب</th><th>المخالفات</th><th>الوقت</th><th></th></tr></thead><tbody>
+            ${(state.kicked || []).map((row) => `<tr>
+              <td style="direction:ltr">${esc(String(row.jid).split("@")[0])}</td>
+              <td>${esc(row.reason || "مخالفة القوانين")}</td>
+              <td><span class="gg-badge red">${esc(row.count || 0)}</span></td>
+              <td>${esc(new Date(row.at || Date.now()).toLocaleString("ar-EG", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" }))}</td>
+              <td style="display:flex;gap:6px">
+                <button class="gg-btn ok" data-readd="${esc(row.jid)}">➕ إضافة</button>
+                <button class="gg-btn alt" data-forget="${esc(row.jid)}">حذف من السجل</button>
+              </td>
+            </tr>`).join("")}
+          </tbody></table>` : ""}
+        </div>
       </div>`;
     bind(body);
   }
@@ -310,6 +327,31 @@
       };
       try { state.config = (await api("/api/fw/groups/guard", { groupId: state.groupId, patch })).config; toast("✅ حُفظت الرسائل — @nem سيصبح منشن حقيقي"); }
       catch (error) { toast("❌ " + error.message); }
+    });
+
+    body.querySelectorAll("[data-readd]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          await api("/api/fw/groups/guard/readd", { groupId: state.groupId, jid: button.dataset.readd });
+          toast("✅ تمت إضافة العضو للمجموعة");
+          load(state.groupId);
+        } catch (error) {
+          button.disabled = false;
+          toast("❌ " + error.message);
+        }
+      });
+    });
+
+    body.querySelectorAll("[data-forget]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        try {
+          const data = await api("/api/fw/groups/guard/kicked/remove", { groupId: state.groupId, jid: button.dataset.forget });
+          state.kicked = data.kicked || [];
+          render(body);
+          toast("🗑 حُذف من السجل");
+        } catch (error) { toast("❌ " + error.message); }
+      });
     });
 
     const testWelcome = body.querySelector("#ggTestWelcome");

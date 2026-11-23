@@ -1459,6 +1459,27 @@ export async function getWebGroupInvite(userId, groupId, phoneNumber) {
   return { link: `https://chat.whatsapp.com/${code}` };
 }
 
+/** [GUARD] إعادة عضو مطروح إلى المجموعة */
+export async function webGuardReAdd(userId, groupId, memberJid, phoneNumber = null) {
+  const id = String(groupId || "").trim();
+  const jid = String(memberJid || "").trim();
+  if (!id.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+  if (!jid || !jid.includes("@")) throw new Error("معرّف العضو غير صالح");
+  const sock = await findSocketForGroup(String(userId), id, phoneNumber);
+  if (!sock) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
+  let status = "";
+  try {
+    const result = await sock.groupParticipantsUpdate(id, [jid], "add");
+    status = String(Array.isArray(result) ? (result[0]?.status || "") : "");
+  } catch (error) {
+    throw new Error(String(error?.message || error).slice(0, 160));
+  }
+  if (status && status !== "200") throw new Error(`واتساب رفض الإضافة (رمز ${status}) — قد يكون العضو مانعاً للإضافة`);
+  const guard = await import("../../services/group-guard.mjs");
+  guard.removeKicked(String(userId), id, jid);
+  return { ok: true, jid, status: status || "200" };
+}
+
 /** [GUARD] إرسال ترحيب تجريبي للمجموعة للتأكد أن نظام الترحيب يعمل */
 export async function webGuardTestWelcome(userId, groupId, phoneNumber = null, sampleJids = []) {
   const id = String(groupId || "").trim();

@@ -292824,6 +292824,16 @@ function getViewOnceMeta(m) {
     isAudio: !!msg.audioMessage?.viewOnce
   };
 }
+// [RECONNECT-NOTICE-THROTTLE] لا نُغرق تيليجرام برسائل «تمت إعادة الاتصال» عند كل انقطاع
+const _lastReconnectNoticeAt = new Map();
+function shouldSendReconnectNotice(sessKey, number) {
+  const key = `${sessKey || ""}:${number || ""}`;
+  const last = _lastReconnectNoticeAt.get(key) || 0;
+  if (Date.now() - last < 30 * 60 * 1000) return false;
+  _lastReconnectNoticeAt.set(key, Date.now());
+  return true;
+}
+
 function setBotRef(bot2) {
   botRef = bot2;
 }
@@ -293621,7 +293631,7 @@ async function _handleConnected(sock, userId, chatId, qrMsgId, isAutoRestore = f
     }
   }
   // [FIX-AUTO-RESTORE-SPAM] لا نُرسل رسالة "إعادة الاتصال" عند الاستعادة التلقائية الصامتة — فقط الربط الأول يستحق الإشعار
-  if (botRef && chatId && (_isFirstEver || !isAutoRestore)) {
+  if (botRef && chatId && (_isFirstEver || (!isAutoRestore && shouldSendReconnectNotice(_effSessKey, numberFull)))) {
     const _connMsg = _isFirstEver
       ? `\u2705 *\u062A\u0645 \u0627\u0644\u0631\u0628\u0637 \u0628\u0646\u062C\u0627\u062D!*\n\n\u{1F4F1} \u0627\u0644\u0631\u0642\u0645: \`${numberFull}\`\n\u{1F50B} \u0627\u0644\u062D\u0627\u0644\u0629: \u0646\u0634\u0637\n\u{1F4B0} +500 \u0646\u0642\u0637\u0629 \u0645\u0643\u0627\u0641\u0623\u0629 \u0627\u0644\u0631\u0628\u0637!\n\n\u064A\u0645\u0643\u0646\u0643 \u0627\u0644\u0622\u0646 \u0625\u062F\u0627\u0631\u0629 \u0627\u0644\u0631\u062F\u0648\u062F \u0627\u0644\u062A\u0644\u0642\u0627\u0626\u064A\u0629 \u0648\u0627\u0644\u0630\u0643\u0627\u0621 \u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064A.`
       : `\u{1F504} *\u062A\u0645\u062A \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644 \u0628\u0646\u062C\u0627\u062D!*\n\n\u{1F4F1} \u0627\u0644\u0631\u0642\u0645: \`${numberFull}\`\n\u{1F50B} \u0627\u0644\u062D\u0627\u0644\u0629: \u0646\u0634\u0637`;
@@ -294231,8 +294241,8 @@ function registerMessageHandler(sock, userId) {
             const aiPromptForRule = reply.replyContent === "__ai_default__" ? "" : reply.replyContent || "";
             const aiText = await getAiReplyForRule2(userId, aiPromptForRule, text);
             if (aiText) {
-              // [AI-CARD] صورة كرت الذكاء + نص الرد في رسالة واحدة
-              await sendAiReply(sock, jid, aiText);
+              // [AI-CARD] صورة كرت الذكاء + نص الرد في رسالة واحدة، مع اقتباس رسالة العضو
+              await sendAiReply(sock, jid, aiText, { quoted: msg });
             }
           } catch (err) {
             logger.error({ err }, "AI auto-reply error");
@@ -296596,7 +296606,7 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
                 const { getAiReplyForRule: gAIcc } = await Promise.resolve().then(() => (init_ai_manager(), ai_manager_exports));
                 const aiPcc = cc.replyContent === "-" ? "" : (cc.replyContent || "");
                 const aiTcc = await gAIcc(userId, aiPcc, trimmed);
-                if (aiTcc) await sendAiReply(activeSock, jid, aiTcc);
+                if (aiTcc) await sendAiReply(activeSock, jid, aiTcc, { quoted: msg });
               } else if (cc.replyType === "rotating") {
                 const rmsgs = (cc.replyContent || "").split("||").map((s2) => s2.trim()).filter(Boolean);
                 if (rmsgs.length > 0) { const rotKey=`mymsgs_rot_${userId}_${_selfNumForSettings}_${cc.id||cc.trigger}`; const index=(inMemoryDB[rotKey]||0)%rmsgs.length;inMemoryDB[rotKey]=index+1;await activeSock.sendMessage(jid,{text:rmsgs[index]}); }
