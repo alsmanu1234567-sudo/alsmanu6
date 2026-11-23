@@ -411,3 +411,62 @@ test('المستوى 7: أوامر الدرع والمسارات والواجه�
   assert.match(ui, /ggKickOffenders/);
   assert.match(ui, /سجل التدقيق/);
 });
+
+test('حدث الأعضاء: بَيليز يرسل الأعضاء ككائنات — نقرأها ونرسل ترحيباً فعلياً', async () => {
+  const guard = await import('../../services/group-guard.mjs');
+  // الشكل الذي يصل فعلياً من Baileys 7
+  assert.equal(guard.participantJid({ id: '249912345678@s.whatsapp.net', phoneNumber: '249912345678@s.whatsapp.net' }), '249912345678@s.whatsapp.net');
+  assert.equal(guard.participantJid({ lid: '123456789012345@lid' }), '123456789012345@lid');
+  assert.equal(guard.participantJid('249900000001@s.whatsapp.net'), '249900000001@s.whatsapp.net');
+  assert.equal(guard.participantJid({}), '');
+
+  const uid = `test-evt-${Date.now()}`;
+  const gid = '120363000000000888@g.us';
+  guard.updateGroupConfig(uid, gid, { welcome: { enabled: true } });
+  const sent = [];
+  const sock = {
+    user: { id: '249000000000:1@s.whatsapp.net' },
+    groupMetadata: async () => ({ participants: [{ id: '249912345678@s.whatsapp.net', admin: null }] }),
+    sendMessage: async (jid, payload) => { sent.push({ jid, payload }); return {}; },
+  };
+  const addResult = await guard.handleParticipants({
+    userId: uid,
+    sock,
+    event: { id: gid, action: 'add', participants: [{ id: '249912345678@s.whatsapp.net', phoneNumber: '249912345678@s.whatsapp.net' }] },
+    logger: null,
+  });
+  assert.equal(addResult.handled, true);
+  assert.equal(addResult.welcomed, 1, 'يجب أن يدخل العضو قائمة الترحيب');
+  assert.equal(guard.welcomeQueueSize(uid, gid), 1);
+  guard.clearWelcomeQueue(uid, gid);
+
+  const leaveResult = await guard.handleParticipants({
+    userId: uid,
+    sock,
+    event: { id: gid, action: 'remove', participants: [{ id: '249912345678@s.whatsapp.net' }] },
+    logger: null,
+  });
+  assert.equal(leaveResult.handled, true);
+  assert.equal(leaveResult.total, 1, 'عضو الخروج يجب أن يُقرأ من الكائن');
+
+  const stats = guard.getGuardStats(uid, gid);
+  assert.equal(stats.joins, 1);
+  assert.equal(stats.leaves, 1);
+  assert.ok(stats.lastEventAt > 0, 'وقت آخر حدث محفوظ للتشخيص');
+
+  try {
+    const fs = await import('node:fs');
+    fs.rmSync(new URL(`../../bot-data/group-guard/${uid}.json`, import.meta.url), { force: true });
+  } catch { }
+});
+
+test('أوامر الترحيب والمغادرة الجديدة موجودة في الكتالوج', async () => {
+  const { commandsCatalog } = await import('../../services/group-guard.mjs');
+  const catalog = commandsCatalog().map((c) => c.key);
+  for (const key of ['welcome-on', 'welcome-off', 'goodbye-on', 'goodbye-off', 'welcome-test', 'welcome-status']) {
+    assert.ok(catalog.includes(key), `الأمر ${key} مفقود`);
+  }
+  const ui = readFileSync(new URL('../../public/groups-guard-web.js', import.meta.url), 'utf8');
+  assert.match(ui, /دخول اليوم/);
+  assert.match(ui, /lastEventAt/);
+});

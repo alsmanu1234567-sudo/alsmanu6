@@ -177,7 +177,7 @@ function ensureStats(state, groupJid) {
   const key = dayKey();
   const current = state.stats[groupJid];
   if (!current || current.day !== key) {
-    state.stats[groupJid] = { day: key, deleted: 0, warned: 0, kicked: 0, byReason: {} };
+    state.stats[groupJid] = { day: key, deleted: 0, warned: 0, kicked: 0, joins: 0, leaves: 0, lastEventAt: 0, lastAction: "", byReason: {} };
   }
   return state.stats[groupJid];
 }
@@ -527,6 +527,12 @@ const COMMANDS = [
   { key: "white", aliases: ["قائمة-بيضاء", "قائمة بيضاء", "ابيض", "أبيض"], usage: ".قائمة بيضاء @العضو", description: "يستثني العضو من كل الحمايات", adminOnly: true },
   { key: "unwhite", aliases: ["ازالة-بيضاء", "إزالة بيضاء", "ازالة بيضاء"], usage: ".إزالة بيضاء @العضو", description: "يرجع العضو للحماية", adminOnly: true },
   { key: "kicked", aliases: ["المطرودين", "المطرودون", "سجل-الطرد"], usage: ".المطرودين", description: "يعرض سجل المطرودين بسبب المخالفات", adminOnly: false },
+  { key: "welcome-on", aliases: ["تشغيل-الترحيب", "تشغيل الترحيب", "الترحيب-تشغيل"], usage: ".تشغيل الترحيب", description: "يشغّل رسالة الترحيب عند دخول أي عضو", adminOnly: true },
+  { key: "welcome-off", aliases: ["ايقاف-الترحيب", "إيقاف الترحيب", "الترحيب-ايقاف"], usage: ".إيقاف الترحيب", description: "يوقف رسالة الترحيب", adminOnly: true },
+  { key: "goodbye-on", aliases: ["تشغيل-المغادرة", "تشغيل المغادرة"], usage: ".تشغيل المغادرة", description: "يشغّل رسالة المغادرة عند خروج أي عضو", adminOnly: true },
+  { key: "goodbye-off", aliases: ["ايقاف-المغادرة", "إيقاف المغادرة"], usage: ".إيقاف المغادرة", description: "يوقف رسالة المغادرة", adminOnly: true },
+  { key: "welcome-test", aliases: ["اختبار-الترحيب", "اختبار الترحيب"], usage: ".اختبار الترحيب", description: "يرسل ترحيباً الآن للتأكد أن الترحيب يعمل", adminOnly: true },
+  { key: "welcome-status", aliases: ["حالة-الترحيب", "حالة الترحيب", "الترحيب"], usage: ".حالة الترحيب", description: "يعرض حالة الترحيب والمغادرة وآخر حدث أعضاء", adminOnly: false },
 ];
 
 export function commandsCatalog() {
@@ -566,6 +572,25 @@ function unwrapMedia(message) {
     current = wrapped;
   }
   return current;
+}
+
+/**
+ * [PARTICIPANT-SHAPE] بَيليز 7 يرسل الأعضاء ككائنات {id, phoneNumber, lid, admin}
+ * وليس كنصوص — بدون هذا التحويل لا يعمل الترحيب ولا المغادرة نهائياً.
+ */
+export function participantJid(entry) {
+  if (!entry) return "";
+  if (typeof entry === "string") return jidOf(entry);
+  if (typeof entry === "object") {
+    const raw = entry.id || entry.jid || entry.participant || entry.phoneNumber || entry.phone_number || entry.pn || entry.lid || "";
+    return jidOf(raw);
+  }
+  return jidOf(String(entry));
+}
+
+function participantName(entry) {
+  if (!entry || typeof entry !== "object") return "";
+  return String(entry.name || entry.notify || entry.username || "").trim().slice(0, 60);
 }
 
 function jidOf(input) {
@@ -1183,6 +1208,40 @@ export async function handleCommand({ userId, sock, message, text }) {
       await reply(`🤍 ${mention || "العضو"} في القائمة البيضاء — الحمايات لا تُطبَّق عليه.`, targetMentions);
       return { handled: true };
     }
+    case "welcome-on":
+    case "welcome-off":
+    case "goodbye-on":
+    case "goodbye-off": {
+      const isWelcome = parsed.key.startsWith("welcome");
+      const on = parsed.key.endsWith("-on");
+      updateGroupConfig(userId, groupJid, isWelcome ? { welcome: { enabled: on } } : { goodbye: { enabled: on } });
+      const label = isWelcome ? "الترحيب" : "المغادرة";
+      await reply(on ? `✅ تم تشغيل رسالة ${label} — ستُرسل تلقائياً من الآن.` : `⏸️ تم إيقاف رسالة ${label}.`);
+      return { handled: true };
+    }
+    case "welcome-test": {
+      const me = String(sock?.user?.id || "").split(":")[0];
+      const sample = [target || (me ? `${me}@s.whatsapp.net` : "")].filter(Boolean);
+      updateGroupConfig(userId, groupJid, { welcome: { enabled: true } });
+      const result = await sendWelcomePreview({ userId, sock, groupJid, memberJids: sample, logger: null });
+      await reply(result?.sent ? "🧪 تم إرسال ترحيب تجريبي الآن — شوف الرسالة." : "❌ تعذر إرسال الترحيب — تأكد أن البوت مشرف في المجموعة.");
+      return { handled: true };
+    }
+    case "welcome-status": {
+      const stats = getGuardStats(userId, groupJid);
+      const last = Number(stats.lastEventAt) || 0;
+      await reply([
+        "👋 *حالة الترحيب والمغادرة*",
+        `${cfg.welcome?.enabled ? "✅" : "⛔"} رسالة الترحيب · ${cfg.welcome?.card ? "🖼️ مع الكرت" : "بدون كرت"}`,
+        `${cfg.goodbye?.enabled ? "✅" : "⛔"} رسالة المغادرة · ${cfg.goodbye?.card ? "🖼️ مع الكرت" : "بدون كرت"}`,
+        "",
+        `📥 دخول اليوم: ${stats.joins || 0} · 📤 خروج اليوم: ${stats.leaves || 0}`,
+        `🕐 آخر حدث أعضاء: ${last ? new Date(last).toLocaleTimeString("ar-EG") : "لا يوجد بعد"}`,
+        "",
+        "التشغيل: `.تشغيل الترحيب` · `.تشغيل المغادرة` · التجربة: `.اختبار الترحيب`",
+      ].join("\n"));
+      return { handled: true };
+    }
     case "kicked": {
       const rows = listKicked(userId, groupJid).slice(0, 15);
       if (!rows.length) { await reply("🚪 سجل المطرودين فاضي."); return { handled: true }; }
@@ -1268,42 +1327,76 @@ export async function sendWelcomePreview({ userId, sock, groupJid, memberJids, l
 }
 
 export async function handleParticipants({ userId, sock, event, logger }) {
-  const groupJid = event?.id || event?.jid || event?.chatId;
+  const groupJid = event?.id || event?.jid || event?.chatId || event?.groupId;
   if (!String(groupJid || "").endsWith("@g.us")) return { handled: false };
   const cfg = getGroupConfig(userId, groupJid);
   const action = String(event?.action || event?.type || "").toLowerCase();
   const participants = Array.isArray(event?.participants)
     ? event.participants
     : (event?.participant ? [event.participant] : []);
+  // [PARTICIPANT-SHAPE] الأعضاء قد يكونون كائنات أو نصوصاً — نوحّدها هنا
+  const normalized = participants.map((entry) => ({ jid: participantJid(entry), name: participantName(entry) })).filter((row) => row.jid);
+  const state = getState(userId);
+  const stats = ensureStats(state, groupJid);
+  stats.lastEventAt = Date.now();
+  stats.lastAction = action;
+  persist(userId);
   try {
-    logger?.info?.({ groupJid, action, count: participants.length }, "[GROUP-GUARD] حدث أعضاء المجموعة");
+    logger?.info?.({ groupJid, action, count: normalized.length, sample: normalized[0]?.jid }, "[GROUP-GUARD] حدث أعضاء المجموعة");
   } catch { }
+  if (!normalized.length) return { handled: false };
 
-  for (const participant of participants) {
-    const memberJid = jidOf(participant);
-    if (!memberJid) continue;
-    const memberMention = await mentionFor(sock, groupJid, memberJid);
-    const resolvedJid = memberMention.jid;
-    if (action === "add") {
-      // [WARN-PERSIST] المخالفات تبقى محفوظة حتى لو خرج وعاد — لا تُصفَّر تلقائياً
-      const previous = warningCount(userId, groupJid, resolvedJid) || warningCount(userId, groupJid, jidOf(memberJid));
-      if (previous > 0) {
-        await sock.sendMessage(groupJid, {
-          text: `⚠️ ${memberMention.token} لاحظنا عودتك للمجموعة ولديك *${previous}* مخالفة سابقة مسجّلة (الحد ${cfg.maxWarnings}).\nالمخالفات محفوظة ولا تُصفَّر إلا بإدارة المجموعة — تجنّب تكرار المخالفة حتى لا يتم طردك.`,
-        }, { mentions: memberMention.mentions }).catch(() => { });
-        continue; // لا نرسل رسالة ترحيب لمن لديه مخالفات سابقة
+  const isAdd = ["add", "invite", "joined", "link_join", "linked_group_join", "accept"].includes(action);
+  const isRemove = ["remove", "leave", "left", "kick", "kicked"].includes(action);
+  if (!isAdd && !isRemove) return { handled: true, action };
+
+  let welcomed = 0;
+  let farewell = 0;
+
+  for (const row of normalized) {
+    try {
+      const memberMention = await mentionFor(sock, groupJid, row.jid);
+      const resolvedJid = memberMention.jid || row.jid;
+      if (isAdd) {
+        stats.joins = (Number(stats.joins) || 0) + 1;
+        // [WARN-PERSIST] المخالفات تبقى محفوظة حتى لو خرج وعاد — لا تُصفَّر تلقائياً
+        const previous = warningCount(userId, groupJid, resolvedJid) || warningCount(userId, groupJid, jidOf(row.jid));
+        if (previous > 0) {
+          await sock.sendMessage(groupJid, {
+            text: `⚠️ ${memberMention.token} لاحظنا عودتك للمجموعة ولديك *${previous}* مخالفة سابقة مسجّلة (الحد ${cfg.maxWarnings}).\nالمخالفات محفوظة ولا تُصفَّر إلا بإدارة المجموعة — تجنّب تكرار المخالفة حتى لا يتم طردك.`,
+          }, { mentions: memberMention.mentions }).catch(() => { });
+          continue; // لا نرسل رسالة ترحيب لمن لديه مخالفات سابقة
+        }
+        if (!cfg.welcome?.enabled) continue;
+        enqueueWelcome({ userId, sock, groupJid, memberJid: resolvedJid, logger });
+        welcomed++;
+      } else {
+        stats.leaves = (Number(stats.leaves) || 0) + 1;
+        // [WARN-PERSIST] لا نمسح المخالفات عند الخروج
+        if (!cfg.goodbye?.enabled) continue;
+        const caption = renderMentions(cfg.goodbye.text || "إلى اللقاء @nem", resolvedJid);
+        if (cfg.goodbye?.card) await sendCard(sock, groupJid, cfg.cards.leave, caption, memberMention.mentions);
+        else await sock.sendMessage(groupJid, { text: caption }, { mentions: memberMention.mentions }).catch(() => { });
+        farewell++;
       }
-      if (!cfg.welcome?.enabled) continue;
-      enqueueWelcome({ userId, sock, groupJid, memberJid: resolvedJid, logger });
-    } else if (action === "remove") {
-      // [WARN-PERSIST] لا نمسح المخالفات عند الخروج
-      if (!cfg.goodbye?.enabled) continue;
-      const caption = renderMentions(cfg.goodbye.text || "إلى اللقاء @nem", resolvedJid);
-      if (cfg.goodbye?.card) await sendCard(sock, groupJid, cfg.cards.leave, caption, memberMention.mentions);
-      else await sock.sendMessage(groupJid, { text: caption }, { mentions: memberMention.mentions }).catch(() => { });
+    } catch (error) {
+      try { logger?.warn?.({ err: String(error?.message || error).slice(0, 160), groupJid }, "[GROUP-GUARD] تعذر معالجة عضو في حدث المجموعة"); } catch { }
     }
   }
-  return { handled: true };
+  persist(userId);
+  return { handled: true, action, welcomed, farewell, total: normalized.length };
+}
+
+/** [WELCOME-QUEUE] عدد المنتظرين في قائمة الترحيب — للاختبار والتشخيص */
+export function welcomeQueueSize(userId, groupJid) {
+  const entry = welcomeQueue.get(welcomeKey(userId, groupJid));
+  return entry ? entry.members.size : 0;
+}
+
+export function clearWelcomeQueue(userId, groupJid) {
+  const key = welcomeKey(userId, groupJid);
+  const entry = welcomeQueue.get(key);
+  if (entry) { try { clearTimeout(entry.timer); } catch { } welcomeQueue.delete(key); }
 }
 
 const attached = new WeakMap();

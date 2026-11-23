@@ -333,6 +333,11 @@
               <textarea class="gg-ta" id="ggGoodbye">${esc(config.goodbye?.text || "")}</textarea>
             </div>
           </div>
+          <div class="gg-note" style="margin-bottom:10px">
+            📥 دخول اليوم: <b>${esc(Number(stats.joins) || 0)}</b> · 📤 خروج اليوم: <b>${esc(Number(stats.leaves) || 0)}</b>
+            · 🕐 آخر حدث أعضاء: <b>${stats.lastEventAt ? esc(timeAgo(stats.lastEventAt)) : "لا يوجد بعد"}</b>
+            ${stats.lastAction ? `(${esc(stats.lastAction)})` : ""}
+          </div>
           <div class="gg-actions">
             <button class="gg-btn" id="ggSaveMsgs">حفظ رسائل الترحيب والمغادرة</button>
             <button class="gg-btn alt" id="ggTestWelcome">🧪 ترحيب تجريبي الآن</button>
