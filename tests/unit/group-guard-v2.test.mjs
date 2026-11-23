@@ -320,7 +320,7 @@ test('تفاصيل المخالفة تُحفظ نصاً فقط والصور وا
   assert.equal(typeof listWarnings, "function");
   assert.match(guard, /reason: "image", delayKick: true, name: message\?\.pushName, detail: "صورة", silent: true/);
   assert.match(guard, /reason: "audio", delayKick: true, name: message\?\.pushName, detail: "رسالة صوتية", silent: true/);
-  assert.match(guard, /const linkHit = \(String\(text\)\.match/);
+  assert.match(guard, /const linkHit = domainVerdict\.domain \|\| \(String\(text\)\.match/);
   assert.match(guard, /reason: "word", delayKick: true, name: message\?\.pushName, detail: text/);
   assert.match(guard, /\[WARN-SILENT\]/);
 });
@@ -518,4 +518,66 @@ test('أمر .قبول لا يتشابك مع تحديات عالم المجمو
   const world = readFileSync(new URL('../../dist/handlers/group-world-handler.mjs', import.meta.url), 'utf8');
   assert.match(world, /\[ACCEPT-REQUESTS\]/);
   assert.match(world, /_approvalWords\.has\(String\(args\)\.trim\(\)\.toLowerCase\(\)\)/);
+});
+
+test('المستوى 5: دومينات محظورة ومسموحة وتراجع عن تحذير وتقرير يومي', async () => {
+  const guard = await import('../../services/group-guard.mjs');
+
+  // تطبيع الدومينات
+  assert.equal(guard.normalizeDomain('https://WWW.Spam-Site.com/path?x=1'), 'spam-site.com');
+  assert.deepEqual(guard.normalizeDomainList(['spam.com', 'http://www.Bad.io/x', 'spam.com', '']), ['spam.com', 'bad.io']);
+  assert.deepEqual(guard.extractDomains('شوف https://youtu.be/x و go.example.com'), ['youtu.be', 'go.example.com']);
+
+  // قرار الحجب
+  assert.equal(guard.domainMatches('ads.spam.com', ['spam.com']), true, 'الدومين الفرعي يتبع الأصل');
+  assert.equal(guard.domainMatches('notspam.com', ['spam.com']), false);
+  assert.equal(guard.classifyLinkDomains(['ads.spam.com'], { blockedDomains: ['spam.com'] }).reason, 'blockedDomain');
+  assert.equal(guard.classifyLinkDomains(['x.com'], { allowedDomains: ['youtube.com'] }).reason, 'notAllowedDomain');
+  assert.equal(guard.classifyLinkDomains(['youtube.com'], { allowedDomains: ['youtube.com'] }).violation, false);
+  assert.equal(guard.classifyLinkDomains(['any.com'], {}).violation, false);
+
+  // تراجع عن تحذير
+  const uid = `test-l5-${Date.now()}`;
+  const gid = '120363000000000666@g.us';
+  const sock = {
+    user: { id: '249000000000:1@s.whatsapp.net' },
+    groupMetadata: async () => ({ participants: [{ id: '249912345678@s.whatsapp.net' }] }),
+    sendMessage: async () => ({}),
+  };
+  const cfg = guard.getGroupConfig(uid, gid);
+  await guard.issueWarning({ userId: uid, sock, groupJid: gid, memberJid: '249912345678@s.whatsapp.net', cfg, reason: 'link', delayKick: false, name: 'محمد', detail: 'https://spam.com' });
+  assert.equal(guard.warningCount(uid, gid, '249912345678@s.whatsapp.net'), 1);
+  const undone = guard.undoWarning(uid, gid, '249912345678@s.whatsapp.net');
+  assert.equal(undone.ok, true);
+  assert.equal(undone.count, 0);
+  assert.equal(guard.warningCount(uid, gid, '249912345678@s.whatsapp.net'), 0);
+  assert.equal(guard.listAudit(uid, gid)[0].kind, 'undo');
+
+  // التقرير اليومي
+  const stats = guard.noteGuardEvent(uid, gid, 'warned', { reason: 'link' });
+  const text = guard.buildDailyReportText({ ...stats, joins: 2, leaves: 1 }, guard.getGroupConfig(uid, gid));
+  assert.match(text, /تقرير الحماية اليومي/);
+  assert.match(text, /دخول: 2/);
+  assert.equal(guard.shouldSendDailyReport({ dailyReport: false }, new Date(), ''), false);
+  const now = new Date();
+  assert.equal(guard.shouldSendDailyReport({ dailyReport: true, dailyReportHour: now.getHours() }, now, ''), true);
+  assert.equal(guard.shouldSendDailyReport({ dailyReport: true, dailyReportHour: now.getHours() }, now, '1999-01-01'), true);
+
+  try {
+    const fs = await import('node:fs');
+    fs.rmSync(new URL(`../../bot-data/group-guard/${uid}.json`, import.meta.url), { force: true });
+  } catch { }
+});
+
+test('المستوى 5: أوامر ومسارات وواجهة الدومينات والتقرير والتراجع', () => {
+  for (const key of ['undo', 'report-on', 'report-off', 'report-now', 'block-domain', 'unblock-domain', 'allow-domain', 'domains']) {
+    assert.ok(guard.includes(`key: "${key}"`), `الأمر ${key} مفقود`);
+  }
+  assert.match(webapp, /guard\/undo/);
+  assert.match(webapp, /"blockedDomains", "allowedDomains", "dailyReport", "dailyReportHour"/);
+  const ui = readFileSync(new URL('../../public/groups-guard-web.js', import.meta.url), 'utf8');
+  assert.match(ui, /ggSaveDomains/);
+  assert.match(ui, /data-undo=/);
+  assert.match(ui, /gg-bars/);
+  assert.match(ui, /دومينات وتقرير/);
 });

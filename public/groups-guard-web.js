@@ -72,6 +72,11 @@
   .gg-tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
   .gg-tools .gg-in{flex:1 1 170px;min-width:130px}
   .gg-chips{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+  .gg-bars{display:grid;gap:7px;margin:10px 0}
+  .gg-bar{display:grid;grid-template-columns:92px 1fr 34px;align-items:center;gap:8px;font-size:11px}
+  .gg-bar i{display:block;height:7px;border-radius:99px;background:linear-gradient(90deg,#3b82f6,#8b5cf6)}
+  .gg-bar span{opacity:.72;text-align:left}
+  .gg-bar b{text-align:left;font-size:11px}
   .gg-chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;padding:5px 9px;border-radius:99px;background:#ffffff14;border:1px solid #ffffff1f}
   .gg-chip button{border:0;background:#ffffff1f;color:inherit;border-radius:50%;width:17px;height:17px;line-height:1;cursor:pointer;font-size:11px}
   .gg-audit{display:grid;gap:6px;max-height:300px;overflow:auto;padding-inline-end:4px}
@@ -187,7 +192,7 @@
     const days = Math.round(hours / 24);
     return days === 1 ? "قبل يوم" : `قبل ${days} يوم`;
   }
-  const REASON_LABELS = { link: "نشر رابط", word: "كلمة ممنوعة", sticker: "ملصقات ممنوعة", image: "صورة ممنوعة", audio: "رسالة صوتية", manual: "تحذير يدوي من الإدارة" };
+  const REASON_LABELS = { link: "نشر رابط", word: "كلمة ممنوعة", sticker: "ملصقات ممنوعة", image: "صورة ممنوعة", audio: "رسالة صوتية", manual: "تحذير يدوي من الإدارة", flood: "إغراق الرسائل", repeat: "تكرار الرسالة", blockedDomain: "دومين محظور", notAllowedDomain: "دومين غير مسموح", return: "عاد بعد طرد" };
   // [GG-DETAIL] كيف نعرض ماذا نشر بالضبط — الصور والصوت والملصقات لا تُحفظ، نعرض نوعها فقط
   const DETAIL_ICONS = { link: "🔗", word: "🚫", sticker: "🎟️", image: "🖼️", audio: "🎤", manual: "⚠️", kick: "🚪" };
   const DETAIL_LABELS = { link: "رابط", word: "كلمة ممنوعة", sticker: "ملصق", image: "صورة", audio: "رسالة صوتية", manual: "تحذير يدوي" };
@@ -255,6 +260,13 @@
     const stats = state.stats || {};
     const auditRows = state.audit || [];
     const whitelist = config.whitelist || [];
+    const topReasons = Object.entries(stats.byReason || {})
+      .map(([reason, count]) => ({ reason, count: Number(count) || 0 }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 4);
+    const topMax = topReasons[0] ? topReasons[0].count : 0;
+    const blockedDomains = config.blockedDomains || [];
+    const allowedDomains = config.allowedDomains || [];
     const quiet = config.quiet || { enabled: false, from: "00:00", to: "07:00" };
     const name = (groups().find((g) => g.id === state.groupId) || {}).name || state.groupId;
     body.innerHTML = `
@@ -307,6 +319,18 @@
               ${whitelist.length ? whitelist.map((jid) => `<span class="gg-chip">${esc(jidNumber(jid))}<button data-unwhite="${esc(jid)}" title="إزالة">✕</button></span>`).join("") : `<span class="gg-chip">لا أحد</span>`}
             </div>
             <div class="gg-tools"><input class="gg-in gg-search" id="ggWhiteInput" placeholder="مثال: 249912345678" inputmode="numeric"><button class="gg-btn alt" id="ggWhiteAdd">إضافة</button></div>
+          </div>
+
+          <div class="gg-card">
+            <h3>🌐 دومينات وتقرير <span class="gg-tag">المستوى 5</span></h3>
+            <div class="mut">تحكم بالروابط على مستوى الدومين، وخلي البوت يرسل تقرير حماية يومي.</div>
+            ${toggleRow("dailyReport", "التقرير اليومي", "يرسل ملخص الحماية كل يوم في الساعة المحددة", config.dailyReport)}
+            <div class="gg-row"><div><b>ساعة التقرير</b></div><input class="gg-in" style="width:84px" type="number" min="0" max="23" value="${esc(config.dailyReportHour ?? 21)}" data-num="dailyReportHour"></div>
+            <div class="gg-mut" style="font-size:12px;opacity:.75;margin:8px 0 4px">🚫 دومينات محظورة (كل سطر)</div>
+            <textarea class="gg-ta" id="ggBlocked" placeholder="spam-site.com&#10;bit.ly">${esc(blockedDomains.join("\n"))}</textarea>
+            <div class="gg-mut" style="font-size:12px;opacity:.75;margin:8px 0 4px">🤍 دومينات مسموحة فقط (كل سطر) — لو كتبت شي هنا يُحجب غيرها</div>
+            <textarea class="gg-ta" id="ggAllowed" placeholder="youtube.com&#10;github.com">${esc(allowedDomains.join("\n"))}</textarea>
+            <div class="gg-actions"><button class="gg-btn" id="ggSaveDomains">حفظ الدومينات والتقرير</button></div>
           </div>
 
           <div class="gg-card">
@@ -367,6 +391,13 @@
             <div class="gg-stat"><b>${esc(Number(stats.warned) || 0)}</b><small>تحذير اليوم</small></div>
             <div class="gg-stat"><b>${esc(Number(stats.kicked) || 0)}</b><small>طرد اليوم</small></div>
           </div>
+          ${topReasons.length ? `<div class="gg-bars">
+            ${topReasons.map((row) => `<div class="gg-bar">
+              <span>${esc(REASON_LABELS[row.reason] || row.reason)}</span>
+              <i style="width:${topMax ? Math.max(6, Math.round((row.count / topMax) * 100)) : 6}%"></i>
+              <b>${esc(row.count)}</b>
+            </div>`).join("")}
+          </div>` : ""}
           ${warnings.length ? `<div class="gg-tools"><input class="gg-in gg-search" id="ggSearchWarn" placeholder="ابحث بالاسم أو الرقم أو السبب…"></div>
           <div class="gg-list" id="ggWarnList">
             ${warnings.map((row) => {
@@ -391,6 +422,7 @@
                 <div class="gg-detail" data-panel="${esc(row.jid)}" hidden>
                   ${detailLines(row) || '<div class="dt"><span class="t">لا تفاصيل محفوظة</span></div>'}
                   <div class="gg-actions" style="margin-top:6px">
+                    <button class="gg-btn ok gg-mini" data-undo="${esc(row.jid)}">↩️ تراجع عن آخر تحذير</button>
                     <button class="gg-btn alt gg-mini" data-reset="${esc(row.jid)}">تصفير مخالفاته</button>
                     <button class="gg-btn alt gg-mini" data-detail="${esc(row.jid)}">إغلاق</button>
                   </div>
@@ -453,6 +485,7 @@
       else if (key === "goodbyeEnabled") (patch.goodbye = patch.goodbye || {}).enabled = input.checked;
       else if (key === "goodbyeCard") (patch.goodbye = patch.goodbye || {}).card = input.checked;
       else if (key === "quietEnabled") (patch.quiet = patch.quiet || {}).enabled = input.checked;
+      else if (key === "dailyReport") patch.dailyReport = input.checked;
       else patch[key] = input.checked;
     });
     return patch;
@@ -584,6 +617,37 @@
           toast("🗑 حُذف من السجل");
         } catch (error) { toast("❌ " + error.message); }
       });
+    });
+
+    // [LEVEL-5] التراجع عن تحذير
+    body.querySelectorAll("[data-undo]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          const data = await api("/api/fw/groups/guard/undo", { groupId: state.groupId, jid: button.dataset.undo });
+          if (Array.isArray(data.warnings)) state.warnings = data.warnings;
+          render(body);
+          toast(data.ok ? `↩️ تم التراجع — المتبقي ${data.count}` : "لا يوجد تحذير لهذا العضو");
+        } catch (error) { button.disabled = false; toast("❌ " + error.message); }
+      });
+    });
+
+    // [LEVEL-5] حفظ الدومينات وقيمة الساعة
+    const domainsButton = body.querySelector("#ggSaveDomains");
+    if (domainsButton) domainsButton.addEventListener("click", async () => {
+      const toList = (value) => String(value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+      const hourInput = body.querySelector("[data-num='dailyReportHour']");
+      const patch = {
+        blockedDomains: toList(body.querySelector("#ggBlocked").value),
+        allowedDomains: toList(body.querySelector("#ggAllowed").value),
+      };
+      if (hourInput) patch.dailyReportHour = Number(hourInput.value);
+      domainsButton.disabled = true;
+      try {
+        state.config = (await api("/api/fw/groups/guard", { groupId: state.groupId, patch })).config;
+        render(body);
+        toast("✅ حُفظت الدومينات والتقرير");
+      } catch (error) { domainsButton.disabled = false; toast("❌ " + error.message); }
     });
 
     const quietButton = body.querySelector("#ggSaveQuiet");

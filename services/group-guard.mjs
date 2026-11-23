@@ -68,6 +68,11 @@ const DEFAULTS = {
   autoReKick: false,
   whitelist: [],
   quiet: { enabled: false, from: "00:00", to: "07:00" },
+  // [LEVEL-5] الحماية الذكية: دومينات + تقرير يومي
+  blockedDomains: [],
+  allowedDomains: [],
+  dailyReport: false,
+  dailyReportHour: 21,
   cards: { ...DEFAULT_CARDS },
   welcome: { enabled: false, text: "أهلاً وسهلاً @nem 👋\nنوّرت المجموعة، اقرأ القوانين وشارك باحترام.", card: true },
   goodbye: { enabled: false, text: "إلى اللقاء @nem 👋", card: true },
@@ -145,6 +150,68 @@ function normalizeJidList(list) {
     out.push(jid);
   }
   return out.slice(0, 200);
+}
+
+export function normalizeDomain(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^[a-z]+:\/\//, "")
+    .replace(/^www\./, "")
+    .split("/")[0]
+    .split("?")[0]
+    .split("#")[0]
+    .replace(/[^a-z0-9.\-_]/g, "")
+    .replace(/^\.+|\.+$/g, "");
+}
+
+export function normalizeDomainList(list) {
+  const out = [];
+  const seen = new Set();
+  for (const item of Array.isArray(list) ? list : String(list || "").split(/[\s,]+/)) {
+    const domain = normalizeDomain(item);
+    if (!domain || domain.length < 3 || !domain.includes(".")) continue;
+    if (seen.has(domain)) continue;
+    seen.add(domain);
+    out.push(domain);
+  }
+  return out.slice(0, 200);
+}
+
+/** يستخرج الدومينات من نص رسالة */
+export function extractDomains(text) {
+  const matches = String(text || "").match(/(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/[^\s]*)?/gi) || [];
+  const out = [];
+  for (const item of matches) {
+    const domain = normalizeDomain(item);
+    if (domain && domain.includes(".") && !out.includes(domain)) out.push(domain);
+  }
+  return out;
+}
+
+/** يطابق دومين مع قائمة (يدعم الدومين الفرعي: ads.example.com يطابق example.com) */
+export function domainMatches(domain, list) {
+  const target = normalizeDomain(domain);
+  if (!target) return false;
+  return (list || []).some((entry) => {
+    const base = normalizeDomain(entry);
+    return base && (target === base || target.endsWith(`.${base}`));
+  });
+}
+
+/** [LEVEL-5] القرار: هل الرابط مخالف حسب قوائم الدومينات؟ */
+export function classifyLinkDomains(domains, cfg) {
+  const list = Array.isArray(domains) ? domains.filter(Boolean) : [];
+  const blocked = Array.isArray(cfg?.blockedDomains) ? cfg.blockedDomains : [];
+  const allowed = Array.isArray(cfg?.allowedDomains) ? cfg.allowedDomains : [];
+  if (!list.length) return { violation: false, reason: "", domain: "" };
+  const hitBlocked = list.find((domain) => domainMatches(domain, blocked));
+  if (hitBlocked) return { violation: true, reason: "blockedDomain", domain: hitBlocked };
+  if (allowed.length) {
+    const ok = list.some((domain) => domainMatches(domain, allowed));
+    if (!ok) return { violation: true, reason: "notAllowedDomain", domain: list[0] };
+  }
+  return { violation: false, reason: "", domain: "" };
 }
 
 function samePerson(a, b) {
@@ -309,6 +376,8 @@ export function getGroupConfig(userId, groupJid) {
   cfg.quiet = { ...DEFAULTS.quiet, ...(saved.quiet || {}) };
   cfg.words = Array.isArray(saved.words) ? saved.words : [];
   cfg.whitelist = Array.isArray(saved.whitelist) ? saved.whitelist : [];
+  cfg.blockedDomains = Array.isArray(saved.blockedDomains) ? saved.blockedDomains : [];
+  cfg.allowedDomains = Array.isArray(saved.allowedDomains) ? saved.allowedDomains : [];
   for (const kind of CARD_KINDS) {
     const custom = path.join(CARD_UPLOADS, `${String(userId).replace(/[^\w.-]/g, "")}-${groupJid.replace(/[^\w.-]/g, "")}-${kind}.png`);
     if (fs.existsSync(custom)) cfg.cards[kind] = custom;
@@ -335,10 +404,14 @@ export function updateGroupConfig(userId, groupJid, patch = {}) {
       next.words = (Array.isArray(value) ? value : []).map((w) => String(w).trim()).filter(Boolean).slice(0, 100);
     } else if (key === "whitelist") {
       next.whitelist = normalizeJidList(value);
-    } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick"].includes(key)) {
+    } else if (key === "blockedDomains" || key === "allowedDomains") {
+      next[key] = normalizeDomainList(value);
+    } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport"].includes(key)) {
       next[key] = Boolean(value);
     } else if (["maxWarnings", "stickerWarnEvery", "kickDelaySec", "floodCount", "floodWindowSec"].includes(key)) {
       next[key] = Math.max(1, Math.min(50, Number(value) || DEFAULTS[key]));
+    } else if (key === "dailyReportHour") {
+      next.dailyReportHour = Math.max(0, Math.min(23, Number.isFinite(Number(value)) ? Number(value) : DEFAULTS.dailyReportHour));
     }
   }
   state.groups[groupJid] = next;
@@ -370,6 +443,28 @@ export function listWarnings(userId, groupJid) {
 export function warningCount(userId, groupJid, memberJid) {
   const state = getState(userId);
   return Number(state.warnings[groupJid]?.[memberJid]?.count) || 0;
+}
+
+/**
+ * [LEVEL-5] التراجع عن آخر تحذير لعضو — مفيد لو البوت غلط أو الإدارة سامحت.
+ * يعيد العدد بعد التحذير ويسجّل الحدث في سجل التدقيق.
+ */
+export function undoWarning(userId, groupJid, memberJid) {
+  const state = getState(userId);
+  const bucket = state.warnings[groupJid];
+  const entry = bucket?.[memberJid];
+  if (!entry || (Number(entry.count) || 0) <= 0) return { ok: false, count: 0 };
+  const count = Math.max(0, (Number(entry.count) || 0) - 1);
+  entry.reasons = (entry.reasons || []).slice(0, -1);
+  entry.details = (entry.details || []).slice(0, -1);
+  if (count === 0) delete bucket[memberJid];
+  else {
+    entry.count = count;
+    entry.at = Date.now();
+  }
+  persist(userId);
+  noteGuardEvent(userId, groupJid, "undo", { jid: memberJid, name: entry?.name || "", reason: "تراجع عن تحذير" });
+  return { ok: true, count };
 }
 
 export function resetWarnings(userId, groupJid, memberJid = null) {
@@ -541,6 +636,14 @@ const COMMANDS = [
   { key: "welcome-test", aliases: ["اختبار-الترحيب", "اختبار الترحيب"], usage: ".اختبار الترحيب", description: "يرسل ترحيباً الآن للتأكد أن الترحيب يعمل", adminOnly: true },
   { key: "welcome-status", aliases: ["حالة-الترحيب", "حالة الترحيب", "الترحيب"], usage: ".حالة الترحيب", description: "يعرض حالة الترحيب والمغادرة وآخر حدث أعضاء", adminOnly: false },
   { key: "accept", aliases: ["قبول", "قبول-الكل", "قبول الكل", "قبول-الطلبات", "قبول الطلبات", "accept"], usage: ".قبول", description: "يقبل كل طلبات الانضمام المعلّقة في المجموعة دفعة واحدة", adminOnly: true },
+  { key: "undo", aliases: ["تراجع", "الغاء-تحذير", "إلغاء تحذير"], usage: ".تراجع @العضو", description: "يلغي آخر تحذير لعضو (لو صار خطأ من البوت)", adminOnly: true },
+  { key: "report-on", aliases: ["تشغيل-التقرير", "تشغيل التقرير"], usage: ".تشغيل التقرير 21", description: "يرسل تقرير حماية يومياً في الساعة المحددة", adminOnly: true },
+  { key: "report-off", aliases: ["ايقاف-التقرير", "إيقاف التقرير"], usage: ".إيقاف التقرير", description: "يوقف التقرير اليومي", adminOnly: true },
+  { key: "report-now", aliases: ["التقرير", "تقرير"], usage: ".التقرير", description: "يرسل تقرير الحماية الآن", adminOnly: false },
+  { key: "block-domain", aliases: ["حظر-دومين", "حظر دومين"], usage: ".حظر دومين example.com", description: "يمنع الروابط من دومين محدد", adminOnly: true },
+  { key: "unblock-domain", aliases: ["الغاء-حظر", "إلغاء حظر", "الغاء حظر"], usage: ".إلغاء حظر example.com", description: "يرفع الحظر عن دومين", adminOnly: true },
+  { key: "allow-domain", aliases: ["سماح-دومين", "سماح دومين"], usage: ".سماح دومين example.com", description: "يسمح بدومين فقط ويحجب بقية الدومينات", adminOnly: true },
+  { key: "domains", aliases: ["الدومينات", "دومينات"], usage: ".الدومينات", description: "يعرض الدومينات المحظورة والمسموحة", adminOnly: false },
 ];
 
 export function commandsCatalog() {
@@ -780,6 +883,8 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
     : reason === "flood" ? "إغراق المجموعة بالرسائل"
     : reason === "repeat" ? "تكرار نفس الرسالة"
     : reason === "return" ? "عاد بعد طرد سابق"
+    : reason === "blockedDomain" ? "رابط من دومين محظور"
+    : reason === "notAllowedDomain" ? "رابط من دومين غير مسموح"
     : "مخالفة القوانين";
   let caption;
   if (level === "final") {
@@ -942,16 +1047,19 @@ export async function handleModeration({ userId, sock, message, cfg }) {
   }
 
   if (cfg.linkGuard && text && detectLink(text)) {
+    const linkDomains = extractDomains(text);
+    const domainVerdict = classifyLinkDomains(linkDomains, cfg);
+    const linkReason = domainVerdict.violation ? domainVerdict.reason : "link";
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
-    noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: "link", text: text });
-    const linkHit = (String(text).match(/https?:\/\/[^\s]+/i) || [""])[0] || String(text);
+    noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: linkReason, text: text });
+    const linkHit = domainVerdict.domain || (String(text).match(/https?:\/\/[^\s]+/i) || [""])[0] || String(text);
     if (pendingNow) {
       await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "نشر رابطاً أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
       await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — نشر رابطاً وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
       return { handled: true, action: "kick-now-link" };
     }
-    const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "link", delayKick: true, name: message?.pushName, detail: linkHit });
-    return { handled: true, action: "link", ...result };
+    const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: linkReason, delayKick: true, name: message?.pushName, detail: linkHit });
+    return { handled: true, action: linkReason, ...result };
   }
 
   if (cfg.wordGuard && text && cfg.words.length) {
@@ -1308,6 +1416,60 @@ export async function handleCommand({ userId, sock, message, text }) {
       ].join("\n"));
       return { handled: true };
     }
+    // ═══ [LEVEL-5] التراجع والتقرير والدومينات ═══
+    case "undo": {
+      const who = target || rawTarget;
+      if (!who) { await reply("حدد العضو: `.تراجع @العضو`"); return { handled: true }; }
+      const resolved = (await mentionFor(sock, groupJid, who)).jid || who;
+      const result = undoWarning(userId, groupJid, resolved)
+        || undoWarning(userId, groupJid, jidOf(who));
+      const out = result?.ok ? `↩️ تم التراجع عن تحذير ${mention || "العضو"} — المتبقي ${result.count}.` : "لا يوجد تحذير مسجّل لهذا العضو.";
+      await reply(out, targetMentions);
+      return { handled: true };
+    }
+    case "report-on":
+    case "report-off": {
+      if (parsed.key === "report-off") {
+        updateGroupConfig(userId, groupJid, { dailyReport: false });
+        await reply("⏸️ تم إيقاف التقرير اليومي.");
+        return { handled: true };
+      }
+      const hourMatch = String(rest || "").match(/([01]?\d|2[0-3])/);
+      const hour = hourMatch ? Math.max(0, Math.min(23, Number(hourMatch[1]))) : (cfg.dailyReportHour ?? 21);
+      updateGroupConfig(userId, groupJid, { dailyReport: true, dailyReportHour: hour });
+      await reply(`📊 تم تشغيل التقرير اليومي الساعة *${String(hour).padStart(2, "0")}:00*.`);
+      return { handled: true };
+    }
+    case "report-now": {
+      const stats = getGuardStats(userId, groupJid);
+      await reply(buildDailyReportText(stats, cfg));
+      return { handled: true };
+    }
+    case "block-domain":
+    case "unblock-domain":
+    case "allow-domain": {
+      const domain = normalizeDomain(String(rest || "").split(/\s+/)[0] || "");
+      if (!domain || !domain.includes(".")) { await reply("اكتب الدومين بشكل صحيح، مثال: `.حظر دومين example.com`"); return { handled: true }; }
+      if (parsed.key === "block-domain") {
+        updateGroupConfig(userId, groupJid, { blockedDomains: [...(cfg.blockedDomains || []), domain], linkGuard: true, enabled: true });
+        await reply(`🚫 حُظر الدومين: *${domain}* — أي رابط منه يُحذف ويُحذّر صاحبه.`);
+      } else if (parsed.key === "unblock-domain") {
+        updateGroupConfig(userId, groupJid, { blockedDomains: (cfg.blockedDomains || []).filter((item) => item !== domain) });
+        await reply(`✅ رُفع الحظر عن: *${domain}*`);
+      } else {
+        updateGroupConfig(userId, groupJid, { allowedDomains: [...(cfg.allowedDomains || []), domain], linkGuard: true, enabled: true });
+        await reply(`🤍 أُضيف للدومينات المسموحة: *${domain}* — بعدها أي دومين آخر يُعتبر مخالفة.`);
+      }
+      return { handled: true };
+    }
+    case "domains": {
+      await reply([
+        "🌐 *دومينات الحماية*",
+        `🚫 محظورة: ${(cfg.blockedDomains || []).length ? cfg.blockedDomains.join(" · ") : "لا يوجد"}`,
+        `🤍 مسموحة: ${(cfg.allowedDomains || []).length ? cfg.allowedDomains.join(" · ") : "لا يوجد (كل الروابط ممنوعة بحسب منع الروابط)"}`,
+      ].join("\n"));
+      return { handled: true };
+    }
     case "kicked": {
       const rows = listKicked(userId, groupJid).slice(0, 15);
       if (!rows.length) { await reply("🚪 سجل المطرودين فاضي."); return { handled: true }; }
@@ -1465,6 +1627,72 @@ export function clearWelcomeQueue(userId, groupJid) {
   if (entry) { try { clearTimeout(entry.timer); } catch { } welcomeQueue.delete(key); }
 }
 
+// ═══ [LEVEL-5] التقرير اليومي التلقائي ═══
+const guardSockets = new Map(); // userId -> Set(sock)
+let dailyReportTimer = null;
+
+function registerGuardSocket(userId, sock) {
+  const key = String(userId);
+  const set = guardSockets.get(key) || new Set();
+  set.add(sock);
+  guardSockets.set(key, set);
+  if (!dailyReportTimer) {
+    dailyReportTimer = setInterval(() => { void runDailyReports(); }, 60_000);
+    if (typeof dailyReportTimer.unref === "function") dailyReportTimer.unref();
+  }
+}
+
+/** قرار الإرسال: مفعّل + الساعة الآن + لم يُرسل اليوم */
+export function shouldSendDailyReport(cfg, now = new Date(), lastReportDay = "") {
+  if (!cfg?.dailyReport) return false;
+  const hour = Math.max(0, Math.min(23, Number(cfg.dailyReportHour) || 0));
+  if (now.getHours() !== hour) return false;
+  return String(lastReportDay || "") !== dayKey();
+}
+
+export function buildDailyReportText(stats, cfg) {
+  const top = Object.entries(stats?.byReason || {})
+    .map(([reason, count]) => ({ reason, count: Number(count) || 0 }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 3);
+  const labels = {
+    link: "روابط", word: "كلمات ممنوعة", sticker: "ملصقات", image: "صور", audio: "صوت",
+    flood: "إغراق", repeat: "تكرار", bannerBlocked: "دومين محظور", blockedDomain: "دومين محظور",
+    notAllowedDomain: "دومين غير مسموح", manual: "تحذير يدوي",
+  };
+  const lines = [
+    "📊 *تقرير الحماية اليومي*",
+    `🗑 حذف: ${Number(stats?.deleted) || 0} · ⚠️ تحذير: ${Number(stats?.warned) || 0} · 🚪 طرد: ${Number(stats?.kicked) || 0}`,
+    `📥 دخول: ${Number(stats?.joins) || 0} · 📤 خروج: ${Number(stats?.leaves) || 0}`,
+  ];
+  if (top.length) lines.push("", "🔥 أكثر المخالفات:", ...top.map((row, index) => `${index + 1}. ${labels[row.reason] || row.reason} — ${row.count}`));
+  lines.push("", `⚙️ الحد ${cfg?.maxWarnings || 3} تحذيرات · الطرد بعد ${cfg?.kickDelaySec ?? 30} ثانية`);
+  return lines.join("\n");
+}
+
+async function runDailyReports() {
+  const now = new Date();
+  for (const [userId, sockets] of guardSockets.entries()) {
+    let state;
+    try { state = getState(userId); } catch { continue; }
+    const groupIds = Object.keys(state.groups || {});
+    if (!groupIds.length) continue;
+    const sock = [...sockets].at(-1);
+    if (!sock) continue;
+    for (const groupJid of groupIds) {
+      let cfg;
+      try { cfg = getGroupConfig(userId, groupJid); } catch { continue; }
+      const stats = ensureStats(state, groupJid);
+      if (!shouldSendDailyReport(cfg, now, stats.reportDay)) continue;
+      try {
+        await sock.sendMessage(groupJid, { text: buildDailyReportText(stats, cfg) });
+        stats.reportDay = dayKey();
+        persist(userId);
+      } catch { }
+    }
+  }
+}
+
 const attached = new WeakMap();
 
 export function attachGroupGuard({ userId, sock, logger }) {
@@ -1473,6 +1701,7 @@ export function attachGroupGuard({ userId, sock, logger }) {
   if (existing.has(String(userId))) return;
   existing.add(String(userId));
   attached.set(sock, existing);
+  registerGuardSocket(userId, sock);
 
   sock.ev.on("messages.upsert", (event) => {
     for (const message of event?.messages || []) {

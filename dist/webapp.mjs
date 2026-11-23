@@ -186,7 +186,7 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     const groupId = guardGroupId(req);
     const patch = req.body?.patch || {};
     const allowed = {};
-    for (const key of ["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "kickOnLimit", "maxWarnings", "stickerWarnEvery", "kickDelaySec", "words", "welcome", "goodbye", "floodGuard", "floodCount", "floodWindowSec", "repeatGuard", "autoReKick", "whitelist", "quiet"]) {
+    for (const key of ["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "kickOnLimit", "maxWarnings", "stickerWarnEvery", "kickDelaySec", "words", "welcome", "goodbye", "floodGuard", "floodCount", "floodWindowSec", "repeatGuard", "autoReKick", "whitelist", "quiet", "blockedDomains", "allowedDomains", "dailyReport", "dailyReportHour"]) {
       if (key in patch) allowed[key] = patch[key];
     }
     return { groupId, config: publicGuardConfig(groupGuard.updateGroupConfig(uid, groupId, allowed)) };
@@ -247,6 +247,11 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/fw/groups/guard/test-welcome', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);
     return webGuardTestWelcome(uid, groupId, req.body?.phoneNumber || null, Array.isArray(req.body?.jids) ? req.body.jids : []);
+  }));
+  app.post('/api/fw/groups/guard/undo', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    const result = groupGuard.undoWarning(uid, groupId, String(req.body?.jid || ""));
+    return { ok: Boolean(result?.ok), count: Number(result?.count) || 0, warnings: groupGuard.listWarnings(uid, groupId) };
   }));
   app.post('/api/fw/groups/guard/reset', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);
