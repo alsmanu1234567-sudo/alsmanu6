@@ -46,9 +46,18 @@
   .gg-cardimg span{font-size:12px;font-weight:600}
   .gg-cardimg label{font-size:11px;background:#ffffff1c;border-radius:9px;padding:6px 9px;cursor:pointer;white-space:nowrap}
   .gg-cardimg input{display:none}
-  .gg-tbl{width:100%;border-collapse:collapse;font-size:12px}
-  .gg-tbl th,.gg-tbl td{padding:7px 4px;text-align:right;border-bottom:1px solid #ffffff14;white-space:nowrap}
-  .gg-tbl th{opacity:.62;font-weight:500}
+  .gg-card.wide{grid-column:1/-1}
+  .gg-list{display:grid;gap:8px;margin-top:8px}
+  .gg-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid #ffffff17;border-radius:14px;background:#ffffff08}
+  .gg-ava{flex:0 0 auto;width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;color:#fff;background:linear-gradient(135deg,#3b82f6,#8b5cf6);text-transform:uppercase}
+  .gg-ava.red{background:linear-gradient(135deg,#e5484d,#7f1d1d)}
+  .gg-item .mid{flex:1 1 130px;min-width:0}
+  .gg-nm{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gg-sub{font-size:11px;opacity:.68;line-height:1.7;overflow-wrap:anywhere}
+  .gg-item .acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;margin-inline-start:auto}
+  .gg-mini{padding:7px 10px;font-size:11px;border-radius:10px}
+  .gg-empty{font-size:12px;opacity:.7;padding:12px;border:1px dashed #ffffff1f;border-radius:13px;text-align:center;margin-top:8px}
+  .gg-tag{display:inline-flex;align-items:center;gap:4px;font-size:10px;padding:2px 7px;border-radius:99px;background:#ffffff1a;opacity:.9}
   .gg-badge{display:inline-block;padding:2px 9px;border-radius:99px;background:#f5b301;color:#241c00;font-weight:700;font-size:11px}
   .gg-badge.red{background:#e5484d;color:#fff}
   .gg-mask{position:fixed;inset:0;background:#05070c99;backdrop-filter:blur(6px);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:22px 12px;overflow:auto}
@@ -62,7 +71,7 @@
   .gg-cmd p{margin:6px 0 0;font-size:12px;opacity:.78;line-height:1.7}
   .gg-toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#111826;color:#fff;border:1px solid #ffffff22;padding:11px 18px;border-radius:13px;font-size:13px;z-index:10001;box-shadow:0 12px 30px #0007}
   .gg-note{font-size:11px;opacity:.62;line-height:1.8;margin-top:6px}
-  @media(max-width:640px){.gg-modal{padding:14px;border-radius:18px}.gg-tbl th:nth-child(3),.gg-tbl td:nth-child(3){display:none}}
+  @media(max-width:640px){.gg-modal{padding:14px;border-radius:18px}.gg-item{flex-wrap:wrap;align-items:flex-start}.gg-item .acts{width:100%;justify-content:flex-start;margin-inline-start:0}.gg-mini{flex:1 1 auto}}
   `;
 
   function ensureStyle() {
@@ -130,6 +139,34 @@
   }
 
   const CARD_LABELS = { warn1: "تحذير 1 (أصفر)", warn2: "تحذير 2 (أصفر)", warn3: "الإنذار الأخير (أحمر)", welcome: "كرت الترحيب بالجدد", join: "كرت الانضمام", leave: "كرت المغادرة" };
+
+  // [GG-UI-L2] أدوات عرض موحّدة: اسم العضو بدل الرقم + وقت مفهوم + أحرف أولى للأفاتار
+  function jidNumber(jid) {
+    const digits = String(jid || "").split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
+    return digits ? `+${digits}` : String(jid || "—");
+  }
+  function displayName(row) {
+    const nm = String(row?.name || "").trim();
+    return nm || jidNumber(row?.jid);
+  }
+  function initialsOf(row) {
+    const nm = String(row?.name || "").trim();
+    if (nm) return nm.slice(0, 2);
+    const digits = String(row?.jid || "").replace(/[^0-9]/g, "");
+    return digits ? digits.slice(-2) : "؟";
+  }
+  function timeAgo(ts) {
+    const at = Number(ts) || 0;
+    if (!at) return "—";
+    const mins = Math.max(0, Math.round((Date.now() - at) / 60000));
+    if (mins < 1) return "الآن";
+    if (mins < 60) return `قبل ${mins} دقيقة`;
+    const hours = Math.round(mins / 60);
+    if (hours < 24) return `قبل ${hours} ساعة`;
+    const days = Math.round(hours / 24);
+    return days === 1 ? "قبل يوم" : `قبل ${days} يوم`;
+  }
+  const REASON_LABELS = { link: "نشر رابط", word: "كلمة ممنوعة", sticker: "ملصقات ممنوعة", image: "صورة ممنوعة", audio: "رسالة صوتية", manual: "تحذير يدوي من الإدارة" };
 
   let state = { groupId: "", config: null, warnings: [], kicked: [], commands: [] };
 
@@ -240,38 +277,46 @@
           </div>
         </div>
 
-        <div class="gg-card">
-          <h3>سجل التحذيرات</h3>
-          <div class="mut">${warnings.length ? "المخالفون الحاليون في هذه المجموعة." : "لا توجد تحذيرات مسجّلة — القروب نظيف 👌"}</div>
-          ${warnings.length ? `<table class="gg-tbl"><thead><tr><th>العضو</th><th>التحذيرات</th><th>آخر سبب</th><th></th></tr></thead><tbody>
-            ${warnings.map((row) => `<tr>
-              <td style="direction:ltr">${esc(String(row.jid).split("@")[0])}</td>
-              <td><span class="gg-badge ${row.count >= (config.maxWarnings || 3) ? "red" : ""}">${esc(row.count)} / ${esc(config.maxWarnings || 3)}</span></td>
-              <td>${esc((row.reasons || []).slice(-1)[0] || "—")}</td>
-              <td><button class="gg-btn alt" data-reset="${esc(row.jid)}">تصفير</button></td>
-            </tr>`).join("")}
-          </tbody></table>` : ""}
+        <div class="gg-card wide">
+          <h3>سجل التحذيرات ${warnings.length ? `<span class="gg-tag">${esc(warnings.length)} عضو</span>` : ""}</h3>
+          <div class="mut">${warnings.length ? "المخالفون الحاليون في هذه المجموعة — اضغط «تصفير» لمسح مخالفات عضو واحد." : "لا توجد تحذيرات مسجّلة — القروب نظيف 👌"}</div>
+          ${warnings.length ? `<div class="gg-list">
+            ${warnings.map((row) => {
+              const max = Number(config.maxWarnings) || 3;
+              const lastReason = (row.reasons || []).slice(-1)[0] || "";
+              return `<div class="gg-item">
+                <div class="gg-ava">${esc(initialsOf(row))}</div>
+                <div class="mid">
+                  <div class="gg-nm">${esc(displayName(row))}</div>
+                  <div class="gg-sub">${esc(REASON_LABELS[lastReason] || lastReason || "مخالفة")} · ${esc(timeAgo(row.at))}</div>
+                </div>
+                <span class="gg-badge ${row.count >= max ? "red" : ""}">${esc(row.count)} / ${esc(max)}</span>
+                <div class="acts"><button class="gg-btn alt gg-mini" data-reset="${esc(row.jid)}">تصفير</button></div>
+              </div>`;
+            }).join("")}
+          </div>` : `<div class="gg-empty">كل شيء تمام — لا أحد عليه مخالفات.</div>`}
           <div class="gg-actions">
             <button class="gg-btn dng" id="ggResetAll">تصفير مخالفات الجميع</button>
             <button class="gg-btn alt" id="ggDocs">📖 أوامر المجموعات</button>
           </div>
         </div>
 
-        <div class="gg-card">
-          <h3>🚪 سجل المطرودين</h3>
-          <div class="mut">${(state.kicked || []).length ? "من طُرد بسبب مخالفات، مع السبب وعدد المخالفات — تقدر ترجعه بضغطة." : "لا يوجد أحد مطروح بسبب مخالفات 👌"}</div>
-          ${(state.kicked || []).length ? `<table class="gg-tbl"><thead><tr><th>العضو</th><th>السبب</th><th>المخالفات</th><th>الوقت</th><th></th></tr></thead><tbody>
-            ${(state.kicked || []).map((row) => `<tr>
-              <td style="direction:ltr">${esc(String(row.jid).split("@")[0])}</td>
-              <td>${esc(row.reason || "مخالفة القوانين")}</td>
-              <td><span class="gg-badge red">${esc(row.count || 0)}</span></td>
-              <td>${esc(new Date(row.at || Date.now()).toLocaleString("ar-EG", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" }))}</td>
-              <td style="display:flex;gap:6px">
-                <button class="gg-btn ok" data-readd="${esc(row.jid)}">➕ إضافة</button>
-                <button class="gg-btn alt" data-forget="${esc(row.jid)}">حذف من السجل</button>
-              </td>
-            </tr>`).join("")}
-          </tbody></table>` : ""}
+        <div class="gg-card wide">
+          <h3>🚪 سجل المطرودين ${(state.kicked || []).length ? `<span class="gg-tag">${esc((state.kicked || []).length)} عضو</span>` : ""}</h3>
+          <div class="mut">${(state.kicked || []).length ? "من طُرد بسبب مخالفات — مكتوب بالضبط ماذا فعل. اضغط «إضافة للشخص» لترجعه للمجموعة." : "لا يوجد أحد مطروح بسبب مخالفات 👌"}</div>
+          ${(state.kicked || []).length ? `<div class="gg-list">
+            ${(state.kicked || []).map((row) => `<div class="gg-item">
+              <div class="gg-ava red">${esc(initialsOf(row))}</div>
+              <div class="mid">
+                <div class="gg-nm">${esc(displayName(row))}</div>
+                <div class="gg-sub">${esc(row.reason || "مخالفة القوانين")} · طُرد ${esc(timeAgo(row.at))}${row.count ? ` · بعد ${esc(row.count)} تحذير` : ""}</div>
+              </div>
+              <div class="acts">
+                <button class="gg-btn ok gg-mini" data-readd="${esc(row.jid)}">➕ إضافة للشخص</button>
+                <button class="gg-btn alt gg-mini" data-forget="${esc(row.jid)}" title="حذف من السجل فقط">✕</button>
+              </div>
+            </div>`).join("")}
+          </div>` : `<div class="gg-empty">السجل فاضي — لا أحد مطروح.</div>`}
         </div>
       </div>`;
     bind(body);

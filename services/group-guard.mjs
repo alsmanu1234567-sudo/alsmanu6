@@ -158,7 +158,7 @@ export function listWarnings(userId, groupJid) {
   const state = getState(userId);
   const map = state.warnings[groupJid] || {};
   return Object.entries(map)
-    .map(([jid, info]) => ({ jid, count: Number(info?.count) || 0, at: Number(info?.at) || 0, reasons: info?.reasons || [] }))
+    .map(([jid, info]) => ({ jid, name: info?.name || "", count: Number(info?.count) || 0, at: Number(info?.at) || 0, reasons: info?.reasons || [] }))
     .filter((row) => row.count > 0)
     .sort((a, b) => b.at - a.at);
 }
@@ -499,13 +499,15 @@ async function botIsAdmin(sock, groupJid) {
 }
 
 /** يعطي تحذيراً ويعيد إرسال الكرت المناسب. kick = الطرد بعد التأخير. */
-export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, reason, delayKick }) {
+export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, reason, delayKick, name }) {
   const state = getState(userId);
   const bucket = (state.warnings[groupJid] = state.warnings[groupJid] || {});
   const prev = Number(bucket[memberJid]?.count) || 0;
   const count = prev + 1;
   const reasons = [...(bucket[memberJid]?.reasons || []), String(reason || "").slice(0, 80)].slice(-10);
-  bucket[memberJid] = { count, at: Date.now(), reasons };
+  // [WARN-NAME] نحفظ اسم العضو ليظهر في لوحة الويب بدل رقمه
+  const memberName = String(name || bucket[memberJid]?.name || "").trim().slice(0, 60);
+  bucket[memberJid] = { count, at: Date.now(), reasons, name: memberName };
   persist(userId);
 
   const level = escalationFor(count, cfg.maxWarnings);
@@ -548,7 +550,7 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
       try {
         await sock.groupParticipantsUpdate(groupJid, [targetJid || memberJid], "remove");
         kicked = true;
-        recordKicked(userId, groupJid, { jid: targetJid || memberJid, reason: reasonText, count });
+        recordKicked(userId, groupJid, { jid: targetJid || memberJid, reason: reasonText, count, name: memberName });
       } catch (error) {
         await sock.sendMessage(groupJid, { text: `تعذر طرد ${mention}: ${String(error?.message || error).slice(0, 120)}` }).catch(() => { });
       }
@@ -602,7 +604,7 @@ export async function handleModeration({ userId, sock, message, cfg }) {
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
     const every = Math.max(1, Number(cfg.stickerWarnEvery) || 5);
     if (count % every === 0) {
-      await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "sticker", delayKick: true });
+      await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "sticker", delayKick: true, name: message?.pushName });
       return { handled: true, action: "sticker-warning", count };
     }
     await sock.sendMessage(groupJid, { text: `🚫 الملصقات ممنوعة في هذه المجموعة حتى إشعار آخر — لحماية القروب من الملصقات المشبوهة.\n${memberTag} (${count}/${every})`, }, { mentions: memberMention.mentions }).catch(() => { });
@@ -611,7 +613,7 @@ export async function handleModeration({ userId, sock, message, cfg }) {
 
   if (cfg.linkGuard && text && detectLink(text)) {
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
-    const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "link", delayKick: true });
+    const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "link", delayKick: true, name: message?.pushName });
     return { handled: true, action: "link", ...result };
   }
 
@@ -619,7 +621,7 @@ export async function handleModeration({ userId, sock, message, cfg }) {
     const hit = matchWords(text, cfg.words);
     if (hit) {
       await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
-      const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "word", delayKick: true });
+      const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "word", delayKick: true, name: message?.pushName });
       return { handled: true, action: "word", word: hit, ...result };
     }
   }

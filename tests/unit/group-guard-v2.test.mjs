@@ -280,7 +280,7 @@ test('سجل المطرودين يُسجّل السبب والعدد ويقبل 
   assert.match(guard, /export function listKicked/);
   assert.match(guard, /export function recordKicked/);
   assert.match(guard, /export function removeKicked/);
-  assert.match(guard, /recordKicked\(userId, groupJid, \{ jid: targetJid \|\| memberJid, reason: reasonText, count \}\)/);
+  assert.match(guard, /recordKicked\(userId, groupJid, \{ jid: targetJid \|\| memberJid, reason: reasonText, count, name: memberName \}\)/);
 });
 
 test('مخالفات العضو تبقى محفوظة عند خروجه وعودته ويُنبَّه بدل الترحيب', () => {
@@ -288,4 +288,17 @@ test('مخالفات العضو تبقى محفوظة عند خروجه وعود
   assert.match(guard, /لديك \*\$\{previous\}\* مخالفة سابقة/);
   assert.match(guard, /continue; \/\/ لا نرسل رسالة ترحيب لمن لديه مخالفات سابقة/);
   assert.ok(!/resetWarnings\(userId, groupJid, resolvedJid\);\n      if \(!cfg\.welcome/.test(guard), 'لا تصفير عند الدخول');
+});
+
+test('أسماء المخالفين تُحفظ وتظهر في لوحة الويب بدل الأرقام', () => {
+  assert.match(guard, /\[WARN-NAME\]/);
+  assert.match(guard, /name: message\?\.pushName/);
+  assert.match(guard, /reasons, name: memberName/);
+  assert.match(guard, /\.map\(\(\[jid, info\]\) => \(\{ jid, name: info\?\.name \|\| ""/);
+  const ui = readFileSync(new URL('../../public/groups-guard-web.js', import.meta.url), 'utf8');
+  assert.match(ui, /function displayName\(row\)/);
+  assert.match(ui, /data-readd=/);
+  assert.match(ui, /gg-ava/);
+  assert.ok(!/gg-tbl/.test(ui), 'لا جداول قديمة تكسر العرض');
+  assert.match(ui, /\.gg-card\.wide\{grid-column:1\/-1\}/);
 });
