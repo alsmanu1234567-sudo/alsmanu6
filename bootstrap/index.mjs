@@ -15,12 +15,20 @@ import { ensureYtDlp, ensureFfmpegStatic } from "../infrastructure/binary-manage
 import { spawnBot } from "../infrastructure/process-manager.mjs";
 import {
   getExternalDepsDir,
+  describeExternalDeps,
   prepareExternalNodeModules,
   prepareExternalSessionStorage,
+  prepareExternalDataStorage,
 } from "./external-deps.mjs";
 
 const BASE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// [SMART-PATHS] نكتشف مجلد المكتبات من المسار الفعلي (مهما تغيّر اسم المجلد أو الاستضافة)
+const EXTERNAL_INFO = (() => {
+  try { return describeExternalDeps(BASE_DIR); } catch (error) { return { project: BASE_DIR, dir: getExternalDepsDir(BASE_DIR), source: "fallback-after-error", score: 0, error: String(error?.message || error) }; }
+})();
 const EXTERNAL_DEPS_DIR = getExternalDepsDir(BASE_DIR);
+// نُصدّر المسار للأبناء (البوت + اللوحة) حتى تستخدم نفس المخزن
+process.env.BOT_EXTERNAL_DEPS_DIR = EXTERNAL_DEPS_DIR;
 const EXTERNAL_NODE_MODULES_DIR = join(EXTERNAL_DEPS_DIR, "node_modules");
 const NO_INSTALL = process.argv.includes("--no-install");
 const RUNTIME_DIR = join(BASE_DIR, ".runtime");
@@ -190,9 +198,17 @@ async function main() {
   process.once("exit", () => rmSync(PID_FILE, { force: true }));
 
   banner("WhatsApp Bot Pro — Safe Bootstrap");
+  ok(`مجلد البوت: ${BASE_DIR}`);
+  ok(`مجلد المكتبات الخارجي: ${EXTERNAL_DEPS_DIR} (مصدر الاكتشاف: ${EXTERNAL_INFO.source}${EXTERNAL_INFO.score ? ` · الثقة ${EXTERNAL_INFO.score}` : ""})`);
   prepareExternalNodeModules(BASE_DIR, EXTERNAL_DEPS_DIR);
   const sessionStorage = prepareExternalSessionStorage(BASE_DIR, EXTERNAL_DEPS_DIR);
   ok(`جلسات واتساب محفوظة خارج المشروع: ${sessionStorage.externalSessions}`);
+  try {
+    const dataStorage = prepareExternalDataStorage(BASE_DIR, EXTERNAL_DEPS_DIR);
+    ok(`بيانات البوت (bot-data) محفوظة خارج المشروع: ${dataStorage.externalData}`);
+  } catch (error) {
+    wrn(`تعذر نقل bot-data للخارج (سيبقى داخل المشروع): ${error.message}`);
+  }
   runAllChecks({ minNode: 18, minRAM: 150 });
   loadConfig(BASE_DIR);
   applyDefaults();
@@ -216,7 +232,21 @@ async function main() {
     ok("فحص bootstrap اكتمل دون تشغيل البوت");
     return;
   }
+  // [SMART-PATHS] نعيد استخدام yt-dlp من المخزن الخارجي بدل تنزيله كل تشغيل
+  const externalYtDlp = join(EXTERNAL_DEPS_DIR, "bin", "yt-dlp");
+  try {
+    if (!process.env.YTDLP_PATH && existsSync(externalYtDlp)) process.env.YTDLP_PATH = externalYtDlp;
+  } catch { }
   await ensureYtDlp(BASE_DIR);
+  try {
+    const localYtDlp = join(BASE_DIR, "bin", "yt-dlp");
+    if (existsSync(localYtDlp) && !existsSync(externalYtDlp)) {
+      mkdirSync(dirname(externalYtDlp), { recursive: true });
+      cpSync(localYtDlp, externalYtDlp);
+      process.env.YTDLP_PATH = externalYtDlp;
+      ok(`احتُفظ بنسخة yt-dlp في المخزن الخارجي: ${externalYtDlp}`);
+    }
+  } catch { }
   await ensureFfmpegStatic(BASE_DIR, { allowDownload: !NO_INSTALL });
 
   // The standalone control service is copied next to external dependencies, not into session storage.

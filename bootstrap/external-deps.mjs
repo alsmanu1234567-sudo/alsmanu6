@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -7,9 +8,11 @@ import {
   readlinkSync,
   realpathSync,
   renameSync,
+  rmSync,
   symlinkSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { resolveExternalDepsDir, markExternalDepsDir, ensureExternalLayout } from "./paths.mjs";
 
 function lstatOrNull(path) {
   try {
@@ -20,9 +23,29 @@ function lstatOrNull(path) {
   }
 }
 
+/**
+ * [SMART-PATHS] يعيد مجلد المكتبات الخارجي بعد اكتشافه ديناميكياً.
+ * يعمل حتى لو تغيّر اسم مجلد البوت أو مستوى التعشيش في الاستضافة.
+ */
 export function getExternalDepsDir(baseDir) {
+  const project = resolve(baseDir);
   const configured = process.env.BOT_EXTERNAL_DEPS_DIR?.trim();
-  return resolve(configured || join(resolve(baseDir), "..", "bol"));
+  if (configured) {
+    const dir = resolve(configured);
+    ensureExternalLayout(dir);
+    return dir;
+  }
+  const { dir, source, score } = resolveExternalDepsDir(project);
+  ensureExternalLayout(dir);
+  try { markExternalDepsDir(dir, project, { source, score }); } catch { }
+  return dir;
+}
+
+/** يوضّح من أين جاء مسار المكتبات — يظهر في سجل التشغيل */
+export function describeExternalDeps(baseDir) {
+  const project = resolve(baseDir);
+  const { dir, source, score } = resolveExternalDepsDir(project);
+  return { project, dir, source, score };
 }
 
 export function prepareExternalNodeModules(baseDir, externalDir = getExternalDepsDir(baseDir)) {
@@ -58,11 +81,12 @@ export function prepareExternalNodeModules(baseDir, externalDir = getExternalDep
       throw new Error("node_modules داخل المشروع ليس مجلداً؛ لم أغيّره.");
     }
     if (externalInfo) {
-      throw new Error(
-        `يوجد node_modules داخل البوت وخارجه معاً؛ لم أحذف أياً منهما. انقل القديم يدوياً إلى ${externalRoot}.`
-      );
+      // [SMART-PATHS] وجود الاثنين لا يجب أن يمنع الإقلاع: نُبقي الخارجي ونحفظ الداخلي باسم احتياطي
+      const backup = join(projectRoot, `.node_modules.backup-${Date.now()}`);
+      try { renameSync(projectNodeModules, backup); } catch { }
+    } else {
+      renameSync(projectNodeModules, externalNodeModules);
     }
-    renameSync(projectNodeModules, externalNodeModules);
   }
 
   const installedInfo = lstatOrNull(externalNodeModules);
@@ -139,20 +163,23 @@ export function prepareExternalSessionStorage(baseDir, externalDir = getExternal
   if (localInfo?.isSymbolicLink()) {
     const currentTarget = resolve(dirname(projectSessions), readlinkSync(projectSessions));
     if (currentTarget !== externalSessions) {
-      throw new Error(`wa-sessions يشير لمسار مختلف (${currentTarget})؛ لم أغيّره.`);
+      // [SMART-PATHS] رابط قديم من استضافة سابقة: نصحّحه للمسار المكتشف حالياً
+      try { rmSync(projectSessions, { force: true }); } catch { }
+      try { symlinkSync(externalSessions, projectSessions, process.platform === "win32" ? "junction" : "dir"); } catch { }
+      return { externalSessions, projectSessions, corrected: currentTarget };
     }
   } else if (localInfo) {
     if (!localInfo.isDirectory()) {
       throw new Error("wa-sessions داخل المشروع ليس مجلداً؛ لم أغيّره.");
     }
     if (externalInfo) {
-      throw new Error(
-        `توجد جلسات داخل البوت وخارجه معاً؛ لم أدمج أو أحذف أياً منهما. راجع ${externalSessions} يدوياً.`
-      );
+      // [SMART-PATHS] دمج آمن بلا استبدال: ما في الداخل يُنسخ لما هو غير موجود في الخارج
+      try { cpSync(projectSessions, externalSessions, { recursive: true, force: false, errorOnExist: false }); } catch { }
+      try { rmSync(projectSessions, { recursive: true, force: true }); } catch { }
     }
-    secureSessionTree(projectSessions);
+    if (lstatOrNull(projectSessions)) secureSessionTree(projectSessions);
     try {
-      renameSync(projectSessions, externalSessions);
+      if (lstatOrNull(projectSessions)) renameSync(projectSessions, externalSessions);
     } catch (error) {
       throw new Error(
         `تعذر نقل مجلد الجلسات بأمان إلى ${externalSessions} (${error.code ?? error.message}). ` +
@@ -173,4 +200,60 @@ export function prepareExternalSessionStorage(baseDir, externalDir = getExternal
   // Baileys creates and updates auth files after this setup.
   process.umask(0o077);
   return { externalSessions, projectSessions };
+}
+
+
+/**
+ * [SMART-PATHS] يجعل bot-data (المستخدمون، الردود، سجل الحماية) خارج مجلد البوت
+ * بنفس أسلوب الجلسات: نقل آمن مرة واحدة ثم رابط رمزي.
+ * بدون ذلك تُفقد البيانات كل مرة يعيد المشغّل تنزيل الكود.
+ */
+export function prepareExternalDataStorage(baseDir, externalDir = getExternalDepsDir(baseDir)) {
+  const projectRoot = resolve(baseDir);
+  const projectData = join(projectRoot, "bot-data");
+  const externalRoot = resolve(externalDir);
+  const configured = process.env.BOT_EXTERNAL_DATA_DIR?.trim();
+  const externalData = resolve(configured || join(externalRoot, "bot-data"));
+
+  mkdirSync(externalRoot, { recursive: true });
+  mkdirSync(dirname(externalData), { recursive: true, mode: 0o700 });
+
+  const projectInfo = lstatOrNull(projectData);
+  const externalInfo = lstatOrNull(externalData);
+
+  if (externalInfo?.isSymbolicLink()) {
+    // المخزن الخارجي نفسه يجب أن يكون مجلداً حقيقياً
+    return { externalData, projectData, skipped: true };
+  }
+  if (externalInfo && !externalInfo.isDirectory()) {
+    return { externalData, projectData, skipped: true };
+  }
+
+  if (projectInfo?.isSymbolicLink()) {
+    const target = resolve(dirname(projectData), readlinkSync(projectData));
+    if (target !== externalData) {
+      // رابط قديم لمسار لا يطابق الاكتشاف الحالي — نصحّحه بدل الفشل
+      try { rmSync(projectData, { force: true }); } catch { }
+      try { symlinkSync(externalData, projectData, process.platform === "win32" ? "junction" : "dir"); } catch { }
+    }
+  } else if (projectInfo) {
+    if (!projectInfo.isDirectory()) return { externalData, projectData, skipped: true };
+    if (externalInfo) {
+      // يوجد الاثنان: ندمج ما في الداخل إلى الخارج دون حذف أي شيء
+      cpSync(projectData, externalData, { recursive: true, force: false, errorOnExist: false });
+    } else {
+      try {
+        renameSync(projectData, externalData);
+      } catch {
+        cpSync(projectData, externalData, { recursive: true, force: false, errorOnExist: false });
+      }
+    }
+    try { rmSync(projectData, { recursive: true, force: true }); } catch { }
+  }
+
+  if (!lstatOrNull(externalData)) mkdirSync(externalData, { recursive: true, mode: 0o700 });
+  if (!lstatOrNull(projectData)) {
+    try { symlinkSync(externalData, projectData, process.platform === "win32" ? "junction" : "dir"); } catch { }
+  }
+  return { externalData, projectData };
 }

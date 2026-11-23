@@ -9,10 +9,17 @@ import { sendInteractive, listButton, extractInteractiveResponseId } from "./int
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(MODULE_DIR);
 const DATA_ROOT = (() => {
-  for (const candidate of [path.join(process.cwd(), "bot-data"), path.join(REPO_ROOT, "bot-data")]) {
+  // [SMART-PATHS] أولوية للمخزن الخارجي حتى لا تُفقد سجلات الحماية عند إعادة النشر
+  const externalBase = process.env.BOT_EXTERNAL_DEPS_DIR?.trim();
+  const candidates = [
+    externalBase ? path.join(externalBase, "bot-data") : "",
+    path.join(process.cwd(), "bot-data"),
+    path.join(REPO_ROOT, "bot-data"),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
     try { if (fs.existsSync(candidate)) return candidate; } catch { }
   }
-  return path.join(process.cwd(), "bot-data");
+  return candidates[0] || path.join(process.cwd(), "bot-data");
 })();
 const DATA_DIR = path.join(DATA_ROOT, "group-guard");
 const CARD_UPLOADS = path.join(DATA_ROOT, "cards");
