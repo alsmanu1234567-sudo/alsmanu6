@@ -296,7 +296,7 @@ export function isInKickedLog(userId, groupJid, jid) {
 }
 
 /** [LEVEL-7] نافذة الإغراق: كم رسالة أرسلها العضو خلال المدة؟ */
-function trackFlood(groupJid, memberJid, windowSec) {
+export function trackFlood(groupJid, memberJid, windowSec) {
   const key = `${groupJid}:${digitsOf(memberJid) || memberJid}`;
   const windowMs = Math.max(3, Number(windowSec) || 12) * 1000;
   const now = Date.now();
@@ -306,12 +306,12 @@ function trackFlood(groupJid, memberJid, windowSec) {
   return hits.length;
 }
 
-function clearFlood(groupJid, memberJid) {
+export function clearFlood(groupJid, memberJid) {
   floodWindows.delete(`${groupJid}:${digitsOf(memberJid) || memberJid}`);
 }
 
 /** [LEVEL-7] تكرار نفس النص: نفس الرسالة مرتين خلال 5 دقائق */
-function trackRepeat(groupJid, memberJid, text) {
+export function trackRepeat(groupJid, memberJid, text) {
   const key = `${groupJid}:${digitsOf(memberJid) || memberJid}`;
   const value = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
   if (value.length < 6) return false;
@@ -1627,6 +1627,65 @@ export function clearWelcomeQueue(userId, groupJid) {
   if (entry) { try { clearTimeout(entry.timer); } catch { } welcomeQueue.delete(key); }
 }
 
+// ═══ [MEMORY-HYGIENE] تنظيف ذاكرة الحماية: خرائط النشاط والتخزين المؤقت ═══
+const GUARD_LIMITS = { floods: 4000, texts: 4000, participants: 300, socketsPerUser: 6 };
+
+export function pruneGuardMemory(now = Date.now()) {
+  let removed = 0;
+  for (const [key, hits] of floodWindows) {
+    const fresh = Array.isArray(hits) ? hits.filter((at) => now - at < 120_000) : [];
+    if (!fresh.length) { floodWindows.delete(key); removed++; }
+    else floodWindows.set(key, fresh);
+  }
+  while (floodWindows.size > GUARD_LIMITS.floods) { floodWindows.delete(floodWindows.keys().next().value); removed++; }
+
+  for (const [key, row] of lastSeenText) {
+    if (!row || now - (Number(row.at) || 0) > 30 * 60_000) { lastSeenText.delete(key); removed++; }
+  }
+  while (lastSeenText.size > GUARD_LIMITS.texts) { lastSeenText.delete(lastSeenText.keys().next().value); removed++; }
+
+  for (const [key, row] of participantsCache) {
+    if (!row || now - (Number(row.at) || 0) > 5 * 60_000) { participantsCache.delete(key); removed++; }
+  }
+  while (participantsCache.size > GUARD_LIMITS.participants) { participantsCache.delete(participantsCache.keys().next().value); removed++; }
+
+  for (const [userId, set] of guardSockets) {
+    for (const sock of set) {
+      const state = sock?.ws?.readyState;
+      if (!sock || state === 2 || state === 3) { set.delete(sock); removed++; }
+    }
+    while (set.size > GUARD_LIMITS.socketsPerUser) { set.delete(set.values().next().value); removed++; }
+    if (!set.size) guardSockets.delete(userId);
+  }
+  return removed;
+}
+
+export function guardMemoryStats() {
+  return {
+    usersInMemory: store.size,
+    floodWindows: floodWindows.size,
+    lastTexts: lastSeenText.size,
+    participantsCaches: participantsCache.size,
+    pendingKicks: pendingKicks.size,
+    welcomeQueues: welcomeQueue.size,
+    sockets: [...guardSockets.values()].reduce((sum, set) => sum + set.size, 0),
+  };
+}
+
+let memoryHygieneTimer = null;
+function startMemoryHygiene() {
+  if (memoryHygieneTimer) return;
+  memoryHygieneTimer = setInterval(() => {
+    try {
+      const removed = pruneGuardMemory();
+      if (removed > 0) {
+        try { console.info?.(`[GROUP-GUARD] [MEMORY-HYGIENE] حُذف ${removed} عنصراً من ذاكرة الحماية`); } catch { }
+      }
+    } catch { }
+  }, 5 * 60_000);
+  if (typeof memoryHygieneTimer.unref === "function") memoryHygieneTimer.unref();
+}
+
 // ═══ [LEVEL-5] التقرير اليومي التلقائي ═══
 const guardSockets = new Map(); // userId -> Set(sock)
 let dailyReportTimer = null;
@@ -1636,6 +1695,7 @@ function registerGuardSocket(userId, sock) {
   const set = guardSockets.get(key) || new Set();
   set.add(sock);
   guardSockets.set(key, set);
+  startMemoryHygiene();
   if (!dailyReportTimer) {
     dailyReportTimer = setInterval(() => { void runDailyReports(); }, 60_000);
     if (typeof dailyReportTimer.unref === "function") dailyReportTimer.unref();

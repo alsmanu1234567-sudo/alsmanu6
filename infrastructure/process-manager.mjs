@@ -19,8 +19,11 @@ import { writeFile, rename } from "fs/promises";
 import { join, dirname }      from "path";
 import { ok, wrn, logErr } from "../core/logger.mjs";
 
-const MAX_RESTARTS   = 10;         // حد أقصى لإعادات التشغيل في الجلسة
+const MAX_RESTARTS   = 10;         // حد أقصى لإعادات التشغيل المتتالية
 const RESTART_DELAY  = 3_000;      // 3 ثوانٍ انتظار بين كل إعادة تشغيل
+// [STABLE-RESET] بعد مدة تشغيل مستقرة نُصفّر العدّاد: 10 كراشات موزّعة على شهور
+// كانت تُوقف البوت نهائياً بلا سبب حقيقي.
+const STABLE_RESET_MS = 10 * 60 * 1000;
 
 // ── التحقق من ملف الدخول ─────────────────────────────────────
 /**
@@ -85,10 +88,14 @@ export function spawnBot(baseDir, options = {}) {
 
     child.on("error", e => logErr(`خطأ في العملية: ${e.message}`));
 
+    const launchStartedAt = Date.now();
     child.on("exit", (code, signal) => {
       if (onExit) onExit(code, signal);
 
       if (stopped) return;
+
+      // [STABLE-RESET] تشغيل مستقر = نبدأ العدّاد من جديد
+      if (Date.now() - launchStartedAt >= STABLE_RESET_MS) restartCount = 0;
 
       // خروج طبيعي بكود 0 — لا إعادة تشغيل
       if (code === 0) {

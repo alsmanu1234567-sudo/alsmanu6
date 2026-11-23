@@ -581,3 +581,31 @@ test('المستوى 5: أوامر ومسارات وواجهة الدومينا�
   assert.match(ui, /gg-bars/);
   assert.match(ui, /دومينات وتقرير/);
 });
+
+test("نظافة الذاكرة: تنظيف خرائط الحماية لا يتركها تتضخم", async () => {
+  const guard = await import('../../services/group-guard.mjs');
+  const before = guard.guardMemoryStats();
+  assert.equal(typeof before.usersInMemory, 'number');
+  const removed = guard.pruneGuardMemory();
+  assert.ok(removed >= 0);
+  // إطعام الخرائط بمدخلات قديمة ثم التأكد من حذفها
+  const uid = `test-mem-${Date.now()}`;
+  const gid = '120363000000000444@g.us';
+  guard.updateGroupConfig(uid, gid, { floodGuard: true });
+  const sock = {
+    user: { id: '249000000000:1@s.whatsapp.net' },
+    groupMetadata: async () => ({ participants: [] }),
+    sendMessage: async () => ({}),
+  };
+  await guard.handleParticipants({ userId: uid, sock, event: { id: gid, action: 'add', participants: [{ id: '249955555555@s.whatsapp.net' }] }, logger: null });
+  const cleaned = guard.pruneGuardMemory(Date.now() + 60 * 60 * 1000);
+  assert.ok(cleaned >= 1, 'المدخلات القديمة تُحذف');
+  const fsMod = await import('node:fs');
+  const source = fsMod.readFileSync(new URL('../../services/group-guard.mjs', import.meta.url), 'utf8');
+  assert.match(source, /\[MEMORY-HYGIENE\]/);
+  assert.match(source, /function startMemoryHygiene|const startMemoryHygiene/);
+  try {
+    const fs = await import('node:fs');
+    fs.rmSync(new URL(`../../bot-data/group-guard/${uid}.json`, import.meta.url), { force: true });
+  } catch { }
+});

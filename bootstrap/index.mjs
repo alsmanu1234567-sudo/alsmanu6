@@ -14,6 +14,7 @@ import { ensure as ensurePackages, missingDeclaredPackages } from "../infrastruc
 import { ensureYtDlp, ensureFfmpegStatic } from "../infrastructure/binary-manager.mjs";
 import { spawnBot } from "../infrastructure/process-manager.mjs";
 import { ensureNodeCompatibility } from "./compat.mjs";
+import { startMemoryGuard, readMemoryLimitMb } from "./memory-guard.mjs";
 import {
   getExternalDepsDir,
   describeExternalDeps,
@@ -271,6 +272,19 @@ async function main() {
     autoRestart: true,
     onSpawn: (child) => engine?.setChildProcess?.(child),
   });
+  // [MEMORY-GUARD] حارس الرام: تسجيل دوري + إعادة تشغيل واقية قبل أن يخنق السيرفر
+  try {
+    const limitMb = readMemoryLimitMb();
+    const guard = startMemoryGuard({
+      getChild: () => runner.getChild(),
+      logger: { info: (m) => ok(m), warn: (m) => wrn(m) },
+      restart: (child) => { try { child.kill("SIGKILL"); } catch { } },
+    });
+    globalThis.__memoryGuard = guard;
+    ok(`حارس الذاكرة يعمل — حد الذاكرة المكتشف: ${limitMb ? `${limitMb}MB` : "غير معروف (افتراضي 1200MB)"}`);
+  } catch (error) {
+    wrn(`تعذر تشغيل حارس الذاكرة: ${error.message}`);
+  }
   await new Promise((resolveWait) => setTimeout(resolveWait, 8_000));
   engine = await startEngine({ baseDir: BASE_DIR, childProcess: runner.getChild(), port }).catch((error) => {
     wrn(`Session Engine لم يبدأ: ${error.message}`);

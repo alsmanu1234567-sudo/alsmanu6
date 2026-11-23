@@ -123902,10 +123902,12 @@ function loadJson(file, defaultVal) {
   }
   return defaultVal;
 }
+var _dbWritesSincePersist = 0;
 function saveJson(file, data) {
   try {
     ensureDataDir();
     fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf-8");
+    _dbWritesSincePersist++;
   } catch (err) {
     logger.error({ err }, "Failed to save data to file");
   }
@@ -123926,8 +123928,14 @@ async function connectDatabase() {
   startPeriodicSave();
 }
 function startPeriodicSave() {
-  setInterval(() => {
+  const _saveTimer = setInterval(() => {
     try {
+      // [MEMORY-HYGIENE] لا نعيد كتابة كل الملفات لو لم يتغير شيء (كان يستهلك CPU/RAM كل 3 دقائق)
+      if (_dbWritesSincePersist <= 0) {
+        logger.debug("Periodic save skipped (no changes)");
+        return;
+      }
+      _dbWritesSincePersist = 0;
       persistUsers();
       persistReplies();
       persistPoints();
@@ -123938,6 +123946,7 @@ function startPeriodicSave() {
       logger.error({ err }, "Periodic save failed");
     }
   }, 3 * 60 * 1e3);
+  if (typeof _saveTimer.unref === "function") _saveTimer.unref();
   process.on("SIGTERM", () => {
     persistUsers();
     persistReplies();
@@ -292830,9 +292839,17 @@ function getViewOnceMeta(m) {
 const _lastReconnectNoticeAt = new Map();
 function shouldSendReconnectNotice(sessKey, number) {
   const key = `${sessKey || ""}:${number || ""}`;
+  const now = Date.now();
+  // [MEMORY-HYGIENE] الخريطة صغيرة بطبيعتها لكن نضمن حداً أعلى دائماً
+  if (_lastReconnectNoticeAt.size > 200) {
+    for (const [oldKey, at] of _lastReconnectNoticeAt) {
+      if (now - (Number(at) || 0) > 6 * 60 * 60 * 1000) _lastReconnectNoticeAt.delete(oldKey);
+    }
+    while (_lastReconnectNoticeAt.size > 200) _lastReconnectNoticeAt.delete(_lastReconnectNoticeAt.keys().next().value);
+  }
   const last = _lastReconnectNoticeAt.get(key) || 0;
-  if (Date.now() - last < 30 * 60 * 1000) return false;
-  _lastReconnectNoticeAt.set(key, Date.now());
+  if (now - last < 30 * 60 * 1000) return false;
+  _lastReconnectNoticeAt.set(key, now);
   return true;
 }
 
@@ -292872,15 +292889,23 @@ async function exportSessionFile(bot2, chatId, userId) {
   for (const sessionKey of keys) {
     const base = path3.join(WA_SESSIONS_ROOT, sessionKey);
     const files = [];
+    // [MEMORY-HYGIENE] سقف حجم إجمالي لتصدير الجلسة — كانت قراءة كل الملفات
+    // في الرام بلا سقف (مجلد جلسة متضخم = قفزة رام ضخمة ثم تعليق).
+    const EXPORT_TOTAL_LIMIT = 64 * 1024 * 1024;
+    let totalBytes = 0;
     const walk = (dir, prefix) => {
       for (const entry of fs6.readdirSync(dir, { withFileTypes: true })) {
+        if (totalBytes >= EXPORT_TOTAL_LIMIT) return;
         const full = path3.join(dir, entry.name);
         const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
         if (entry.isDirectory()) walk(full, rel);
         else {
           try {
-            if (fs6.statSync(full).size > 20 * 1024 * 1024) continue;
+            const size = fs6.statSync(full).size;
+            if (size > 20 * 1024 * 1024) continue;
+            if (totalBytes + size > EXPORT_TOTAL_LIMIT) continue;
             files.push({ name: rel, data: fs6.readFileSync(full) });
+            totalBytes += size;
           } catch { }
         }
       }
@@ -293820,9 +293845,31 @@ function setupAlwaysOnline(sock, userId) {
     }
     heartbeat();
   };
-  const interval = setInterval(tick, 25e3);
+  let interval = setInterval(tick, 25e3);
+  if (typeof interval.unref === "function") interval.unref();
+  const _stopAlwaysOnline = () => {
+    try { clearInterval(interval); } catch { }
+    try { if (sock.__alwaysOnlineTimer === interval) sock.__alwaysOnlineTimer = void 0; } catch { }
+  };
+  try {
+    // [MEMORY-HYGIENE] سوكت قديم متروك كان يترك مؤقتاً يعمل للأبد
+    if (sock.__alwaysOnlineTimer) clearInterval(sock.__alwaysOnlineTimer);
+    sock.__alwaysOnlineTimer = interval;
+  } catch { }
+  // راقب السوكت: terminate() لا يطلق connection.update فالمؤقت كان يعيش للأبد
+  const _watchDead = setInterval(() => {
+    const st = sock?.ws?.readyState;
+    if (st === 2 || st === 3) {
+      clearInterval(_watchDead);
+      _stopAlwaysOnline();
+    }
+  }, 60e3);
+  if (typeof _watchDead.unref === "function") _watchDead.unref();
   sock.ev.on("connection.update", (u3) => {
-    if (u3.connection === "close") clearInterval(interval);
+    if (u3.connection === "close") {
+      clearInterval(_watchDead);
+      _stopAlwaysOnline();
+    }
   });
 }
 async function cancelSession(sessKeyOrUserId) {
@@ -294880,6 +294927,7 @@ ${nameLine}${statusLine}`;
                 rawBuf = null;
               }
               if (rawBuf) {
+                // PATCH_VOICE_CONVERT_APPLIED_v1 (علامة التحقق — الملف مُرقَّع فعلياً)
                 const { prepareAudioForTranscription } = await import("./services/media/audio-chunker.mjs");
                 const rawMime = quotedMedia.mimetype || (quotedVideo ? "video/mp4" : "audio/ogg");
                 const rawExt = rawMime.includes("mp4") ? "mp4" : rawMime.includes("mpeg") || rawMime.includes("mp3") ? "mp3" : rawMime.includes("wav") ? "wav" : "ogg";

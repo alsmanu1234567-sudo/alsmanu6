@@ -22,14 +22,28 @@ function tmpFile(ext) {
   return path.join(os.tmpdir(), `achunk_${crypto.randomBytes(6).toString("hex")}.${ext}`);
 }
 
+// [MEMORY-HYGIENE] سقف لمخرجات ffmpeg: ملف تالف كان يملأ stderr بمئات الميغابايت
+const FF_STDERR_LIMIT = 8 * 1024;
+const FF_TIMEOUT_MS = 120_000; // لا نترك ffmpeg معلّقاً للأبد
+
+function _guardFfmpeg(ff) {
+  const timer = setTimeout(() => { try { ff.kill("SIGKILL"); } catch { } }, FF_TIMEOUT_MS);
+  if (typeof timer.unref === "function") timer.unref();
+  return timer;
+}
+
 async function runFfmpeg(args) {
   const bin = await getFfmpegPath(); // يعمل على أي استضافة عبر ffmpeg-static
   return new Promise((resolve, reject) => {
-    const ff = spawn(bin, args);
+    const ff = spawn(bin, ["-nostdin", ...args]);
+    const timer = _guardFfmpeg(ff);
     let stderr = "";
-    ff.stderr.on("data", (d) => { stderr += d.toString(); });
-    ff.on("error", reject);
+    ff.stderr.on("data", (d) => {
+      stderr = (stderr + d.toString()).slice(-FF_STDERR_LIMIT);
+    });
+    ff.on("error", (error) => { clearTimeout(timer); reject(error); });
     ff.on("close", (code) => {
+      clearTimeout(timer);
       if (code === 0) resolve();
       else reject(new Error(`ffmpeg exited with code ${code}: ${stderr.slice(-800)}`));
     });
@@ -41,11 +55,14 @@ async function runFfmpeg(args) {
 async function runFfmpegCaptureStderr(args) {
   const bin = await getFfmpegPath();
   return new Promise((resolve, reject) => {
-    const ff = spawn(bin, args);
+    const ff = spawn(bin, ["-nostdin", ...args]);
+    const timer = _guardFfmpeg(ff);
     let stderr = "";
-    ff.stderr.on("data", (d) => { stderr += d.toString(); });
-    ff.on("error", reject);
-    ff.on("close", () => resolve(stderr));
+    ff.stderr.on("data", (d) => {
+      stderr = (stderr + d.toString()).slice(-FF_STDERR_LIMIT);
+    });
+    ff.on("error", (error) => { clearTimeout(timer); reject(error); });
+    ff.on("close", () => { clearTimeout(timer); resolve(stderr); });
   });
 }
 

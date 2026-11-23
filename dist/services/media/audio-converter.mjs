@@ -21,6 +21,7 @@ export async function convertToWhatsappOpus(inputBuffer) {
   try {
     await new Promise((resolve, reject) => {
       const ff = spawn(ffmpegBin, [
+        "-nostdin",
         "-y",
         "-i", inPath,
         "-c:a", "libopus",
@@ -30,10 +31,14 @@ export async function convertToWhatsappOpus(inputBuffer) {
         "-application", "voip",
         outPath,
       ]);
+      // [MEMORY-HYGIENE] لا نجمّع stderr بلا سقف + لا نترك ffmpeg معلّقاً
       let stderr = "";
-      ff.stderr.on("data", (d) => { stderr += d.toString(); });
-      ff.on("error", reject);
+      const timer = setTimeout(() => { try { ff.kill("SIGKILL"); } catch { } }, 120_000);
+      if (typeof timer.unref === "function") timer.unref();
+      ff.stderr.on("data", (d) => { stderr = (stderr + d.toString()).slice(-8192); });
+      ff.on("error", (error) => { clearTimeout(timer); reject(error); });
       ff.on("close", (code) => {
+        clearTimeout(timer);
         if (code === 0) resolve();
         else reject(new Error(`ffmpeg exited with code ${code}: ${stderr.slice(-800)}`));
       });
