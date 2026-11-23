@@ -41,6 +41,7 @@ import {
   publishWebGroupAutoPostNow,
   webGuardTestWelcome,
   webGuardReAdd,
+  webGuardKick,
 } from "./handlers/groups-handler.mjs";
 import {ludoEngine,loadLudoHtml} from "../services/ludo-game.mjs";
 import { getSharedState, joinShared, moveShared } from "../services/xo-shared.mjs";
@@ -218,6 +219,10 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/fw/groups/guard/readd', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);
     return webGuardReAdd(uid, groupId, String(req.body?.jid || ""), req.body?.phoneNumber || null);
+  }));
+  app.post('/api/fw/groups/guard/kick', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    return webGuardKick(uid, groupId, String(req.body?.jid || ""), req.body?.phoneNumber || null, String(req.body?.reason || ""));
   }));
   app.post('/api/fw/groups/guard/kicked/remove', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);

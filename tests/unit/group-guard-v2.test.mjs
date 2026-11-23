@@ -293,7 +293,7 @@ test('مخالفات العضو تبقى محفوظة عند خروجه وعود
 test('أسماء المخالفين تُحفظ وتظهر في لوحة الويب بدل الأرقام', () => {
   assert.match(guard, /\[WARN-NAME\]/);
   assert.match(guard, /name: message\?\.pushName/);
-  assert.match(guard, /reasons, name: memberName/);
+  assert.match(guard, /reasons, details, name: memberName/);
   assert.match(guard, /\.map\(\(\[jid, info\]\) => \(\{ jid, name: info\?\.name \|\| ""/);
   const ui = readFileSync(new URL('../../public/groups-guard-web.js', import.meta.url), 'utf8');
   assert.match(ui, /function displayName\(row\)/);
@@ -301,4 +301,39 @@ test('أسماء المخالفين تُحفظ وتظهر في لوحة الوي
   assert.match(ui, /gg-ava/);
   assert.ok(!/gg-tbl/.test(ui), 'لا جداول قديمة تكسر العرض');
   assert.match(ui, /\.gg-card\.wide\{grid-column:1\/-1\}/);
+});
+
+test('أي مخالفة أثناء عدّاد الثلاثين ثانية تطرد فوراً حتى للصور والصوت والملصقات والروابط والكلمات', () => {
+  assert.match(guard, /export function hasPendingKick/);
+  assert.match(guard, /\[KICK-PENDING\] أي مخالفة أثناء عدّاد الطرد = طرد فوري بلا انتظار/);
+  assert.match(guard, /async function kickImmediately\(\{ userId, sock, groupJid, memberJid, name, reasonText, count, notifyText \}\)/);
+  assert.match(guard, /clearTimeout\(timer\); \} catch \{ \} pendingKicks.delete\(key\);/);
+  const branches = ["kick-now-image", "kick-now-audio", "kick-now-sticker", "kick-now-link", "kick-now-word"];
+  for (const action of branches) assert.ok(guard.includes(action), `مسار ${action} مفقود`);
+});
+
+test('تفاصيل المخالفة تُحفظ نصاً فقط والصور والصوت تُعرض بالنوع دون تخزين الملف', async () => {
+  assert.match(guard, /\[WARN-DETAIL\] /);
+  assert.match(guard, /function cleanDetail\(value\)/);
+  assert.match(guard, /slice\(0, 160\)/);
+  const { listWarnings } = await import("../../services/group-guard.mjs");
+  assert.equal(typeof listWarnings, "function");
+  assert.match(guard, /reason: "image", delayKick: true, name: message\?\.pushName, detail: "صورة", silent: true/);
+  assert.match(guard, /reason: "audio", delayKick: true, name: message\?\.pushName, detail: "رسالة صوتية", silent: true/);
+  assert.match(guard, /const linkHit = \(String\(text\)\.match/);
+  assert.match(guard, /reason: "word", delayKick: true, name: message\?\.pushName, detail: text/);
+  assert.match(guard, /\[WARN-SILENT\]/);
+});
+
+test('لوحة الحماية: تفاصيل المخالفة والطرد الفوري والبحث والتصدير', () => {
+  const ui = readFileSync(new URL('../../public/groups-guard-web.js', import.meta.url), 'utf8');
+  assert.match(ui, /data-detail=/);
+  assert.match(ui, /gg-detail/);
+  assert.match(ui, /ماذا نشر؟/);
+  assert.match(ui, /data-kick=/);
+  assert.match(ui, /guard\/kick/);
+  assert.match(ui, /ggExport/);
+  assert.match(ui, /ggSearchWarn/);
+  assert.match(webapp, /api\/fw\/groups\/guard\/kick/);
+  assert.match(webapp, /webGuardKick/);
 });

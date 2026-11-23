@@ -58,6 +58,19 @@
   .gg-mini{padding:7px 10px;font-size:11px;border-radius:10px}
   .gg-empty{font-size:12px;opacity:.7;padding:12px;border:1px dashed #ffffff1f;border-radius:13px;text-align:center;margin-top:8px}
   .gg-tag{display:inline-flex;align-items:center;gap:4px;font-size:10px;padding:2px 7px;border-radius:99px;background:#ffffff1a;opacity:.9}
+  .gg-itemwrap{display:grid;gap:6px}
+  .gg-detail{border:1px solid #ffffff17;border-radius:13px;background:#00000033;padding:8px 12px}
+  .gg-detail .dt{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;line-height:1.75;padding:7px 0;border-bottom:1px dashed #ffffff12;overflow-wrap:anywhere}
+  .gg-detail .dt:last-child{border:0}
+  .gg-detail .dt b{font-weight:600;flex:0 0 auto}
+  .gg-detail .dt code{background:#00000055;border-radius:6px;padding:1px 6px;direction:ltr;display:inline-block;max-width:100%;overflow-wrap:anywhere;font-size:11px}
+  .gg-detail .dt .t{opacity:.85;min-width:0}
+  .gg-stats{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .gg-stat{flex:1 1 108px;border:1px solid #ffffff17;border-radius:14px;padding:9px 12px;background:#ffffff07}
+  .gg-stat b{display:block;font-size:17px;line-height:1.3}
+  .gg-stat small{font-size:10.5px;opacity:.66}
+  .gg-tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+  .gg-tools .gg-in{flex:1 1 170px;min-width:130px}
   .gg-badge{display:inline-block;padding:2px 9px;border-radius:99px;background:#f5b301;color:#241c00;font-weight:700;font-size:11px}
   .gg-badge.red{background:#e5484d;color:#fff}
   .gg-mask{position:fixed;inset:0;background:#05070c99;backdrop-filter:blur(6px);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:22px 12px;overflow:auto}
@@ -167,6 +180,28 @@
     return days === 1 ? "قبل يوم" : `قبل ${days} يوم`;
   }
   const REASON_LABELS = { link: "نشر رابط", word: "كلمة ممنوعة", sticker: "ملصقات ممنوعة", image: "صورة ممنوعة", audio: "رسالة صوتية", manual: "تحذير يدوي من الإدارة" };
+  // [GG-DETAIL] كيف نعرض ماذا نشر بالضبط — الصور والصوت والملصقات لا تُحفظ، نعرض نوعها فقط
+  const DETAIL_ICONS = { link: "🔗", word: "🚫", sticker: "🎟️", image: "🖼️", audio: "🎤", manual: "⚠️", kick: "🚪" };
+  const DETAIL_LABELS = { link: "رابط", word: "كلمة ممنوعة", sticker: "ملصق", image: "صورة", audio: "رسالة صوتية", manual: "تحذير يدوي" };
+  const MEDIA_REASONS = new Set(["image", "audio", "sticker"]);
+  const MEDIA_NOTES = { image: "صورة — تُحذف ولا تُحفظ نهائياً", audio: "رسالة صوتية — تُحذف ولا تُحفظ نهائياً", sticker: "ملصق — يُحذف ولا يُحفظ" };
+  function detailLines(row) {
+    const items = Array.isArray(row?.details) && row.details.length
+      ? row.details
+      : (row?.reasons || []).map((reason) => ({ reason, text: "", at: row?.at }));
+    return items.slice().reverse().map((item) => {
+      const key = String(item?.reason || "");
+      const icon = DETAIL_ICONS[key] || "⚠️";
+      const label = DETAIL_LABELS[key] || REASON_LABELS[key] || "مخالفة";
+      const body = MEDIA_REASONS.has(key)
+        ? `<span class="t">${esc(MEDIA_NOTES[key] || label)}</span>`
+        : (item?.text ? `<code>${esc(item.text)}</code>` : `<span class="t">—</span>`);
+      return `<div class="dt"><b>${icon} ${esc(label)}</b>${body}<span class="t" style="margin-inline-start:auto;opacity:.6">${esc(timeAgo(item?.at || row?.at))}</span></div>`;
+    }).join("");
+  }
+  function digitsOf(jid) { return String(jid || "").replace(/[^0-9]/g, "").slice(-10); }
+  function searchBlob(...parts) { return parts.filter(Boolean).join(" ").toLowerCase(); }
+  function CSS_ESC(value) { return String(value || "").replace(/["\\]/g, "\\$&"); }
 
   let state = { groupId: "", config: null, warnings: [], kicked: [], commands: [] };
 
@@ -205,6 +240,10 @@
   function render(body) {
     const config = state.config || {};
     const warnings = state.warnings || [];
+    const kickedList = state.kicked || [];
+    const kickedDigits = new Set(kickedList.map((row) => digitsOf(row.jid)).filter(Boolean));
+    const activeWarnings = warnings.filter((row) => !kickedDigits.has(digitsOf(row.jid)));
+    const totalWarnings = warnings.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
     const name = (groups().find((g) => g.id === state.groupId) || {}).name || state.groupId;
     body.innerHTML = `
       <div class="gg-wrap">
@@ -279,44 +318,71 @@
 
         <div class="gg-card wide">
           <h3>سجل التحذيرات ${warnings.length ? `<span class="gg-tag">${esc(warnings.length)} عضو</span>` : ""}</h3>
-          <div class="mut">${warnings.length ? "المخالفون الحاليون في هذه المجموعة — اضغط «تصفير» لمسح مخالفات عضو واحد." : "لا توجد تحذيرات مسجّلة — القروب نظيف 👌"}</div>
-          ${warnings.length ? `<div class="gg-list">
+          <div class="mut">${warnings.length ? "اضغط «ماذا نشر؟» لتعرف بالضبط سبب كل تحذير. الصور والصوت لا تُحفظ — تُعرض نوعها فقط." : "لا توجد تحذيرات مسجّلة — القروب نظيف 👌"}</div>
+          <div class="gg-stats">
+            <div class="gg-stat"><b>${esc(activeWarnings.length)}</b><small>مخالف حالي</small></div>
+            <div class="gg-stat"><b>${esc(totalWarnings)}</b><small>إجمالي التحذيرات</small></div>
+            <div class="gg-stat"><b>${esc(kickedList.length)}</b><small>في سجل المطرودين</small></div>
+          </div>
+          ${warnings.length ? `<div class="gg-tools"><input class="gg-in gg-search" id="ggSearchWarn" placeholder="ابحث بالاسم أو الرقم أو السبب…"></div>
+          <div class="gg-list" id="ggWarnList">
             ${warnings.map((row) => {
               const max = Number(config.maxWarnings) || 3;
               const lastReason = (row.reasons || []).slice(-1)[0] || "";
-              return `<div class="gg-item">
-                <div class="gg-ava">${esc(initialsOf(row))}</div>
-                <div class="mid">
-                  <div class="gg-nm">${esc(displayName(row))}</div>
-                  <div class="gg-sub">${esc(REASON_LABELS[lastReason] || lastReason || "مخالفة")} · ${esc(timeAgo(row.at))}</div>
+              const isKicked = kickedDigits.has(digitsOf(row.jid));
+              const blob = searchBlob(displayName(row), String(row.jid || ""), lastReason, REASON_LABELS[lastReason], ...(row.details || []).map((d) => d.text));
+              return `<div class="gg-itemwrap" data-search="${esc(blob)}">
+                <div class="gg-item">
+                  <div class="gg-ava ${row.count >= max ? "red" : ""}">${esc(initialsOf(row))}</div>
+                  <div class="mid">
+                    <div class="gg-nm">${esc(displayName(row))} ${isKicked ? `<span class="gg-tag">مطرود</span>` : ""}</div>
+                    <div class="gg-sub">${esc(REASON_LABELS[lastReason] || lastReason || "مخالفة")} · ${esc(timeAgo(row.at))}</div>
+                  </div>
+                  <span class="gg-badge ${row.count >= max ? "red" : ""}">${esc(row.count)} / ${esc(max)}</span>
+                  <div class="acts">
+                    <button class="gg-btn alt gg-mini" data-detail="${esc(row.jid)}">👁 ماذا نشر؟</button>
+                    <button class="gg-btn alt gg-mini" data-reset="${esc(row.jid)}">تصفير</button>
+                    ${isKicked ? "" : `<button class="gg-btn dng gg-mini" data-kick="${esc(row.jid)}">طرد</button>`}
+                  </div>
                 </div>
-                <span class="gg-badge ${row.count >= max ? "red" : ""}">${esc(row.count)} / ${esc(max)}</span>
-                <div class="acts"><button class="gg-btn alt gg-mini" data-reset="${esc(row.jid)}">تصفير</button></div>
+                <div class="gg-detail" data-panel="${esc(row.jid)}" hidden>
+                  ${detailLines(row) || '<div class="dt"><span class="t">لا تفاصيل محفوظة</span></div>'}
+                  <div class="gg-actions" style="margin-top:6px">
+                    <button class="gg-btn alt gg-mini" data-reset="${esc(row.jid)}">تصفير مخالفاته</button>
+                    <button class="gg-btn alt gg-mini" data-detail="${esc(row.jid)}">إغلاق</button>
+                  </div>
+                </div>
               </div>`;
             }).join("")}
-          </div>` : `<div class="gg-empty">كل شيء تمام — لا أحد عليه مخالفات.</div>`}
+          </div>
+          <div class="gg-empty" id="ggWarnEmpty" hidden>لا نتائج مطابقة للبحث.</div>` : `<div class="gg-empty">كل شيء تمام — لا أحد عليه مخالفات.</div>`}
           <div class="gg-actions">
+            <button class="gg-btn alt" id="ggExport">⬇ تصدير السجل CSV</button>
             <button class="gg-btn dng" id="ggResetAll">تصفير مخالفات الجميع</button>
             <button class="gg-btn alt" id="ggDocs">📖 أوامر المجموعات</button>
           </div>
         </div>
 
         <div class="gg-card wide">
-          <h3>🚪 سجل المطرودين ${(state.kicked || []).length ? `<span class="gg-tag">${esc((state.kicked || []).length)} عضو</span>` : ""}</h3>
-          <div class="mut">${(state.kicked || []).length ? "من طُرد بسبب مخالفات — مكتوب بالضبط ماذا فعل. اضغط «إضافة للشخص» لترجعه للمجموعة." : "لا يوجد أحد مطروح بسبب مخالفات 👌"}</div>
-          ${(state.kicked || []).length ? `<div class="gg-list">
-            ${(state.kicked || []).map((row) => `<div class="gg-item">
-              <div class="gg-ava red">${esc(initialsOf(row))}</div>
-              <div class="mid">
-                <div class="gg-nm">${esc(displayName(row))}</div>
-                <div class="gg-sub">${esc(row.reason || "مخالفة القوانين")} · طُرد ${esc(timeAgo(row.at))}${row.count ? ` · بعد ${esc(row.count)} تحذير` : ""}</div>
-              </div>
-              <div class="acts">
-                <button class="gg-btn ok gg-mini" data-readd="${esc(row.jid)}">➕ إضافة للشخص</button>
-                <button class="gg-btn alt gg-mini" data-forget="${esc(row.jid)}" title="حذف من السجل فقط">✕</button>
+          <h3>🚪 سجل المطرودين ${kickedList.length ? `<span class="gg-tag">${esc(kickedList.length)} عضو</span>` : ""}</h3>
+          <div class="mut">${kickedList.length ? "من طُرد بسبب مخالفات — مكتوب بالضبط ماذا فعل. اضغط «إضافة للشخص» لترجعه للمجموعة." : "لا يوجد أحد مطروح بسبب مخالفات 👌"}</div>
+          ${kickedList.length ? `<div class="gg-tools"><input class="gg-in gg-search" id="ggSearchKicked" placeholder="ابحث باسم أو رقم أو سبب…"></div>
+          <div class="gg-list" id="ggKickedList">
+            ${kickedList.map((row) => `<div class="gg-itemwrap" data-search="${esc(searchBlob(displayName(row), String(row.jid || ""), row.reason))}">
+              <div class="gg-item">
+                <div class="gg-ava red">${esc(initialsOf(row))}</div>
+                <div class="mid">
+                  <div class="gg-nm">${esc(displayName(row))}</div>
+                  <div class="gg-sub">${esc(row.reason || "مخالفة القوانين")} · طُرد ${esc(timeAgo(row.at))}${row.count ? ` · بعد ${esc(row.count)} تحذير` : ""}</div>
+                </div>
+                <div class="acts">
+                  <button class="gg-btn ok gg-mini" data-readd="${esc(row.jid)}">➕ إضافة للشخص</button>
+                  <button class="gg-btn alt gg-mini" data-forget="${esc(row.jid)}" title="حذف من السجل فقط">✕</button>
+                </div>
               </div>
             </div>`).join("")}
-          </div>` : `<div class="gg-empty">السجل فاضي — لا أحد مطروح.</div>`}
+          </div>
+          <div class="gg-empty" id="ggKickedEmpty" hidden>لا نتائج مطابقة للبحث.</div>` : `<div class="gg-empty">السجل فاضي — لا أحد مطروح.</div>`}
         </div>
       </div>`;
     bind(body);
@@ -386,6 +452,70 @@
           toast("❌ " + error.message);
         }
       });
+    });
+
+    // [GG-DETAIL] فتح/إغلاق تفاصيل ماذا نشر العضو
+    body.querySelectorAll("[data-detail]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const panel = body.querySelector(`[data-panel="${CSS_ESC(button.dataset.detail)}"]`);
+        if (panel) panel.hidden = !panel.hidden;
+      });
+    });
+
+    // [GG-KICK] طرد فوري من اللوحة
+    body.querySelectorAll("[data-kick]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (!confirm("طرد هذا العضو الآن من المجموعة؟")) return;
+        button.disabled = true;
+        try {
+          const data = await api("/api/fw/groups/guard/kick", { groupId: state.groupId, jid: button.dataset.kick, reason: "طرد يدوي من لوحة الحماية" });
+          state.kicked = data.kicked || state.kicked;
+          render(body);
+          toast("🚪 تم طرد العضو");
+        } catch (error) { button.disabled = false; toast("❌ " + error.message); }
+      });
+    });
+
+    // [GG-SEARCH] تصفية فورية بدون إعادة تحميل
+    const wireSearch = (inputId, listId, emptyId) => {
+      const input = body.querySelector(`#${inputId}`);
+      const list = body.querySelector(`#${listId}`);
+      const empty = body.querySelector(`#${emptyId}`);
+      if (!input || !list) return;
+      input.addEventListener("input", () => {
+        const q = input.value.trim().toLowerCase();
+        let shown = 0;
+        list.querySelectorAll("[data-search]").forEach((wrap) => {
+          const hit = !q || String(wrap.dataset.search || "").includes(q);
+          wrap.hidden = !hit;
+          if (hit) shown++;
+        });
+        if (empty) empty.hidden = shown > 0;
+      });
+    };
+    wireSearch("ggSearchWarn", "ggWarnList", "ggWarnEmpty");
+    wireSearch("ggSearchKicked", "ggKickedList", "ggKickedEmpty");
+
+    // [GG-EXPORT] تصدير السجل CSV (يفتح في إكسل)
+    const exportButton = body.querySelector("#ggExport");
+    if (exportButton) exportButton.addEventListener("click", () => {
+      const rows = [["النوع", "الاسم", "الرقم", "عدد المخالفات", "السبب", "ماذا نشر", "الوقت"]];
+      (state.warnings || []).forEach((row) => {
+        (row.details && row.details.length ? row.details : [{ reason: (row.reasons || []).slice(-1)[0] || "", text: "", at: row.at }]).forEach((item) => {
+          rows.push(["مخالف", displayName(row), jidNumber(row.jid), String(row.count || 0), REASON_LABELS[item.reason] || item.reason || "", item.text || "", new Date(item.at || row.at || Date.now()).toLocaleString("ar-EG")]);
+        });
+      });
+      (state.kicked || []).forEach((row) => {
+        rows.push(["مطرود", displayName(row), jidNumber(row.jid), String(row.count || 0), row.reason || "", "", new Date(row.at || Date.now()).toLocaleString("ar-EG")]);
+      });
+      const csv = "\uFEFF" + rows.map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+      const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `guard-${String(state.groupId).split("@")[0]}-${Date.now()}.csv`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      toast("⬇ تم تصدير السجل");
     });
 
     body.querySelectorAll("[data-forget]").forEach((button) => {

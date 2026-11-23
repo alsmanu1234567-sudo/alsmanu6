@@ -62,6 +62,48 @@ const store = new Map();
 const timers = new Map();
 const pendingKicks = new Map();
 
+/** [KICK-PENDING] هل عليه عدّاد طرد جارٍ الآن؟ (يقبل كل صيغ معرّف العضو) */
+export function hasPendingKick(groupJid, ...jids) {
+  const group = String(groupJid || "");
+  return jids.some((jid) => {
+    const value = String(jid || "");
+    if (!value) return false;
+    return pendingKicks.has(`${group}:${value}`) || pendingKicks.has(`${group}:${jidOf(value)}`);
+  });
+}
+
+function clearPendingKick(groupJid, ...jids) {
+  const group = String(groupJid || "");
+  for (const jid of jids) {
+    const value = String(jid || "");
+    if (!value) continue;
+    for (const key of [`${group}:${value}`, `${group}:${jidOf(value)}`]) {
+      const timer = pendingKicks.get(key);
+      if (timer) { try { clearTimeout(timer); } catch { } pendingKicks.delete(key); }
+    }
+  }
+}
+
+/** [KICK-PENDING] طرد فوري: يلغي العدّاد ويطرد في نفس اللحظة ويسجّل السبب */
+async function kickImmediately({ userId, sock, groupJid, memberJid, name, reasonText, count, notifyText }) {
+  clearPendingKick(groupJid, memberJid);
+  try {
+    await sock.groupParticipantsUpdate(groupJid, [memberJid], "remove");
+    recordKicked(userId, groupJid, { jid: memberJid, reason: reasonText, count: Number(count) || 0, name: name || "" });
+    if (notifyText) await sock.sendMessage(groupJid, { text: notifyText }).catch(() => { });
+    return true;
+  } catch (error) {
+    await sock.sendMessage(groupJid, { text: `تعذر الطرد الفوري: ${String(error?.message || error).slice(0, 120)}` }).catch(() => { });
+    return false;
+  }
+}
+
+/** [WARN-DETAIL] تنظيف مقتطف المخالفة قبل تخزينه — نص فقط وبحد أقصى 160 حرفاً */
+function cleanDetail(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.slice(0, 160);
+}
+
 function emptyState(userId) {
   return { userId: String(userId), groups: {}, warnings: {}, stickers: {}, kicked: {}, updatedAt: Date.now() };
 }
@@ -158,7 +200,7 @@ export function listWarnings(userId, groupJid) {
   const state = getState(userId);
   const map = state.warnings[groupJid] || {};
   return Object.entries(map)
-    .map(([jid, info]) => ({ jid, name: info?.name || "", count: Number(info?.count) || 0, at: Number(info?.at) || 0, reasons: info?.reasons || [] }))
+    .map(([jid, info]) => ({ jid, name: info?.name || "", count: Number(info?.count) || 0, at: Number(info?.at) || 0, reasons: info?.reasons || [], details: info?.details || [] }))
     .filter((row) => row.count > 0)
     .sort((a, b) => b.at - a.at);
 }
@@ -499,7 +541,7 @@ async function botIsAdmin(sock, groupJid) {
 }
 
 /** يعطي تحذيراً ويعيد إرسال الكرت المناسب. kick = الطرد بعد التأخير. */
-export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, reason, delayKick, name }) {
+export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, reason, delayKick, name, detail, silent }) {
   const state = getState(userId);
   const bucket = (state.warnings[groupJid] = state.warnings[groupJid] || {});
   const prev = Number(bucket[memberJid]?.count) || 0;
@@ -507,7 +549,9 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
   const reasons = [...(bucket[memberJid]?.reasons || []), String(reason || "").slice(0, 80)].slice(-10);
   // [WARN-NAME] نحفظ اسم العضو ليظهر في لوحة الويب بدل رقمه
   const memberName = String(name || bucket[memberJid]?.name || "").trim().slice(0, 60);
-  bucket[memberJid] = { count, at: Date.now(), reasons, name: memberName };
+  // [WARN-DETAIL] نحفظ ماذا نشر بالضبط: نص/رابط فقط، وللصور والصوت نكتب نوعها دون تخزين الملف
+  const details = [...(bucket[memberJid]?.details || []), { reason: String(reason || ""), text: cleanDetail(detail), at: Date.now() }].slice(-10);
+  bucket[memberJid] = { count, at: Date.now(), reasons, details, name: memberName };
   persist(userId);
 
   const level = escalationFor(count, cfg.maxWarnings);
@@ -531,7 +575,8 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
     caption = `⚠️ *تحذير رقم ${count}* ${mention}\nالسبب: ${reasonText}\nلديك ${max - count} تحذير قبل الطرد.`;
   }
 
-  await sendCard(sock, groupJid, cfg.cards[kind], caption, m.mentions);
+  // [WARN-SILENT] التحذيرات الصامتة (صور/صوت) تكتفي برسالة الحذف وتُظهر الكرت عند الإنذار الأخير فقط
+  if (!silent || level === "final") await sendCard(sock, groupJid, cfg.cards[kind], caption, m.mentions);
 
   let kicked = false;
   const pendingKey = `${groupJid}:${targetJid}`;
@@ -586,25 +631,45 @@ export async function handleModeration({ userId, sock, message, cfg }) {
   const memberMention = await mentionFor(sock, groupJid, memberJid);
   const resolvedMember = memberMention.jid;
   const memberTag = memberMention.token;
+  // [KICK-PENDING] أي مخالفة أثناء عدّاد الطرد = طرد فوري بلا انتظار
+  const pendingNow = hasPendingKick(groupJid, memberJid, resolvedMember);
 
   if (cfg.imageGuard && isImage) {
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+    if (pendingNow) {
+      await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "نشر صورة أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
+      await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — نشر صورة وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
+      return { handled: true, action: "kick-now-image" };
+    }
     await sock.sendMessage(groupJid, { text: `🖼️ الصور ممنوعة في هذه المجموعة ${memberTag} — حُذفت الصورة لحماية القروب.` }, { mentions: memberMention.mentions }).catch(() => { });
-    return { handled: true, action: "image-deleted" };
+    const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "image", delayKick: true, name: message?.pushName, detail: "صورة", silent: true });
+    return { handled: true, action: "image-deleted", ...result };
   }
 
   if (cfg.audioGuard && isAudio) {
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+    if (pendingNow) {
+      await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "إرسال صوت أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
+      await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — أرسل صوتاً وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
+      return { handled: true, action: "kick-now-audio" };
+    }
     await sock.sendMessage(groupJid, { text: `🎤 الرسائل الصوتية ممنوعة في هذه المجموعة ${memberTag} — حُذف المقطع الصوتي.` }, { mentions: memberMention.mentions }).catch(() => { });
-    return { handled: true, action: "audio-deleted" };
+    const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "audio", delayKick: true, name: message?.pushName, detail: "رسالة صوتية", silent: true });
+    return { handled: true, action: "audio-deleted", ...result };
   }
 
   if (cfg.stickerGuard && isSticker) {
+    if (pendingNow) {
+      await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+      await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "نشر ملصقاً أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
+      await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — نشر ملصقاً وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
+      return { handled: true, action: "kick-now-sticker" };
+    }
     const count = bumpStickers(userId, groupJid, memberJid);
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
     const every = Math.max(1, Number(cfg.stickerWarnEvery) || 5);
     if (count % every === 0) {
-      await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "sticker", delayKick: true, name: message?.pushName });
+      await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "sticker", delayKick: true, name: message?.pushName, detail: "ملصق" });
       return { handled: true, action: "sticker-warning", count };
     }
     await sock.sendMessage(groupJid, { text: `🚫 الملصقات ممنوعة في هذه المجموعة حتى إشعار آخر — لحماية القروب من الملصقات المشبوهة.\n${memberTag} (${count}/${every})`, }, { mentions: memberMention.mentions }).catch(() => { });
@@ -613,7 +678,13 @@ export async function handleModeration({ userId, sock, message, cfg }) {
 
   if (cfg.linkGuard && text && detectLink(text)) {
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
-    const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "link", delayKick: true, name: message?.pushName });
+    const linkHit = (String(text).match(/https?:\/\/[^\s]+/i) || [""])[0] || String(text);
+    if (pendingNow) {
+      await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "نشر رابطاً أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
+      await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — نشر رابطاً وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
+      return { handled: true, action: "kick-now-link" };
+    }
+    const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "link", delayKick: true, name: message?.pushName, detail: linkHit });
     return { handled: true, action: "link", ...result };
   }
 
@@ -621,7 +692,12 @@ export async function handleModeration({ userId, sock, message, cfg }) {
     const hit = matchWords(text, cfg.words);
     if (hit) {
       await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
-      const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "word", delayKick: true, name: message?.pushName });
+      if (pendingNow) {
+        await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "كلمة ممنوعة أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
+        await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — كتب كلمة ممنوعة وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
+        return { handled: true, action: "kick-now-word", word: hit };
+      }
+      const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "word", delayKick: true, name: message?.pushName, detail: text });
       return { handled: true, action: "word", word: hit, ...result };
     }
   }

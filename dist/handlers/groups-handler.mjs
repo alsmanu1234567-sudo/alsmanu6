@@ -1480,6 +1480,30 @@ export async function webGuardReAdd(userId, groupId, memberJid, phoneNumber = nu
   return { ok: true, jid, status: status || "200" };
 }
 
+/** [GUARD] طرد عضو من لوحة الحماية فوراً + تسجيله في سجل المطرودين */
+export async function webGuardKick(userId, groupId, memberJid, phoneNumber = null, reason = "") {
+  const id = String(groupId || "").trim();
+  const jid = String(memberJid || "").trim();
+  if (!id.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+  if (!jid || !jid.includes("@")) throw new Error("معرّف العضو غير صالح");
+  const sock = await findSocketForGroup(String(userId), id, phoneNumber);
+  if (!sock) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
+  try {
+    await sock.groupParticipantsUpdate(id, [jid], "remove");
+  } catch (error) {
+    throw new Error(String(error?.message || error).slice(0, 160));
+  }
+  const guard = await import("../../services/group-guard.mjs");
+  const info = guard.listWarnings(String(userId), id).find((row) => row.jid === jid) || {};
+  guard.recordKicked(String(userId), id, {
+    jid,
+    name: info.name || "",
+    reason: String(reason || "").trim() || "طرد يدوي من لوحة الحماية",
+    count: Number(info.count) || 0,
+  });
+  return { ok: true, jid, kicked: guard.listKicked(String(userId), id) };
+}
+
 /** [GUARD] إرسال ترحيب تجريبي للمجموعة للتأكد أن نظام الترحيب يعمل */
 export async function webGuardTestWelcome(userId, groupId, phoneNumber = null, sampleJids = []) {
   const id = String(groupId || "").trim();
