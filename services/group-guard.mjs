@@ -53,6 +53,14 @@ const DEFAULTS = {
   maxWarnings: 3,
   kickDelaySec: 30,
   kickOnLimit: true,
+  // [LEVEL-7] الدرع المتقدم — كل شيء مطفأ افتراضياً
+  floodGuard: false,
+  floodCount: 6,
+  floodWindowSec: 12,
+  repeatGuard: false,
+  autoReKick: false,
+  whitelist: [],
+  quiet: { enabled: false, from: "00:00", to: "07:00" },
   cards: { ...DEFAULT_CARDS },
   welcome: { enabled: false, text: "أهلاً وسهلاً @nem 👋\nنوّرت المجموعة، اقرأ القوانين وشارك باحترام.", card: true },
   goodbye: { enabled: false, text: "إلى اللقاء @nem 👋", card: true },
@@ -90,6 +98,7 @@ async function kickImmediately({ userId, sock, groupJid, memberJid, name, reason
   try {
     await sock.groupParticipantsUpdate(groupJid, [memberJid], "remove");
     recordKicked(userId, groupJid, { jid: memberJid, reason: reasonText, count: Number(count) || 0, name: name || "" });
+    noteGuardEvent(userId, groupJid, "kicked", { jid: memberJid, name, reason: reasonText });
     if (notifyText) await sock.sendMessage(groupJid, { text: notifyText }).catch(() => { });
     return true;
   } catch (error) {
@@ -104,8 +113,141 @@ function cleanDetail(value) {
   return text.slice(0, 160);
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// [LEVEL-7] الدرع المتقدم: قائمة بيضاء، ساعات هدوء، منع الإغراق والتكرار،
+// إحصاءات يومية، سجل تدقيق، ومنع العودة بعد الطرد. كلها مطفأة افتراضياً.
+// ═══════════════════════════════════════════════════════════════════════
+const floodWindows = new Map();
+const lastSeenText = new Map();
+
+function digitsOf(jid) {
+  return String(jid || "").split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
+}
+
+function normalizeJidList(list) {
+  const out = [];
+  const seen = new Set();
+  for (const item of Array.isArray(list) ? list : []) {
+    const raw = String(item || "").trim();
+    if (!raw) continue;
+    const jid = raw.includes("@") ? raw : (/^[0-9]{6,20}$/.test(raw) ? `${raw}@s.whatsapp.net` : "");
+    if (!jid) continue;
+    const key = digitsOf(jid) || jid;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(jid);
+  }
+  return out.slice(0, 200);
+}
+
+function samePerson(a, b) {
+  const da = digitsOf(a);
+  const db = digitsOf(b);
+  if (!da || !db) return false;
+  if (da === db) return true;
+  const short = Math.min(da.length, db.length, 9);
+  return short >= 8 && da.slice(-short) === db.slice(-short);
+}
+
+export function isWhitelisted(cfg, ...jids) {
+  const list = Array.isArray(cfg?.whitelist) ? cfg.whitelist : [];
+  if (!list.length) return false;
+  return list.some((entry) => jids.some((jid) => samePerson(entry, jid)));
+}
+
+/** ساعات الهدف: تعمل لو كان الوقت الحالي داخل النطاق (يدعم عبور منتصف الليل) */
+export function isQuietNow(quiet) {
+  if (!quiet?.enabled) return false;
+  const [fh, fm] = String(quiet.from || "00:00").split(":").map(Number);
+  const [th, tm] = String(quiet.to || "07:00").split(":").map(Number);
+  const now = new Date();
+  const minutes = now.getHours() * 60 + now.getMinutes();
+  const from = (fh || 0) * 60 + (fm || 0);
+  const to = (th || 0) * 60 + (tm || 0);
+  if (from === to) return false;
+  return from < to ? (minutes >= from && minutes < to) : (minutes >= from || minutes < to);
+}
+
+function dayKey() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function ensureStats(state, groupJid) {
+  const key = dayKey();
+  const current = state.stats[groupJid];
+  if (!current || current.day !== key) {
+    state.stats[groupJid] = { day: key, deleted: 0, warned: 0, kicked: 0, byReason: {} };
+  }
+  return state.stats[groupJid];
+}
+
+/** [LEVEL-7] عدّاد يومي + سجل تدقيق لكل إجراء حماية */
+export function noteGuardEvent(userId, groupJid, kind, info = {}) {
+  const state = getState(userId);
+  const stats = ensureStats(state, groupJid);
+  const bucket = kind === "kicked" ? "kicked" : kind === "warned" ? "warned" : kind === "deleted" ? "deleted" : null;
+  if (bucket) stats[bucket] = (Number(stats[bucket]) || 0) + 1;
+  const reason = String(info.reason || "").slice(0, 60);
+  if (reason) stats.byReason[reason] = (Number(stats.byReason[reason]) || 0) + 1;
+  const audit = Array.isArray(state.audit[groupJid]) ? state.audit[groupJid] : (state.audit[groupJid] = []);
+  audit.unshift({
+    at: Date.now(),
+    kind: String(kind || ""),
+    jid: String(info.jid || ""),
+    name: String(info.name || "").slice(0, 60),
+    reason,
+    text: cleanDetail(info.text),
+  });
+  state.audit[groupJid] = audit.slice(0, 200);
+  persist(userId);
+  return stats;
+}
+
+export function getGuardStats(userId, groupJid) {
+  const state = getState(userId);
+  const stats = ensureStats(state, groupJid);
+  return { ...stats, byReason: { ...stats.byReason } };
+}
+
+export function listAudit(userId, groupJid, limit = 40) {
+  const state = getState(userId);
+  const rows = Array.isArray(state.audit?.[groupJid]) ? state.audit[groupJid] : [];
+  return rows.slice(0, Math.max(1, Math.min(100, Number(limit) || 40)));
+}
+
+export function isInKickedLog(userId, groupJid, jid) {
+  const rows = listKicked(userId, groupJid);
+  return rows.some((row) => samePerson(row.jid, jid));
+}
+
+/** [LEVEL-7] نافذة الإغراق: كم رسالة أرسلها العضو خلال المدة؟ */
+function trackFlood(groupJid, memberJid, windowSec) {
+  const key = `${groupJid}:${digitsOf(memberJid) || memberJid}`;
+  const windowMs = Math.max(3, Number(windowSec) || 12) * 1000;
+  const now = Date.now();
+  const hits = (floodWindows.get(key) || []).filter((at) => now - at < windowMs);
+  hits.push(now);
+  floodWindows.set(key, hits.slice(-50));
+  return hits.length;
+}
+
+function clearFlood(groupJid, memberJid) {
+  floodWindows.delete(`${groupJid}:${digitsOf(memberJid) || memberJid}`);
+}
+
+/** [LEVEL-7] تكرار نفس النص: نفس الرسالة مرتين خلال 5 دقائق */
+function trackRepeat(groupJid, memberJid, text) {
+  const key = `${groupJid}:${digitsOf(memberJid) || memberJid}`;
+  const value = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+  if (value.length < 6) return false;
+  const previous = lastSeenText.get(key);
+  lastSeenText.set(key, { text: value, at: Date.now() });
+  return Boolean(previous && previous.text === value && Date.now() - previous.at < 5 * 60 * 1000);
+}
+
 function emptyState(userId) {
-  return { userId: String(userId), groups: {}, warnings: {}, stickers: {}, kicked: {}, updatedAt: Date.now() };
+  return { userId: String(userId), groups: {}, warnings: {}, stickers: {}, kicked: {}, stats: {}, audit: {}, updatedAt: Date.now() };
 }
 
 function fileFor(userId) {
@@ -125,6 +267,8 @@ export function getState(userId) {
   state.warnings = state.warnings && typeof state.warnings === "object" ? state.warnings : {};
   state.stickers = state.stickers && typeof state.stickers === "object" ? state.stickers : {};
   state.kicked = state.kicked && typeof state.kicked === "object" ? state.kicked : {};
+  state.stats = state.stats && typeof state.stats === "object" ? state.stats : {};
+  state.audit = state.audit && typeof state.audit === "object" ? state.audit : {};
   store.set(key, state);
   return state;
 }
@@ -155,7 +299,9 @@ export function getGroupConfig(userId, groupJid) {
   cfg.cards = { ...DEFAULTS.cards, ...(saved.cards || {}) };
   cfg.welcome = { ...DEFAULTS.welcome, ...(saved.welcome || {}) };
   cfg.goodbye = { ...DEFAULTS.goodbye, ...(saved.goodbye || {}) };
+  cfg.quiet = { ...DEFAULTS.quiet, ...(saved.quiet || {}) };
   cfg.words = Array.isArray(saved.words) ? saved.words : [];
+  cfg.whitelist = Array.isArray(saved.whitelist) ? saved.whitelist : [];
   for (const kind of CARD_KINDS) {
     const custom = path.join(CARD_UPLOADS, `${String(userId).replace(/[^\w.-]/g, "")}-${groupJid.replace(/[^\w.-]/g, "")}-${kind}.png`);
     if (fs.existsSync(custom)) cfg.cards[kind] = custom;
@@ -169,13 +315,22 @@ export function updateGroupConfig(userId, groupJid, patch = {}) {
   const current = state.groups[groupJid] || {};
   const next = { ...current };
   for (const [key, value] of Object.entries(patch)) {
-    if (key === "cards" || key === "welcome" || key === "goodbye") {
-      next[key] = { ...(current[key] || {}), ...(value || {}) };
+    if (key === "cards" || key === "welcome" || key === "goodbye" || key === "quiet") {
+      const merged = { ...(current[key] || {}), ...(value || {}) };
+      if (key === "quiet") {
+        const okTime = (t) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(t));
+        merged.enabled = Boolean(merged.enabled);
+        merged.from = okTime(merged.from) ? String(merged.from) : DEFAULTS.quiet.from;
+        merged.to = okTime(merged.to) ? String(merged.to) : DEFAULTS.quiet.to;
+      }
+      next[key] = merged;
     } else if (key === "words") {
       next.words = (Array.isArray(value) ? value : []).map((w) => String(w).trim()).filter(Boolean).slice(0, 100);
-    } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "kickOnLimit"].includes(key)) {
+    } else if (key === "whitelist") {
+      next.whitelist = normalizeJidList(value);
+    } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick"].includes(key)) {
       next[key] = Boolean(value);
-    } else if (["maxWarnings", "stickerWarnEvery", "kickDelaySec"].includes(key)) {
+    } else if (["maxWarnings", "stickerWarnEvery", "kickDelaySec", "floodCount", "floodWindowSec"].includes(key)) {
       next[key] = Math.max(1, Math.min(50, Number(value) || DEFAULTS[key]));
     }
   }
@@ -364,6 +519,14 @@ const COMMANDS = [
   { key: "warnings", aliases: ["مخالفات", "مخالفه"], usage: ".مخالفات @العضو", description: "يعرض عدد مخالفات العضو", adminOnly: false },
   { key: "guard-on", aliases: ["تشغيل-الحماية", "تشغيل الحماية"], usage: ".تشغيل الحماية", description: "يفعّل نظام الحماية", adminOnly: true },
   { key: "guard-off", aliases: ["ايقاف-الحماية", "إيقاف الحماية"], usage: ".إيقاف الحماية", description: "يوقف نظام الحماية كاملاً", adminOnly: true },
+  { key: "shield", aliases: ["الدرع", "درع", "الحماية"], usage: ".الدرع", description: "يعرض حالة الدرع المتقدم وإحصاءات اليوم", adminOnly: false },
+  { key: "flood", aliases: ["الاغراق", "الإغراق", "اغراق", "إغراق"], usage: ".إغراق 6 12", description: "يشغّل منع الإغراق: 6 رسائل خلال 12 ثانية = تحذير", adminOnly: true },
+  { key: "flood-off", aliases: ["الغاء-الاغراق", "إلغاء الإغراق", "الغاء الاغراق"], usage: ".إلغاء الإغراق", description: "يوقف منع الإغراق", adminOnly: true },
+  { key: "quiet", aliases: ["ساعات-الهدوء", "ساعات الهدوء", "هدوء"], usage: ".ساعات الهدوء 00:00 07:00", description: "يوقف الحمايات في وقت محدد يومياً", adminOnly: true },
+  { key: "quiet-off", aliases: ["الغاء-الهدوء", "إلغاء الهدوء", "الغاء الهدوء"], usage: ".إلغاء الهدوء", description: "يلغي ساعات الهدوء", adminOnly: true },
+  { key: "white", aliases: ["قائمة-بيضاء", "قائمة بيضاء", "ابيض", "أبيض"], usage: ".قائمة بيضاء @العضو", description: "يستثني العضو من كل الحمايات", adminOnly: true },
+  { key: "unwhite", aliases: ["ازالة-بيضاء", "إزالة بيضاء", "ازالة بيضاء"], usage: ".إزالة بيضاء @العضو", description: "يرجع العضو للحماية", adminOnly: true },
+  { key: "kicked", aliases: ["المطرودين", "المطرودون", "سجل-الطرد"], usage: ".المطرودين", description: "يعرض سجل المطرودين بسبب المخالفات", adminOnly: false },
 ];
 
 export function commandsCatalog() {
@@ -553,6 +716,7 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
   const details = [...(bucket[memberJid]?.details || []), { reason: String(reason || ""), text: cleanDetail(detail), at: Date.now() }].slice(-10);
   bucket[memberJid] = { count, at: Date.now(), reasons, details, name: memberName };
   persist(userId);
+  noteGuardEvent(userId, groupJid, "warned", { jid: memberJid, name: memberName, reason, text: detail });
 
   const level = escalationFor(count, cfg.maxWarnings);
   const max = cfg.maxWarnings;
@@ -567,6 +731,9 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
     : reason === "image" ? "نشر صورة ممنوعة"
     : reason === "audio" ? "إرسال رسالة صوتية ممنوعة"
     : reason === "manual" ? "تحذير يدوي من الإدارة"
+    : reason === "flood" ? "إغراق المجموعة بالرسائل"
+    : reason === "repeat" ? "تكرار نفس الرسالة"
+    : reason === "return" ? "عاد بعد طرد سابق"
     : "مخالفة القوانين";
   let caption;
   if (level === "final") {
@@ -596,6 +763,7 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
         await sock.groupParticipantsUpdate(groupJid, [targetJid || memberJid], "remove");
         kicked = true;
         recordKicked(userId, groupJid, { jid: targetJid || memberJid, reason: reasonText, count, name: memberName });
+        noteGuardEvent(userId, groupJid, "kicked", { jid: targetJid || memberJid, name: memberName, reason: reasonText });
       } catch (error) {
         await sock.sendMessage(groupJid, { text: `تعذر طرد ${mention}: ${String(error?.message || error).slice(0, 120)}` }).catch(() => { });
       }
@@ -634,8 +802,56 @@ export async function handleModeration({ userId, sock, message, cfg }) {
   // [KICK-PENDING] أي مخالفة أثناء عدّاد الطرد = طرد فوري بلا انتظار
   const pendingNow = hasPendingKick(groupJid, memberJid, resolvedMember);
 
+  // [L7-WHITELIST] عضو في القائمة البيضاء لا تُطبَّق عليه الحماية
+  if (isWhitelisted(cfg, memberJid, resolvedMember)) return { handled: false };
+  // [L7-QUIET] ساعات الهدوء: تتوقف كل الحمايات مؤقتاً
+  if (isQuietNow(cfg.quiet)) return { handled: false };
+  // [L7-REKICK] من عاد بعد طرد سابق: طرد تلقائي فوري
+  if (cfg.autoReKick && isInKickedLog(userId, groupJid, memberJid)) {
+    await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+    await kickImmediately({
+      userId, sock, groupJid, memberJid: resolvedMember || memberJid,
+      name: message?.pushName, reasonText: "عاد بعد طرد سابق",
+      count: warningCount(userId, groupJid, resolvedMember || memberJid),
+    });
+    await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} عاد بعد طرد سابق — تم طرده تلقائياً.` }, { mentions: memberMention.mentions }).catch(() => { });
+    return { handled: true, action: "auto-rekick" };
+  }
+
+  // [L7-FLOOD] منع إغراق المجموعة بالرسائل
+  if (cfg.floodGuard) {
+    const limit = Math.max(2, Number(cfg.floodCount) || 6);
+    const hits = trackFlood(groupJid, memberJid, cfg.floodWindowSec);
+    if (hits >= limit) {
+      clearFlood(groupJid, memberJid);
+      await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+      noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: "flood", text });
+      if (pendingNow) {
+        await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "إغراق أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
+        await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — أرسل ${hits} رسالة بسرعة وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
+        return { handled: true, action: "kick-now-flood" };
+      }
+      const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "flood", delayKick: true, name: message?.pushName, detail: `${hits} رسالة في ${cfg.floodWindowSec} ثانية` });
+      return { handled: true, action: "flood", ...result };
+    }
+  }
+
+  // [L7-REPEAT] تكرار نفس الرسالة
+  if (cfg.repeatGuard && text && trackRepeat(groupJid, memberJid, text)) {
+    await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+    noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: "repeat", text });
+    if (pendingNow) {
+      await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "تكرار أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
+      await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — كرر نفس الرسالة وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
+      return { handled: true, action: "kick-now-repeat" };
+    }
+    const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "repeat", delayKick: true, name: message?.pushName, detail: text });
+    return { handled: true, action: "repeat", ...result };
+  }
+
   if (cfg.imageGuard && isImage) {
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+    noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: "image", text: "صورة" });
     if (pendingNow) {
       await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "نشر صورة أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
       await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — نشر صورة وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
@@ -648,6 +864,7 @@ export async function handleModeration({ userId, sock, message, cfg }) {
 
   if (cfg.audioGuard && isAudio) {
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+    noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: "audio", text: "رسالة صوتية" });
     if (pendingNow) {
       await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "إرسال صوت أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
       await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — أرسل صوتاً وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
@@ -661,12 +878,14 @@ export async function handleModeration({ userId, sock, message, cfg }) {
   if (cfg.stickerGuard && isSticker) {
     if (pendingNow) {
       await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+      noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: "sticker", text: "ملصق" });
       await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "نشر ملصقاً أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
       await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — نشر ملصقاً وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
       return { handled: true, action: "kick-now-sticker" };
     }
     const count = bumpStickers(userId, groupJid, memberJid);
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+    noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: "sticker", text: "ملصق" });
     const every = Math.max(1, Number(cfg.stickerWarnEvery) || 5);
     if (count % every === 0) {
       await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "sticker", delayKick: true, name: message?.pushName, detail: "ملصق" });
@@ -678,6 +897,7 @@ export async function handleModeration({ userId, sock, message, cfg }) {
 
   if (cfg.linkGuard && text && detectLink(text)) {
     await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+    noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: "link", text: text });
     const linkHit = (String(text).match(/https?:\/\/[^\s]+/i) || [""])[0] || String(text);
     if (pendingNow) {
       await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "نشر رابطاً أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
@@ -692,6 +912,7 @@ export async function handleModeration({ userId, sock, message, cfg }) {
     const hit = matchWords(text, cfg.words);
     if (hit) {
       await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+    noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: "word", text: text });
       if (pendingNow) {
         await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: "كلمة ممنوعة أثناء مهلة الطرد", count: warningCount(userId, groupJid, resolvedMember || memberJid) });
         await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — كتب كلمة ممنوعة وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
@@ -716,6 +937,7 @@ async function sendCodesList(sock, groupJid) {
     { title: "أوامر الدردشة", rows: list.filter((c) => ["mute", "open", "admin"].includes(c.key)).map(toRow) },
     { title: "الفلاتر", rows: list.filter((c) => c.key.startsWith("stickers") || c.key.startsWith("links") || c.key.startsWith("images") || c.key.startsWith("audio")).map(toRow) },
     { title: "نظام الحماية", rows: list.filter((c) => c.key.startsWith("guard") || c.key === "warnings").map(toRow) },
+    { title: "الدرع المتقدم", rows: list.filter((c) => ["shield", "flood", "flood-off", "quiet", "quiet-off", "white", "unwhite", "kicked"].includes(c.key)).map(toRow) },
   ].filter((section) => section.rows.length);
   try {
     await sendInteractive(sock, groupJid, {
@@ -901,6 +1123,71 @@ export async function handleCommand({ userId, sock, message, text }) {
       const on = parsed.key === "guard-on";
       updateGroupConfig(userId, groupJid, { enabled: on });
       await reply(on ? "🛡️ تم تشغيل نظام الحماية." : "⏸️ تم إيقاف نظام الحماية.");
+      return { handled: true };
+    }
+    // ═══ [LEVEL-7] أوامر الدرع المتقدم ═══
+    case "shield": {
+      const stats = getGuardStats(userId, groupJid);
+      const yes = (value) => (value ? "✅" : "⛔");
+      const lines = [
+        "🛡️ *حالة الدرع المتقدم*",
+        `${yes(cfg.enabled)} الحماية العامة · ${yes(cfg.linkGuard)} روابط · ${yes(cfg.wordGuard)} كلمات · ${yes(cfg.stickerGuard)} ملصقات · ${yes(cfg.imageGuard)} صور · ${yes(cfg.audioGuard)} صوت`,
+        `${yes(cfg.floodGuard)} منع الإغراق (${cfg.floodCount}/${cfg.floodWindowSec}ث) · ${yes(cfg.repeatGuard)} تكرار الرسالة · ${yes(cfg.autoReKick)} منع العودة بعد الطرد`,
+        `${yes(cfg.quiet?.enabled)} ساعات هدوء (${cfg.quiet?.from} → ${cfg.quiet?.to}) · 🤍 القائمة البيضاء: ${(cfg.whitelist || []).length}`,
+        "",
+        `📊 اليوم: حذف ${stats.deleted || 0} · تحذير ${stats.warned || 0} · طرد ${stats.kicked || 0}`,
+        `⚙️ الحد ${cfg.maxWarnings} تحذيرات · الطرد بعد ${cfg.kickDelaySec} ثانية`,
+      ];
+      await reply(lines.join("\n"));
+      return { handled: true };
+    }
+    case "flood":
+    case "flood-off": {
+      if (parsed.key === "flood-off") {
+        updateGroupConfig(userId, groupJid, { floodGuard: false });
+        await reply("✅ تم إيقاف منع الإغراق.");
+        return { handled: true };
+      }
+      const nums = String(rest || "").match(/[0-9]+/g) || [];
+      const count = Math.max(2, Math.min(50, Number(nums[0]) || cfg.floodCount || 6));
+      const seconds = Math.max(3, Math.min(50, Number(nums[1]) || cfg.floodWindowSec || 12));
+      updateGroupConfig(userId, groupJid, { floodGuard: true, enabled: true, floodCount: count, floodWindowSec: seconds });
+      await reply(`🌊 تم تشغيل منع الإغراق: *${count}* رسائل خلال *${seconds}* ثانية = حذف + تحذير.`);
+      return { handled: true };
+    }
+    case "quiet":
+    case "quiet-off": {
+      if (parsed.key === "quiet-off") {
+        updateGroupConfig(userId, groupJid, { quiet: { enabled: false } });
+        await reply("✅ تم إلغاء ساعات الهدوء.");
+        return { handled: true };
+      }
+      const times = String(rest || "").match(/([01]?\d|2[0-3]):([0-5]\d)/g) || [];
+      if (times.length < 2) { await reply("اكتب الوقت بهذا الشكل: `.ساعات الهدوء 00:00 07:00`"); return { handled: true }; }
+      updateGroupConfig(userId, groupJid, { quiet: { enabled: true, from: times[0].padStart(5, "0"), to: times[1].padStart(5, "0") } });
+      await reply(`🌙 ساعات الهدوء: من *${times[0]}* إلى *${times[1]}* — الحمايات متوقفة في هذا الوقت.`);
+      return { handled: true };
+    }
+    case "white":
+    case "unwhite": {
+      const who = target || rawTarget;
+      if (!who) { await reply("حدد العضو: `.قائمة بيضاء @العضو`"); return { handled: true }; }
+      const list = Array.isArray(cfg.whitelist) ? cfg.whitelist : [];
+      if (parsed.key === "unwhite") {
+        const next = list.filter((item) => !samePerson(item, who));
+        updateGroupConfig(userId, groupJid, { whitelist: next });
+        await reply(`✅ ${mention || "العضو"} رجع تحت الحماية.`);
+        return { handled: true };
+      }
+      updateGroupConfig(userId, groupJid, { whitelist: [...list, who] });
+      await reply(`🤍 ${mention || "العضو"} في القائمة البيضاء — الحمايات لا تُطبَّق عليه.`, targetMentions);
+      return { handled: true };
+    }
+    case "kicked": {
+      const rows = listKicked(userId, groupJid).slice(0, 15);
+      if (!rows.length) { await reply("🚪 سجل المطرودين فاضي."); return { handled: true }; }
+      const body = rows.map((row, index) => `${index + 1}. ${row.name || mentionText(row.jid)} — ${row.reason}${row.count ? ` (${row.count} تحذير)` : ""}`).join("\n");
+      await reply(`🚪 *آخر المطرودين*\n\n${body}`);
       return { handled: true };
     }
     default:

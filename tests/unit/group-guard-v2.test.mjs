@@ -337,3 +337,77 @@ test('لوحة الحماية: تفاصيل المخالفة والطرد الف
   assert.match(webapp, /api\/fw\/groups\/guard\/kick/);
   assert.match(webapp, /webGuardKick/);
 });
+
+test('المستوى 7: الدرع المتقدم يعمل فعلياً — إعدادات، إحصاءات، تدقيق، قائمة بيضاء، هدوء', async () => {
+  const guard = await import('../../services/group-guard.mjs');
+  const uid = `test-l7-${Date.now()}`;
+  const gid = '120363000000000777@g.us';
+  const base = guard.getGroupConfig(uid, gid);
+  assert.equal(base.floodGuard, false, 'منع الإغراق مطفأ افتراضياً');
+  assert.equal(base.repeatGuard, false);
+  assert.equal(base.autoReKick, false);
+  assert.equal(base.quiet.enabled, false);
+  assert.deepEqual(base.whitelist, []);
+
+  const on = guard.updateGroupConfig(uid, gid, {
+    floodGuard: true, floodCount: 8, floodWindowSec: 15,
+    whitelist: ['249912345678'], quiet: { enabled: true, from: '01:00', to: '05:00' },
+  });
+  assert.equal(on.floodGuard, true);
+  assert.equal(on.floodCount, 8);
+  assert.equal(on.floodWindowSec, 15);
+  assert.equal(on.whitelist[0], '249912345678@s.whatsapp.net');
+  assert.equal(on.quiet.enabled, true);
+  assert.equal(on.quiet.from, '01:00');
+  assert.equal(on.quiet.to, '05:00');
+
+  const fixed = guard.updateGroupConfig(uid, gid, { quiet: { from: '99:99', to: 'xx' } });
+  assert.equal(fixed.quiet.from, '00:00');
+  assert.equal(fixed.quiet.to, '07:00');
+  assert.equal(fixed.quiet.enabled, true, 'تفعيل الهدوء يبقى محفوظاً');
+
+  const stats = guard.noteGuardEvent(uid, gid, 'warned', { jid: '249912345678@s.whatsapp.net', name: 'محمد', reason: 'link', text: 'https://spam' });
+  assert.equal(stats.warned, 1);
+  guard.noteGuardEvent(uid, gid, 'kicked', { jid: '249900000001@s.whatsapp.net', reason: 'رابط' });
+  guard.noteGuardEvent(uid, gid, 'deleted', { jid: '249912345678@s.whatsapp.net', reason: 'image' });
+  const after = guard.getGuardStats(uid, gid);
+  assert.equal(after.kicked, 1);
+  assert.equal(after.deleted, 1);
+  const audit = guard.listAudit(uid, gid);
+  assert.equal(audit[0].kind, 'deleted', 'الأحدث أولاً');
+  assert.equal(audit.at(-1).kind, 'warned');
+
+  const cfg = guard.getGroupConfig(uid, gid);
+  assert.equal(guard.isWhitelisted(cfg, '249912345678@s.whatsapp.net'), true);
+  assert.equal(guard.isWhitelisted(cfg, '249900000002@s.whatsapp.net'), false);
+  assert.equal(guard.isQuietNow({ enabled: false, from: '00:00', to: '23:59' }), false);
+  assert.equal(guard.isQuietNow({ enabled: true, from: '00:00', to: '23:59' }), true);
+  assert.equal(guard.isQuietNow({ enabled: true, from: '05:00', to: '05:00' }), false);
+
+  try {
+    const fs = await import('node:fs');
+    fs.rmSync(new URL(`../../bot-data/group-guard/${uid}.json`, import.meta.url), { force: true });
+  } catch { }
+});
+
+test('المستوى 7: أوامر الدرع والمسارات والواجهة موجودة', () => {
+  for (const key of ['shield', 'flood', 'flood-off', 'quiet', 'quiet-off', 'white', 'unwhite', 'kicked']) {
+    assert.ok(guard.includes(`key: "${key}"`), `الأمر ${key} مفقود`);
+  }
+  assert.match(guard, /\[L7-WHITELIST\]/);
+  assert.match(guard, /\[L7-QUIET\]/);
+  assert.match(guard, /\[L7-REKICK\]/);
+  assert.match(guard, /\[L7-FLOOD\]/);
+  assert.match(guard, /\[L7-REPEAT\]/);
+  assert.match(guard, /function trackFlood\(groupJid, memberJid, windowSec\)/);
+  assert.match(webapp, /guard\/kick-offenders/);
+  assert.match(webapp, /guard\/whitelist/);
+  assert.match(webapp, /stats: groupGuard\.getGuardStats\(uid, groupId\)/);
+  assert.match(webapp, /audit: groupGuard\.listAudit\(uid, groupId, 40\)/);
+  const ui = readFileSync(new URL('../../public/groups-guard-web.js', import.meta.url), 'utf8');
+  assert.match(ui, /الدرع المتقدم/);
+  assert.match(ui, /ggQuietFrom/);
+  assert.match(ui, /ggWhiteAdd/);
+  assert.match(ui, /ggKickOffenders/);
+  assert.match(ui, /سجل التدقيق/);
+});

@@ -71,6 +71,14 @@
   .gg-stat small{font-size:10.5px;opacity:.66}
   .gg-tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
   .gg-tools .gg-in{flex:1 1 170px;min-width:130px}
+  .gg-chips{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+  .gg-chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;padding:5px 9px;border-radius:99px;background:#ffffff14;border:1px solid #ffffff1f}
+  .gg-chip button{border:0;background:#ffffff1f;color:inherit;border-radius:50%;width:17px;height:17px;line-height:1;cursor:pointer;font-size:11px}
+  .gg-audit{display:grid;gap:6px;max-height:300px;overflow:auto;padding-inline-end:4px}
+  .gg-aud{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;padding:7px 9px;border-radius:11px;background:#ffffff07;border:1px solid #ffffff12}
+  .gg-aud .k{flex:0 0 auto}
+  .gg-aud .t{min-width:0;overflow-wrap:anywhere;opacity:.85}
+  .gg-aud .tm{margin-inline-start:auto;opacity:.55;font-size:10.5px;white-space:nowrap}
   .gg-badge{display:inline-block;padding:2px 9px;border-radius:99px;background:#f5b301;color:#241c00;font-weight:700;font-size:11px}
   .gg-badge.red{background:#e5484d;color:#fff}
   .gg-mask{position:fixed;inset:0;background:#05070c99;backdrop-filter:blur(6px);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:22px 12px;overflow:auto}
@@ -203,7 +211,7 @@
   function searchBlob(...parts) { return parts.filter(Boolean).join(" ").toLowerCase(); }
   function CSS_ESC(value) { return String(value || "").replace(/["\\]/g, "\\$&"); }
 
-  let state = { groupId: "", config: null, warnings: [], kicked: [], commands: [] };
+  let state = { groupId: "", config: null, warnings: [], kicked: [], commands: [], stats: {}, audit: [] };
 
   function modal(title) {
     ensureStyle();
@@ -228,7 +236,7 @@
     }
     body.innerHTML = `<div class="gg-card">جارٍ التحميل…</div>`;
     const data = await api(`/api/fw/groups/guard?groupId=${encodeURIComponent(groupId)}`);
-    state = { groupId, config: data.config, warnings: data.warnings || [], kicked: data.kicked || [], commands: data.commands || [] };
+    state = { groupId, config: data.config, warnings: data.warnings || [], kicked: data.kicked || [], commands: data.commands || [], stats: data.stats || {}, audit: data.audit || [] };
     render(body);
   }
 
@@ -244,6 +252,10 @@
     const kickedDigits = new Set(kickedList.map((row) => digitsOf(row.jid)).filter(Boolean));
     const activeWarnings = warnings.filter((row) => !kickedDigits.has(digitsOf(row.jid)));
     const totalWarnings = warnings.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
+    const stats = state.stats || {};
+    const auditRows = state.audit || [];
+    const whitelist = config.whitelist || [];
+    const quiet = config.quiet || { enabled: false, from: "00:00", to: "07:00" };
     const name = (groups().find((g) => g.id === state.groupId) || {}).name || state.groupId;
     body.innerHTML = `
       <div class="gg-wrap">
@@ -272,6 +284,29 @@
             <div class="gg-row"><div><b>تأخير الطرد (ثانية)</b></div><input class="gg-in" style="width:84px" type="number" min="0" max="600" value="${esc(config.kickDelaySec ?? 30)}" data-num="kickDelaySec"></div>
             <div class="gg-row"><div><b>تحذير لكل عدد ملصقات</b></div><input class="gg-in" style="width:84px" type="number" min="1" max="50" value="${esc(config.stickerWarnEvery || 5)}" data-num="stickerWarnEvery"></div>
             <div class="gg-actions"><button class="gg-btn" id="ggSaveNums">حفظ الأرقام</button></div>
+          </div>
+
+          <div class="gg-card">
+            <h3>⚡ الدرع المتقدم <span class="gg-tag">المستوى 7</span></h3>
+            <div class="mut">حمايات إضافية اختيارية — كلها مطفأة حتى تشعلها بنفسك.</div>
+            ${toggleRow("floodGuard", "منع الإغراق", "حذف وتحذير عند إرسال رسائل كثيرة بسرعة", config.floodGuard)}
+            ${toggleRow("repeatGuard", "تكرار الرسالة", "حذف وتحذير عند تكرار نفس النص مرتين", config.repeatGuard)}
+            ${toggleRow("autoReKick", "منع العودة بعد الطرد", "أي عضو في سجل المطرودين يرجع يُطرد تلقائياً", config.autoReKick)}
+            ${toggleRow("quietEnabled", "ساعات الهدوء", "إيقاف كل الحمايات في وقت محدد", quiet.enabled)}
+            <div class="gg-row"><div><b>حد الإغراق (رسائل)</b></div><input class="gg-in" style="width:84px" type="number" min="2" max="50" value="${esc(config.floodCount || 6)}" data-num="floodCount"></div>
+            <div class="gg-row"><div><b>خلال (ثانية)</b></div><input class="gg-in" style="width:84px" type="number" min="3" max="50" value="${esc(config.floodWindowSec || 12)}" data-num="floodWindowSec"></div>
+            <div class="gg-row"><div><b>من الساعة</b></div><input class="gg-in" style="width:110px" type="time" id="ggQuietFrom" value="${esc(quiet.from || "00:00")}"></div>
+            <div class="gg-row"><div><b>إلى الساعة</b></div><input class="gg-in" style="width:110px" type="time" id="ggQuietTo" value="${esc(quiet.to || "07:00")}"></div>
+            <div class="gg-actions"><button class="gg-btn" id="ggSaveQuiet">حفظ وقت الهدوء</button></div>
+          </div>
+
+          <div class="gg-card">
+            <h3>🤍 القائمة البيضاء</h3>
+            <div class="mut">أعضاء مستثنون من كل الحمايات (مالك، مشرفين، أصحابك). اكتب الرقم بالدولة بدون +.</div>
+            <div class="gg-chips">
+              ${whitelist.length ? whitelist.map((jid) => `<span class="gg-chip">${esc(jidNumber(jid))}<button data-unwhite="${esc(jid)}" title="إزالة">✕</button></span>`).join("") : `<span class="gg-chip">لا أحد</span>`}
+            </div>
+            <div class="gg-tools"><input class="gg-in gg-search" id="ggWhiteInput" placeholder="مثال: 249912345678" inputmode="numeric"><button class="gg-btn alt" id="ggWhiteAdd">إضافة</button></div>
           </div>
 
           <div class="gg-card">
@@ -323,6 +358,9 @@
             <div class="gg-stat"><b>${esc(activeWarnings.length)}</b><small>مخالف حالي</small></div>
             <div class="gg-stat"><b>${esc(totalWarnings)}</b><small>إجمالي التحذيرات</small></div>
             <div class="gg-stat"><b>${esc(kickedList.length)}</b><small>في سجل المطرودين</small></div>
+            <div class="gg-stat"><b>${esc(Number(stats.deleted) || 0)}</b><small>حذف اليوم</small></div>
+            <div class="gg-stat"><b>${esc(Number(stats.warned) || 0)}</b><small>تحذير اليوم</small></div>
+            <div class="gg-stat"><b>${esc(Number(stats.kicked) || 0)}</b><small>طرد اليوم</small></div>
           </div>
           ${warnings.length ? `<div class="gg-tools"><input class="gg-in gg-search" id="ggSearchWarn" placeholder="ابحث بالاسم أو الرقم أو السبب…"></div>
           <div class="gg-list" id="ggWarnList">
@@ -358,6 +396,7 @@
           <div class="gg-empty" id="ggWarnEmpty" hidden>لا نتائج مطابقة للبحث.</div>` : `<div class="gg-empty">كل شيء تمام — لا أحد عليه مخالفات.</div>`}
           <div class="gg-actions">
             <button class="gg-btn alt" id="ggExport">⬇ تصدير السجل CSV</button>
+            <button class="gg-btn dng" id="ggKickOffenders">🚪 طرد كل المخالفين</button>
             <button class="gg-btn dng" id="ggResetAll">تصفير مخالفات الجميع</button>
             <button class="gg-btn alt" id="ggDocs">📖 أوامر المجموعات</button>
           </div>
@@ -384,6 +423,18 @@
           </div>
           <div class="gg-empty" id="ggKickedEmpty" hidden>لا نتائج مطابقة للبحث.</div>` : `<div class="gg-empty">السجل فاضي — لا أحد مطروح.</div>`}
         </div>
+
+        <div class="gg-card wide">
+          <h3>🕵️ سجل التدقيق <span class="gg-tag">${esc(auditRows.length)} حدث</span></h3>
+          <div class="mut">كل إجراء حماية بالثانية: حذف، تحذير، طرد — مع السبب وماذا نُشر.</div>
+          ${auditRows.length ? `<div class="gg-audit">
+            ${auditRows.map((row) => {
+              const icon = row.kind === "kicked" ? "🚪" : row.kind === "warned" ? "⚠️" : "🗑";
+              const label = row.kind === "kicked" ? "طرد" : row.kind === "warned" ? "تحذير" : "حذف";
+              return `<div class="gg-aud"><span class="k">${icon}</span><span class="t"><b>${esc(label)}</b> · ${esc(row.name || jidNumber(row.jid))}${row.reason ? ` · ${esc(REASON_LABELS[row.reason] || row.reason)}` : ""}${row.text ? ` · <code style="direction:ltr">${esc(row.text)}</code>` : ""}</span><span class="tm">${esc(timeAgo(row.at))}</span></div>`;
+            }).join("")}
+          </div>` : `<div class="gg-empty">لا أحداث بعد — أول ما تحصل مخالفة راح تظهر هنا.</div>`}
+        </div>
       </div>`;
     bind(body);
   }
@@ -396,6 +447,7 @@
       else if (key === "welcomeCard") (patch.welcome = patch.welcome || {}).card = input.checked;
       else if (key === "goodbyeEnabled") (patch.goodbye = patch.goodbye || {}).enabled = input.checked;
       else if (key === "goodbyeCard") (patch.goodbye = patch.goodbye || {}).card = input.checked;
+      else if (key === "quietEnabled") (patch.quiet = patch.quiet || {}).enabled = input.checked;
       else patch[key] = input.checked;
     });
     return patch;
@@ -527,6 +579,49 @@
           toast("🗑 حُذف من السجل");
         } catch (error) { toast("❌ " + error.message); }
       });
+    });
+
+    const quietButton = body.querySelector("#ggSaveQuiet");
+    if (quietButton) quietButton.addEventListener("click", async () => {
+      const patch = { quiet: { from: body.querySelector("#ggQuietFrom").value || "00:00", to: body.querySelector("#ggQuietTo").value || "07:00" } };
+      try { state.config = (await api("/api/fw/groups/guard", { groupId: state.groupId, patch })).config; toast("✅ حُفظ وقت الهدوء"); }
+      catch (error) { toast("❌ " + error.message); }
+    });
+
+    const whiteButton = body.querySelector("#ggWhiteAdd");
+    if (whiteButton) whiteButton.addEventListener("click", async () => {
+      const input = body.querySelector("#ggWhiteInput");
+      const digits = String(input.value || "").replace(/[^0-9]/g, "");
+      if (digits.length < 8) { toast("❌ اكتب الرقم بالدولة كاملاً"); return; }
+      whiteButton.disabled = true;
+      try {
+        const data = await api("/api/fw/groups/guard/whitelist", { groupId: state.groupId, jid: `${digits}@s.whatsapp.net`, action: "add" });
+        state.config = data.config;
+        render(body);
+        toast("🤍 أُضيف للقائمة البيضاء");
+      } catch (error) { whiteButton.disabled = false; toast("❌ " + error.message); }
+    });
+
+    body.querySelectorAll("[data-unwhite]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        try {
+          const data = await api("/api/fw/groups/guard/whitelist", { groupId: state.groupId, jid: button.dataset.unwhite, action: "remove" });
+          state.config = data.config;
+          render(body);
+          toast("🗑 أُزيل من القائمة البيضاء");
+        } catch (error) { toast("❌ " + error.message); }
+      });
+    });
+
+    const offendersButton = body.querySelector("#ggKickOffenders");
+    if (offendersButton) offendersButton.addEventListener("click", async () => {
+      if (!confirm("طرد كل من عليه تحذيرات الآن؟")) return;
+      offendersButton.disabled = true;
+      try {
+        const data = await api("/api/fw/groups/guard/kick-offenders", { groupId: state.groupId });
+        toast(`🚪 طُرد ${data.kicked.length}${data.failed.length ? ` · فشل ${data.failed.length}` : ""}`);
+        load(state.groupId);
+      } catch (error) { offendersButton.disabled = false; toast("❌ " + error.message); }
     });
 
     const testWelcome = body.querySelector("#ggTestWelcome");

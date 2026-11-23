@@ -42,6 +42,7 @@ import {
   webGuardTestWelcome,
   webGuardReAdd,
   webGuardKick,
+  webGuardKickOffenders,
 } from "./handlers/groups-handler.mjs";
 import {ludoEngine,loadLudoHtml} from "../services/ludo-game.mjs";
 import { getSharedState, joinShared, moveShared } from "../services/xo-shared.mjs";
@@ -170,7 +171,7 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.get('/groups-guard-web.js', (_req, res) => { res.setHeader('Content-Type', 'application/javascript; charset=utf-8'); res.setHeader('Cache-Control', 'no-store'); res.end(readFileSync(fileURLToPath(new URL("../public/groups-guard-web.js", import.meta.url)))); });
   app.get('/api/fw/groups/guard', guard(async (uid, req) => {
     const groupId = guardGroupId(req);
-    return { groupId, config: publicGuardConfig(groupGuard.getGroupConfig(uid, groupId)), warnings: groupGuard.listWarnings(uid, groupId), kicked: groupGuard.listKicked(uid, groupId), commands: groupGuard.commandsCatalog() };
+    return { groupId, config: publicGuardConfig(groupGuard.getGroupConfig(uid, groupId)), warnings: groupGuard.listWarnings(uid, groupId), kicked: groupGuard.listKicked(uid, groupId), stats: groupGuard.getGuardStats(uid, groupId), audit: groupGuard.listAudit(uid, groupId, 40), commands: groupGuard.commandsCatalog() };
   }));
   app.get('/api/fw/groups/guard/card', guard(async (uid, req, res) => {
     const groupId = guardGroupId(req);
@@ -185,7 +186,7 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     const groupId = guardGroupId(req);
     const patch = req.body?.patch || {};
     const allowed = {};
-    for (const key of ["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "kickOnLimit", "maxWarnings", "stickerWarnEvery", "kickDelaySec", "words", "welcome", "goodbye"]) {
+    for (const key of ["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "kickOnLimit", "maxWarnings", "stickerWarnEvery", "kickDelaySec", "words", "welcome", "goodbye", "floodGuard", "floodCount", "floodWindowSec", "repeatGuard", "autoReKick", "whitelist", "quiet"]) {
       if (key in patch) allowed[key] = patch[key];
     }
     return { groupId, config: publicGuardConfig(groupGuard.updateGroupConfig(uid, groupId, allowed)) };
@@ -223,6 +224,20 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/fw/groups/guard/kick', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);
     return webGuardKick(uid, groupId, String(req.body?.jid || ""), req.body?.phoneNumber || null, String(req.body?.reason || ""));
+  }));
+  app.post('/api/fw/groups/guard/kick-offenders', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    return webGuardKickOffenders(uid, groupId, req.body?.phoneNumber || null);
+  }));
+  app.post('/api/fw/groups/guard/whitelist', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    const cfg = groupGuard.getGroupConfig(uid, groupId);
+    const jid = String(req.body?.jid || "").trim();
+    const action = String(req.body?.action || "add").toLowerCase();
+    if (!/(@s\.whatsapp\.net|@lid)$/.test(jid)) throw new Error("معرّف العضو غير صالح");
+    const list = Array.isArray(cfg.whitelist) ? cfg.whitelist : [];
+    const next = action === "remove" ? list.filter((item) => item !== jid) : [...list, jid];
+    return { groupId, config: publicGuardConfig(groupGuard.updateGroupConfig(uid, groupId, { whitelist: next })) };
   }));
   app.post('/api/fw/groups/guard/kicked/remove', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);

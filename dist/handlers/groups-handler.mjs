@@ -1504,6 +1504,33 @@ export async function webGuardKick(userId, groupId, memberJid, phoneNumber = nul
   return { ok: true, jid, kicked: guard.listKicked(String(userId), id) };
 }
 
+/** [LEVEL-7] طرد كل المخالفين الحاليين (الذين عليهم تحذيرات) بضغطة واحدة من اللوحة */
+export async function webGuardKickOffenders(userId, groupId, phoneNumber = null) {
+  const id = String(groupId || "").trim();
+  if (!id.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+  const sock = await findSocketForGroup(String(userId), id, phoneNumber);
+  if (!sock) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
+  const guard = await import("../../services/group-guard.mjs");
+  const rows = guard.listWarnings(String(userId), id);
+  const done = [];
+  const failed = [];
+  for (const row of rows) {
+    try {
+      await sock.groupParticipantsUpdate(id, [row.jid], "remove");
+      guard.recordKicked(String(userId), id, {
+        jid: row.jid,
+        name: row.name || "",
+        reason: "طرد جماعي للمخالفين من لوحة الحماية",
+        count: Number(row.count) || 0,
+      });
+      done.push(row.jid);
+    } catch (error) {
+      failed.push({ jid: row.jid, error: String(error?.message || error).slice(0, 120) });
+    }
+  }
+  return { ok: true, kicked: done, failed, kickedList: guard.listKicked(String(userId), id) };
+}
+
 /** [GUARD] إرسال ترحيب تجريبي للمجموعة للتأكد أن نظام الترحيب يعمل */
 export async function webGuardTestWelcome(userId, groupId, phoneNumber = null, sampleJids = []) {
   const id = String(groupId || "").trim();
