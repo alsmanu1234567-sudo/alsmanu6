@@ -216,7 +216,12 @@ async function main() {
   } catch { }
   ok(`مجلد البوت: ${BASE_DIR}`);
   ok(`مجلد المكتبات الخارجي: ${EXTERNAL_DEPS_DIR} (مصدر الاكتشاف: ${EXTERNAL_INFO.source}${EXTERNAL_INFO.score ? ` · الثقة ${EXTERNAL_INFO.score}` : ""})`);
-  prepareExternalNodeModules(BASE_DIR, EXTERNAL_DEPS_DIR);
+  const nodeModulesPrep = prepareExternalNodeModules(BASE_DIR, EXTERNAL_DEPS_DIR);
+  if (nodeModulesPrep?.healed?.length) {
+    // [SELF-HEAL-DEPS] لا نُوقف البوت بسبب بقايا رابط/ملف node_modules من نسخة قديمة
+    wrn(`أُصلح node_modules تلقائياً (${nodeModulesPrep.healed.join(", ")}) — بدل إيقاف التشغيل`);
+  }
+  ok(`المكتبات: ${nodeModulesPrep.externalNodeModules}`);
   const sessionStorage = prepareExternalSessionStorage(BASE_DIR, EXTERNAL_DEPS_DIR);
   ok(`جلسات واتساب محفوظة خارج المشروع: ${sessionStorage.externalSessions}`);
   try {
@@ -251,6 +256,9 @@ async function main() {
     else if (compat.reason === "already-safe") ok("توافق Node سليم (لا حاجة لترقيع)");
   } catch (error) {
     wrn(`تعذر فحص توافق Node: ${error.message}`);
+  }
+  if (Number(String(process.versions.node).split(".")[0]) >= 23) {
+    wrn(`Node ${process.versions.node} إصدار جديد جداً وغير مُختبَر مع البوت — لو ظهرت أ خطاء غريبة استخدم Node 20/22 LTS من لوحة الاستضافة.`);
   }
   if (Number(String(process.versions.node).split(".")[0]) < 20) {
     wrn(`Node ${process.versions.node} قديم نسبياً — البوت يعمل بترقيع توافق، والأفضل Node 20 أو أحدث.`);

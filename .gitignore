@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 wa-sessions/
 test_out/
 *.log

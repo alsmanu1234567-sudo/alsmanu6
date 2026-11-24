@@ -10,6 +10,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { resolveExternalDepsDir, markExternalDepsDir, ensureExternalLayout } from "./paths.mjs";
@@ -68,19 +69,39 @@ export function prepareExternalNodeModules(baseDir, externalDir = getExternalDep
 
   const localInfo = lstatOrNull(projectNodeModules);
   const externalInfo = lstatOrNull(externalNodeModules);
+  const healed = [];
 
   if (localInfo?.isSymbolicLink()) {
-    const target = resolve(dirname(projectNodeModules), readlinkSync(projectNodeModules));
-    if (target !== externalNodeModules) {
+    let target = "";
+    try { target = resolve(dirname(projectNodeModules), readlinkSync(projectNodeModules)); } catch { }
+    if (target && target !== externalNodeModules && existsSync(target)) {
+      // رابط سليم يشير لمجلد آخر موجود فعلاً — لا نلمسه (حماية من إتلاف إعداد مقصود)
       throw new Error(
         `node_modules يشير إلى مسار مختلف (${target})؛ لم أغيّر الرابط الموجود.`
       );
     }
+    // [SELF-HEAL-DEPS] رابط ميت (هدفه غير موجود) — شائع بعد نقل المشروع أو فكّ
+    // الأرشيف من لوحة استضافة — كان يمنع الإقلاع نهائياً. نستبدله برابط صحيح.
+    try {
+      unlinkSync(projectNodeModules);
+      healed.push("dead-symlink");
+    } catch (error) {
+      throw new Error(`تعذر إصلاح رابط node_modules: ${error.message}`);
+    }
   } else if (localInfo) {
     if (!localInfo.isDirectory()) {
-      throw new Error("node_modules داخل المشروع ليس مجلداً؛ لم أغيّره.");
-    }
-    if (externalInfo) {
+      // [SELF-HEAL-DEPS] بعض لوحات الاستضافة تفكّ الرابط الرمزي إلى **ملف نصي**
+      // اسمه node_modules ويحتوي المسار فقط، فيتوقف البوت بـ«ليس مجلداً».
+      // ننقله جانباً (لا نحذفه) ونكمل بدل الفشل.
+      const backup = join(projectRoot, `.node_modules.backup-${Date.now()}`);
+      try {
+        renameSync(projectNodeModules, backup);
+        healed.push(`file→${basename(backup)}`);
+        console.warn(`[DEPS-HEAL] node_modules كان ملفاً لا مجلداً — نُقل إلى ${basename(backup)} وأُنشئ رابط صحيح`);
+      } catch (error) {
+        throw new Error(`node_modules داخل المشروع ليس مجلداً وتعذر نقله جانباً: ${error.message}`);
+      }
+    } else if (externalInfo) {
       // [SMART-PATHS] وجود الاثنين لا يجب أن يمنع الإقلاع: نُبقي الخارجي ونحفظ الداخلي باسم احتياطي
       const backup = join(projectRoot, `.node_modules.backup-${Date.now()}`);
       try { renameSync(projectNodeModules, backup); } catch { }
@@ -89,16 +110,20 @@ export function prepareExternalNodeModules(baseDir, externalDir = getExternalDep
     }
   }
 
+  // هدف الرابط يجب أن يكون مجلداً موجوداً، وإلا فشل require/import لاحقاً بصمت
+  if (!existsSync(externalNodeModules)) {
+    try { mkdirSync(externalNodeModules, { recursive: true }); } catch { }
+  }
   const installedInfo = lstatOrNull(externalNodeModules);
   if (installedInfo && !installedInfo.isDirectory()) {
     throw new Error(`المسار الخارجي ليس مجلداً: ${externalNodeModules}`);
   }
 
-  if (!existsSync(projectNodeModules) && !lstatOrNull(projectNodeModules)) {
+  if (!lstatOrNull(projectNodeModules)) {
     symlinkSync(externalNodeModules, projectNodeModules, process.platform === "win32" ? "junction" : "dir");
   }
 
-  return { externalRoot, externalNodeModules, projectNodeModules };
+  return { externalRoot, externalNodeModules, projectNodeModules, healed };
 }
 
 function isInside(parent, candidate) {
