@@ -45,7 +45,9 @@ function _setUrl(url, provider, log, onUrl) {
   globalThis.__FW_TUNNEL_PROVIDER = provider;
   // [TUNNEL-VERIFY] localtunnel يظهر صفحة كلمة مرور/تحقق قبل الموقع ⇒ غير صالح لزر
   // الويب آب في تيليجرام (يظهر «لا يعمل»). نعلّمه غير موثوق فيُخفى الزر.
-  globalThis.__FW_PUBLIC_TRUSTED = provider !== "localtunnel";
+  // كل رابط يُعلن هنا سبق أن نجح فحصه ✓ ⇒ يُعتبر موثوقاً (كان localtunnel يُستثنى
+  // خطأً فيختفي زر الويب آب مع أنه يعمل عند المستخدم).
+  globalThis.__FW_PUBLIC_TRUSTED = true;
   log(`[TUNNEL] الرابط العام جاهز (${provider}): ${url}`);
   try { onUrl && onUrl(url); } catch {}
   // [TUNNEL-STABLE] الرابط القديم مات (كل تشغيل يعطي نطاقاً جديداً) ⇒ نُبلّغ بالجديد

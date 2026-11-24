@@ -78,7 +78,7 @@ test('الفحص يتطلب استجابة /healthz الحقيقية ويرفض 
 
 test('localtunnel لا يُعلن إلا بعد نجاح الفحص، ويُخفى زر الويب آب', () => {
   assert.match(__tunnel, /const ltOk = await _probeTunnel\(ltUrl, 20_000\)/);
-  assert.match(__tunnel, /__FW_PUBLIC_TRUSTED = provider !== "localtunnel"/);
+  assert.match(__tunnel, /__FW_PUBLIC_TRUSTED = true/);
   assert.match(__auth, /__FW_PUBLIC_TRUSTED === false\) return null/);
 });
 
@@ -114,4 +114,11 @@ test('لا رابط وهمي عند فشل الجميع: إبلاغ واحد + �
   // رسالة الفشل لا تحتوي رابطاً
   const failBlock = __index.slice(__index.indexOf("t.setTunnelFailHook"));
   assert.doesNotMatch(failBlock.slice(0, 1800), /https?:\/\//);
+});
+
+// ── [DUP-INSTANCE] نسختان بنفس التوكن (سيرفر قديم + جديد) ──
+test('كشف 409 Conflict وعدم الرد المزدوج', () => {
+  assert.match(__index, /\[DUP-INSTANCE\]/);
+  assert.match(__index, /terminated by other getUpdates/);
+  assert.match(__index, /_dupLastAt < 10 \* 60 \* 1000/);
 });

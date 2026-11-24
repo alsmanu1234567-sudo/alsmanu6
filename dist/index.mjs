@@ -292951,6 +292951,21 @@ function shouldSendReconnectNotice(sessKey, number) {
 
 function setBotRef(bot2) {
   botRef = bot2;
+  // ── [DUP-INSTANCE] كشف تشغيل نسختين بنفس توكن تيليجرام ──────────────────
+  // عند وجود سيرفرين (قديم + جديد) بنفس التوكن، تيليجرام يعطي 409 Conflict،
+  // والنسخة القديمة هي التي ترد على المستخدم — فيبدو كأن الجلسة/الرقم قديم.
+  try {
+    let _dupLastAt = 0;
+    bot2.on("polling_error", (err) => {
+      const m = String(err?.message || err || "");
+      const code = Number(err?.response?.statusCode || err?.code || 0);
+      const isDup = code === 409 || /409|Conflict|terminated by other getUpdates/i.test(m);
+      if (!isDup) { try { console.error("[POLLING-ERROR]", m.slice(0, 200)); } catch { } return; }
+      if (Date.now() - _dupLastAt < 10 * 60 * 1000) return;
+      _dupLastAt = Date.now();
+      try { console.error("[DUP-INSTANCE] نسخة أخرى من البوت تعمل بنفس التوكن (409 Conflict) — أوقف القديمة"); } catch { }
+    });
+  } catch { }
 }
 function getAuthDir(userId) {
   return path3.join(WA_SESSIONS_ROOT, userId);
@@ -330813,12 +330828,12 @@ async function main() {
       // الجديد في تيليجرام تلقائياً حتى لا يفتح رابطاً ميتاً محفوظاً.
       try {
         t.setTunnelUrlHook((url, provider) => {
-          const isWeak = String(provider) === "localtunnel";
-          const text = isWeak
-            ? `\u{1F310} *\u0631\u0627\u0628\u0637 \u0645\u0624\u0642\u062A (${provider})*\n\n${url}\n\n` +
-              `\u26A0\uFE0F \u0647\u0630\u0627 \u0627\u0644\u0645\u0632\u0648\u062F \u064A\u0639\u0631\u0636 \u0635\u0641\u062D\u0629 \u062A\u062D\u0642\u0642 \u0642\u0628\u0644 \u0627\u0644\u0645\u0648\u0642\u0639 (\u0631\u0628\u0645\u0627 \u062A\u0637\u0644\u0628 IP \u0627\u0644\u062E\u0627\u062F\u0645) \u2014 \u0644\u064A\u0633 \u0645\u0646\u0627\u0633\u0628\u0627\u064B \u0644\u0632\u0631 \u0627\u0644\u0648\u064A\u0628 \u0622\u0628. \u0627\u0633\u062A\u062E\u062F\u0645 \u0644\u0648\u062D\u0629 \u0627\u0644\u0633\u064A\u0631\u0641\u0631 \u0623\u0648 \u0627\u0646\u062A\u0638\u0631 \u062A\u062C\u062F\u062F \u0627\u0644\u0645\u0632\u0648\u062F \u0627\u0644\u0623\u0641\u0636\u0644.`
-            : `\u{1F310} *\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u064A\u0628 \u0622\u0628 \u0627\u0644\u062D\u0627\u0644\u064A*\n\n${url}\n\n` +
-              `\u26A0\uFE0F \u0647\u0630\u0627 \u0627\u0644\u0631\u0627\u0628\u0637 \u064A\u062A\u063A\u064A\u0631 \u0645\u0639 \u0643\u0644 \u062A\u0634\u063A\u064A\u0644 \u2014 \u0627\u0633\u062A\u062E\u062F\u0645 \u0622\u062E\u0631 \u0631\u0633\u0627\u0644\u0629 \u062F\u0627\u0626\u0645\u0627\u064B (${provider}).`;
+          // كل رابط يُعلن هنا سبق نجاح فحصه ⇒ لا تحذير مخيف للمستخدم
+          const isBackup = String(provider) === "localtunnel";
+          const text = `\u{1F310} *\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u064A\u0628 \u0622\u0628 \u0627\u0644\u062D\u0627\u0644\u064A*\n\n${url}\n\n` +
+            `\u2705 \u0627\u0644\u0631\u0627\u0628\u0637 \u0645\u0641\u062D\u0648\u0635 \u0648\u064A\u0639\u0645\u0644 (${provider}).\n` +
+            (isBackup ? `\u2139\uFE0F \u0645\u0632\u0648\u062F \u0627\u062D\u062A\u064A\u0627\u0637\u064A: \u0625\u0646 \u0638\u0647\u0631\u062A \u0635\u0641\u062D\u0629 \u062A\u062D\u0642\u0642 \u0623\u062F\u062E\u0644 IP \u0627\u0644\u062E\u0627\u062F\u0645 \u0643\u0643\u0644\u0645\u0629 \u0645\u0631\u0648\u0631.\n` : "") +
+            `\u26A0\uFE0F \u064A\u062A\u063A\u064A\u0631 \u0645\u0639 \u0643\u0644 \u062A\u0634\u063A\u064A\u0644 \u2014 \u0627\u0633\u062A\u062E\u062F\u0645 \u0622\u062E\u0631 \u0631\u0633\u0627\u0644\u0629 \u062F\u0627\u0626\u0645\u0627\u064B.`;
           const targets = new Set();
           try { if (DEVELOPER_ID) targets.add(String(DEVELOPER_ID)); } catch { }
           try { for (const u of getAllUsers() || []) { const c = String(u?.telegramChatId || u?.id || ""); if (c) targets.add(c); } } catch { }
@@ -330838,8 +330853,8 @@ async function main() {
           push();
         });
       } catch { }
-      // [TUNNEL-FAIL-HOOK] لو استُنفدت حصص كل المزودين: رسالة واحدة تشرح الوضع
-      // (بدون إرسال أي رابط) — ولا تُرسل إلا كل 30 دقيقة، والبوت يعمل عادي.
+      // [TUNNEL-FAIL-HOOK] إذا استُنفدت حصص كل المزودين: رسالة واحدة تشرح الوضع
+      // (بدون أي رابط) — مرة كل 30 دقيقة فقط، والبوت يعمل عادي.
       try {
         t.setTunnelFailHook((reason) => {
           const text = reason === "quota"
