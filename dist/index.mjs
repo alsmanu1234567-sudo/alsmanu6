@@ -292967,6 +292967,34 @@ function setBotRef(bot2) {
     });
   } catch { }
 }
+// [SESSIONS-REPAIR] الرابط الرمزي المعطوب (wa-sessions → مخزن خارجي غير موجود على
+// السيرفر الجديد) يجعل mkdirSync يفشل بـ ENOENT: "لا يوجد مجلد أو ملف بهذا الاسم".
+// نُصلح السلسلة: ننشئ هدف الرابط، وإن تعذّر نستبدله بمجلد حقيقي.
+function _ensureDirSafe(dir) {
+  try { fs6.mkdirSync(dir, { recursive: true, mode: 0o700 }); return true; } catch (e) {
+    if (e?.code !== "ENOENT") { try { logger.warn({ err: e?.message, dir }, "[SESSIONS-REPAIR] تعذر إنشاء المجلد"); } catch { } return false; }
+    let p = dir;
+    while (p && p !== path3.dirname(p)) {
+      let link = null;
+      try { if (fs6.lstatSync(p).isSymbolicLink()) link = p; } catch { }
+      if (link) {
+        let tgt = null;
+        try { tgt = path3.resolve(path3.dirname(link), fs6.readlinkSync(link)); } catch { }
+        try {
+          if (tgt) fs6.mkdirSync(tgt, { recursive: true, mode: 0o700 });
+          try { logger.warn({ link, target: tgt }, "[SESSIONS-REPAIR] أُنشئ هدف الرابط الرمزي"); } catch { }
+        } catch {
+          try { fs6.rmSync(link, { force: true }); } catch { }
+          try { fs6.mkdirSync(link, { recursive: true, mode: 0o700 }); } catch { }
+          try { logger.warn({ link }, "[SESSIONS-REPAIR] رابط معطوب (هدفه غير قابل للإنشاء) — استُبدل بمجلد حقيقي"); } catch { }
+        }
+        break;
+      }
+      p = path3.dirname(p);
+    }
+    try { fs6.mkdirSync(dir, { recursive: true, mode: 0o700 }); return true; } catch { return false; }
+  }
+}
 function getAuthDir(userId) {
   return path3.join(WA_SESSIONS_ROOT, userId);
 }
@@ -293401,7 +293429,7 @@ async function _connectQr(sessKey, chatId, userId) {
   const authDir = getAuthDir(sessKey);
   try {
     const { useMultiFileAuthState: useMultiFileAuthState2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
-    fs6.mkdirSync(authDir, { recursive: true });
+    _ensureDirSafe(authDir); // [SESSIONS-REPAIR]
     const { state: authState, saveCreds } = await useMultiFileAuthState2(authDir);
     const _vq = await _getWaVersion();
     const sock = makeBaileysSocket(authState, _vq);
@@ -293847,7 +293875,7 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
   const authDir = getAuthDir(sessKey);
   try {
     const { useMultiFileAuthState: useMultiFileAuthState2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
-    fs6.mkdirSync(authDir, { recursive: true });
+    _ensureDirSafe(authDir); // [SESSIONS-REPAIR]
     let { state: authState, saveCreds } = await useMultiFileAuthState2(authDir);
     // [PAIRING-CLEAN] بقايا محاولة فاشلة (creds.json ناقص) تمنع إكمال المصافحة
     // ⇒ عند أول محاولة ربط جديدة نُنظّف المجلد مرة واحدة فقط.
@@ -293857,7 +293885,7 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
       try {
         const bak = authDir + ".bak-" + Date.now();
         fs6.renameSync(authDir, bak);
-        fs6.mkdirSync(authDir, { recursive: true });
+        _ensureDirSafe(authDir); // [SESSIONS-REPAIR]
         s.cleaned = true;
         sessions.set(sessKey, s);
         try { logger.warn({ userId, sessKey, bak }, "[PAIRING-CORRUPT] جلسة تالفة (registered بلا اتصال) — نُقلت جانباً ونبدأ من جديد"); } catch { }
@@ -297673,6 +297701,9 @@ var init_baileys_session = __esm({
     // [FIX-CACHE-PERF] Set موازٍ لـ O(1) dedup بدلاً من Array.some() O(n*m)
     userSentMsgIdSet = /* @__PURE__ */ new Map();
     WA_SESSIONS_ROOT = BOT_WA_SESSIONS_DIR;
+    // [SESSIONS-REPAIR] إصلاح مبكر: رابط رمزي معطوب هنا كان يُفشل كل محاولة ربط
+    try { _ensureDirSafe(WA_SESSIONS_ROOT); } catch { }
+    try { _ensureDirSafe(BOT_DATA_DIR); } catch { }
   }
 });
 

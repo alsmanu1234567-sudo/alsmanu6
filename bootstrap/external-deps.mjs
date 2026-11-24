@@ -222,6 +222,17 @@ export function prepareExternalSessionStorage(baseDir, externalDir = getExternal
     symlinkSync(externalSessions, projectSessions, process.platform === "win32" ? "junction" : "dir");
   }
 
+  // [SESSIONS-FALLBACK] حماية أخيرة: لو بقيت wa-sessions رابطاً معطوباً (هدفٌ غير موجود
+  // على سيرفر جديد) نستبدلها بمجلد حقيقي حتى لا يفشل الربط بـ ENOENT.
+  try {
+    let dangling = false;
+    try { dangling = lstatSync(projectSessions).isSymbolicLink() && !existsSync(realpathSync(projectSessions)); } catch { dangling = false; }
+    if (dangling) {
+      try { rmSync(projectSessions, { force: true }); } catch { }
+      try { mkdirSync(projectSessions, { recursive: true, mode: 0o700 }); } catch { }
+    }
+  } catch { }
+
   // Baileys creates and updates auth files after this setup.
   process.umask(0o077);
   return { externalSessions, projectSessions };
