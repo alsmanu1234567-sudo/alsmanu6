@@ -331,7 +331,12 @@ async function main() {
       intervalMs: 60 * 1000,
       getChild: () => runner.getChild(),
       logger: { info: (m) => ok(m), warn: (m) => wrn(m) },
-      restart: (child) => { try { child.kill("SIGKILL"); } catch { } },
+      // [RAM-GRACEFUL] إيقاف لطيف أولاً (SIGTERM) ثم SIGKILL بعد 10 ثوانٍ —
+      // القتل المفاجئ يقصف جلسة واتساب ويجبر إعادة المسح/الاتصال البطيء.
+      restart: (child) => {
+        try { child.kill("SIGTERM"); } catch { }
+        setTimeout(() => { try { if (!child.killed) child.kill("SIGKILL"); } catch { } }, 10_000).unref?.();
+      },
       // [PANEL-RAM-GUARD] نوقف لوحة السيرفر أولاً (تحرير عملية Node + نفق) قبل أي إعادة تشغيل
       beforeRestart: async () => releaseMemory(),
       // [RAM-PRESSURE] تحرير استباقي بلا إسقاط البوت عند 70%+

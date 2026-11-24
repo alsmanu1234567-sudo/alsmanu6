@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-bot-pro",
-  "version": "8.13.1",
+  "version": "8.14.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -29,5 +29,8 @@
   "overrides": {
     "form-data": "^4.0.0",
     "request": "npm:@cypress/request@^3.0.0"
+  },
+  "optionalDependencies": {
+    "tunnelmole": "^2.4.3"
   }
 }

@@ -11,6 +11,7 @@ import {
   readTreeRssMb,
   readRssMb,
   readCgroupUsedMb,
+  readCgroupAnonMb,
 } from "../../bootstrap/memory-guard.mjs";
 import { buildNodeArgs } from "../../infrastructure/process-manager.mjs";
 
@@ -66,7 +67,8 @@ test("عتبات التحرير الاستباقي (70%) وإعادة التشغ
   const restart = decideMemoryAction({ usedMb: 560, limitMb: 589, consecutive: 1, uptimeMs: 3600_000 });
   assert.equal(restart.action, "restart");
   // لا إعادة تشغيل قبل 5 دقائق من التشغيل (حماية من حلقة)
-  const fresh = decideMemoryAction({ usedMb: 570, limitMb: 589, consecutive: 3, uptimeMs: 60_000 });
+  // خلال أول دقيقة لا نقتل العملية ولو كانت حرجة (حماية من حلقة إقلاع)
+  const fresh = decideMemoryAction({ usedMb: 570, limitMb: 589, consecutive: 3, uptimeMs: 30_000 });
   assert.equal(fresh.action, "warn");
 });
 
@@ -94,4 +96,44 @@ test("وسائط التشغيل تحمل السقف وتُبقي الملف كآ
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("الذاكرة المجهولة (anon) أهم من استهلاك الحاوية الخام الذي يخلط الكاش", () => {
+  // الوضع الحقيقي: الحاوية 553MB لكن 135MB منها كاش ملفات قابل للاستعادة،
+  // والمجهولة 418MB ⇒ 71% وليس 94%
+  const anon = decideMemoryAction({ usedMb: 418, anonMb: 418, limitMb: 589, warnRatio: 0.7 });
+  assert.notEqual(anon.action, "restart");
+  // والحالة الحرجة فعلاً
+  const critical = decideMemoryAction({ usedMb: 575, anonMb: 575, limitMb: 589, consecutive: 0, uptimeMs: 300_000 });
+  assert.equal(critical.action, "restart");
+  assert.match(critical.reason, /حرج/);
+});
+
+test("القياسات الأربعة: الأعلى هو الحاكم", () => {
+  const v = decideMemoryAction({ rssMb: 200, treeMb: 300, anonMb: 500, limitMb: 589, consecutive: 1, uptimeMs: 600_000 });
+  assert.equal(v.usedMb, 500);
+});
+
+test("لا إعادة تشغيل فورية خلال أول دقيقة (حماية من حلقة عند الإقلاع)", () => {
+  const v = decideMemoryAction({ usedMb: 585, limitMb: 589, consecutive: 5, uptimeMs: 20_000 });
+  assert.equal(v.action, "warn");
+});
+
+test("قارئ anon موجود ويعيد رقماً منطقياً", () => {
+  const anon = readCgroupAnonMb();
+  assert.ok(typeof anon === "number" && anon >= 0);
+});
+
+test("النفق لا يشغّل عملية npx إضافية عندما تكون أداة cloudflared جاهزة", async () => {
+  const fs = await import("node:fs");
+  const src = fs.readFileSync(new URL("../../dist/tunnel.mjs", import.meta.url), "utf8");
+  const at = src.indexOf("[RAM-LEAN-TUNNEL]");
+  assert.ok(at > 0, "غياب مسار النفق الخفيف");
+  const slice = src.slice(at, at + 700);
+  assert.match(slice, /return null/);
+  assert.ok(src.indexOf("[RAM-LEAN-TUNNEL]") < src.indexOf('spawn("npx"'));
+  // tunnelmole كمكتبة (اختياري) لتفادي العملية الإضافية
+  const pkg = JSON.parse(fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+  assert.ok(pkg.optionalDependencies?.tunnelmole, "tunnelmole يجب أن تكون اختيارية");
+  assert.ok(!pkg.dependencies?.tunnelmole, "لا يجب أن تكون إلزامية حتى لا توقف الإقلاع");
 });

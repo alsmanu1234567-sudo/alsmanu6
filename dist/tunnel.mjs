@@ -126,8 +126,18 @@ async function _tryTunnelmole(port, log) {
       if (url) return String(url).replace(/^http:/, "https:");
     }
   } catch {}
+  // [RAM-LEAN-TUNNEL] npx يشغّل عملية Node إضافية (~120-180MB) — على حاوية 512MB
+  // هذا وحده كان يرفع الاستهلاك لحد القتل. إن كانت أداة cloudflared الثنائية موجودة
+  // (خفيفة جداً) نترك المزود التالي يجربها بدل npx.
+  let cfReady = false;
+  try { cfReady = existsSync(BIN_PATH) && statSync(BIN_PATH).size > 10_000_000; } catch { }
+  if (cfReady) {
+    log("[TUNNEL] tunnelmole (مكتبة) غير مثبت — استخدام cloudflared الخفيف بدل عملية npx إضافية");
+    return null;
+  }
   // 2) عبر npx (لا يتطلب تثبيتاً مسبقاً — فقط Node + npm)
   try {
+    log("[TUNNEL] تشغيل tunnelmole عبر npx — عملية Node إضافية (~150MB رام)");
     return await new Promise((resolve) => {
       const p = spawn("npx", ["-y", "tunnelmole", String(port)], {
         stdio: ["ignore", "pipe", "pipe"],

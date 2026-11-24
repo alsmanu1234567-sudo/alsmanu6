@@ -111,6 +111,30 @@ export function readCgroupCacheMb() {
   }
 }
 
+/**
+ * [RAM-ACCURATE] الذاكرة المجهولة (anon) لكل الحاوية — الرقم الذي لا تستطيع النواة
+ * تحريره تلقائياً. الأصح للحكم من memory.current (الذي يخلط ذاكرة الملفات القابلة للاستعادة).
+ * @returns {number} بالميغابايت، 0 إذا تعذّر
+ */
+export function readCgroupAnonMb() {
+  const files = ["/sys/fs/cgroup/memory.stat", "/sys/fs/cgroup/memory/memory.stat"];
+  for (const file of files) {
+    try {
+      if (!existsSync(file)) continue;
+      const raw = readFileSync(file, "utf8");
+      const pick = (key) => {
+        const m = raw.match(new RegExp(`^${key}\\s+(\\d+)$`, "m"));
+        return m ? Number(m[1]) : 0;
+      };
+      const anon = pick("anon") || pick("total_rss");
+      if (anon > 0) return Math.round(anon / MB);
+    } catch {
+      // أكمل
+    }
+  }
+  return 0;
+}
+
 /** يبني خريطة pid → ppid من /proc */
 function readPpidMap() {
   const map = new Map();
@@ -189,21 +213,24 @@ export function heapFlagsForLimit(limitMb, { reduceMb = 0 } = {}) {
 
 /**
  * قرار الحارس — دالة نقية قابلة للاختبار.
- * @param {{rssMb?:number, treeMb?:number, cgroupMb?:number, usedMb?:number,
+ * @param {{rssMb?:number, treeMb?:number, cgroupMb?:number, anonMb?:number, usedMb?:number,
  *          limitMb:number, consecutive:number, uptimeMs:number,
- *          ratio?:number, warnRatio?:number, minUptimeMs?:number, unknownLimitMb?:number}} input
+ *          ratio?:number, warnRatio?:number, criticalRatio?:number,
+ *          minUptimeMs?:number, unknownLimitMb?:number}} input
  * @returns {{action:'ok'|'warn'|'pressure'|'restart', level:number, reason:string, usedMb:number}}
  */
 export function decideMemoryAction({
   rssMb,
   treeMb,
   cgroupMb,
+  anonMb,
   usedMb,
   limitMb,
   consecutive = 0,
   uptimeMs = 0,
   ratio = 0.85,
   warnRatio = 0.7,
+  criticalRatio = 0.95,
   minUptimeMs = 5 * 60 * 1000,
   unknownLimitMb = 1200,
 } = {}) {
@@ -212,12 +239,17 @@ export function decideMemoryAction({
     Number(rssMb) || 0,
     Number(treeMb) || 0,
     Number(cgroupMb) || 0,
+    Number(anonMb) || 0,
   );
   const limit = Number(limitMb) > 0 ? Number(limitMb) : unknownLimitMb;
   const used = measured / limit;
   const hits = Number(consecutive) || 0;
   const tag = `${measured}MB من ${limit}MB (${Math.round(used * 100)}%)`;
 
+  // [RAM-CRITICAL] فوق 95% لا ننتظر فحصاً ثانياً — OOM Killer أسرع منا
+  if (used >= criticalRatio && uptimeMs >= 60_000) {
+    return { action: "restart", level: 3, reason: `الاستهلاك ${tag} — حدّ حرج، إعادة تشغيل فورية`, usedMb: measured };
+  }
   if (used >= ratio) {
     if (hits >= 1 && uptimeMs >= minUptimeMs) {
       return { action: "restart", level: 3, reason: `الاستهلاك ${tag} — إعادة تشغيل واقية`, usedMb: measured };
@@ -258,10 +290,12 @@ export function startMemoryGuard({
     const treeMb = readTreeRssMb(child?.pid);
     const cgroupMb = readCgroupUsedMb();
     const cacheMb = readCgroupCacheMb();
-    // ذاكرة الملفات تستعيدها النواة عند الضغط، فلا نحسبها ضمن الاستهلاك الحقيقي
+    const anonMb = readCgroupAnonMb();
+    // [RAM-ACCURATE] نعتمد الذاكرة المجهولة (غير قابلة للاستعادة) إن توفّرت،
+    // وإلا نخصم نصف ذاكرة الملفات من استهلاك الحاوية.
     const netCgroup = cgroupMb > 0 ? Math.max(0, cgroupMb - Math.round(cacheMb * 0.5)) : 0;
-    const usedMb = Math.max(rssMb, treeMb, netCgroup);
-    return { rssMb, treeMb, cgroupMb, cacheMb, usedMb };
+    const usedMb = Math.max(rssMb, treeMb, anonMb || netCgroup);
+    return { rssMb, treeMb, cgroupMb, cacheMb, anonMb, usedMb };
   };
 
   const check = () => {
@@ -274,11 +308,13 @@ export function startMemoryGuard({
     const limit = limitMb || 1200;
     consecutive = m.usedMb / limit >= ratio ? consecutive + 1 : 0;
     const verdict = decideMemoryAction({
-      rssMb: m.rssMb, treeMb: m.treeMb, cgroupMb: m.cgroupMb, usedMb: m.usedMb,
+      // لا نمرّر cgroupMb هنا: measure() حسب already الذاكرة المجهولة وخصم ذاكرة الملفات،
+      // وتمرير الرقم الخام (مع الكاش) كان يجعل الحارس يعتبر الكاش استهلاكاً حقيقياً.
+      rssMb: m.rssMb, treeMb: m.treeMb, anonMb: m.anonMb, usedMb: m.usedMb,
       limitMb, consecutive, uptimeMs, ratio, warnRatio, minUptimeMs,
     });
     last = { ...m, limitMb, action: verdict.action, uptimeMs };
-    const detail = `(البوت ${m.rssMb}MB · الشجرة ${m.treeMb}MB · الحاوية ${m.cgroupMb}MB)`;
+    const detail = `(البوت ${m.rssMb}MB · الشجرة ${m.treeMb}MB · المجهولة ${m.anonMb || "?"}MB · الحاوية ${m.cgroupMb}MB)`;
 
     if (verdict.action === "restart" && typeof restart === "function") {
       // [PANEL-RAM-GUARD] قبل قتل البوت: نوقف لوحة السيرفر (عملية Node + نفق)
