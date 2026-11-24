@@ -293601,11 +293601,37 @@ async function _connectQr(sessKey, chatId, userId) {
     }
   }
 }
+// [NUMBER-CHECK] الجوالات السودانية تبدأ بـ9 بعد 249. رقم يبدأ بـ1 = خط أرضي أو رقم
+// غير مسجّل على واتساب ⇒ واتساب يرفض الاقتران بـ401 فوراً بعد إصدار الكود.
+function _checkPhoneShape(digits) {
+  const d = String(digits || "");
+  if (/^249/.test(d)) {
+    const nat = d.slice(3);
+    if (nat.length !== 9) return { ok: false, hint: "الرقم السوداني يجب أن يكون 249 + 9 أرقام (12 رقماً)." };
+    if (!/^9/.test(nat)) return { ok: false, hint: "الجوالات السودانية تبدأ بـ 9 بعد 249 (مثال 249912345678). رقمك يبدأ بـ " + nat[0] + " وهو ليس جوالاً." };
+    return { ok: true };
+  }
+  if (d.length < 10 || d.length > 15) return { ok: false, hint: "طول الرقم غير معتاد — أرسل الرقم بصيغة دولية بدون +." };
+  return { ok: true };
+}
 async function startPairingSession(userId, chatId, phoneNumber) {
   const cleanPhone = phoneNumber.replace(/\D/g, "");
   if (!/^\d{7,15}$/.test(cleanPhone)) {
-    if (botRef) await botRef.sendMessage(chatId, "\u274C \u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062A\u0641 \u063A\u064A\u0631 \u0635\u062D\u064A\u062D. \u0645\u062B\u0627\u0644: 249960506662");
+    if (botRef) await botRef.sendMessage(chatId, "❌ رقم الهاتف غير صحيح. مثال: 249960506662");
     return;
+  }
+  {
+    const _chk = _checkPhoneShape(cleanPhone);
+    try { logger.info({ cleanPhone, ok: _chk.ok, hint: _chk.hint || null }, "[NUMBER-CHECK] فحص شكل الرقم"); } catch { }
+    if (!_chk.ok) {
+      if (botRef) {
+        await botRef.sendMessage(chatId,
+          "⚠️ *الرقم لا يبدو جوالاً صحيحاً*\n\n`+" + cleanPhone + "`\n\n" + String(_chk.hint || "") +
+          "\n\n📱 أرسل رقم الواتساب الصحيح بصيغة دولية بدون + وبدون صفر بادئ (مثال: 249912345678).",
+          { parse_mode: "Markdown" });
+      }
+      return;
+    }
   }
   // [MULTI-NUM] مفتاح حتمي لهذا الرقم بالذات — إلغاء/مسح خانة هذا الرقم فقط،
   // وجلسات الأرقام الأخرى لا تُمسّ إطلاقاً (الرقم القديم يظل شغالاً)
@@ -293967,6 +293993,20 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
         workerManager.setWhatsAppConnected(userId, false);
         logger.warn({ userId, sessKey, statusCode, wasEverConnected: cur.wasEverConnected }, "Pairing connection closed");
         if (statusCode === DR.loggedOut || statusCode === 401) {
+          // [PAIRING-401] رفض فوري بعد إصدار الكود = واتساب رفض اقتران هذا الرقم
+          // (رقم غير مسجّل على واتساب / خط أرضي / أجهزة مرتبطة مكتملة).
+          if (!cur.wasEverConnected && cur.pairingCode) {
+            try { logger.error({ sessKey, phone: cleanPhone, code: cur.pairingCode }, "[PAIRING-401] واتساب رفض اقتران هذا الرقم"); } catch { }
+            _writePairDiag({ sessKey, event: "401-rejected", phone: cleanPhone, code: cur.pairingCode });
+            try {
+              if (botRef) await botRef.sendMessage(chatId,
+                "❌ *واتساب رفض اقتران هذا الرقم*\n\n`+" + cleanPhone + "`\n\n" +
+                "أسباب شائعة:\n• الرقم ليس جوالاً مسجّلاً على واتساب (الجوالات السودانية تبدأ بـ9 بعد 249)\n" +
+                "• الرقم مرتبط بأربعة أجهزة (احذف جهازاً من «الأجهزة المرتبطة»)\n• الرقم جديد ولم يُفعّل واتساب بعد\n\n" +
+                "📷 استخدم *ربط QR* فهو لا يعتمد على الرقم في الخادم.",
+                { parse_mode: "Markdown" }).catch(() => { });
+            } catch { }
+          }
           // [FIX_8H_SESSION] حفاظ على ملفات الجلسة لإتاحة إعادة الاتصال
           _quarantineAuth(sessKey, "401");
           sessions.delete(sessKey);
