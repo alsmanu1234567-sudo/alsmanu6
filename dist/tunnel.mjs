@@ -3,7 +3,7 @@
 // سلسلة احتياطية: Cloudflare Tunnel (الأفضل) ← localtunnel (احتياطي)
 // بدون حساب، بدون إعداد، بدون أي تدخل من المستخدم
 // ═══════════════════════════════════════════════════════════════════
-import { existsSync, mkdirSync, chmodSync, createWriteStream, statSync, renameSync } from "fs";
+import { existsSync, mkdirSync, chmodSync, createWriteStream, statSync, renameSync, copyFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { spawn, fork } from "child_process";
@@ -36,6 +36,9 @@ function _setUrl(url, provider, log, onUrl) {
   _lastProvider = provider;
   globalThis.__FW_PUBLIC_URL = url;
   globalThis.__FW_TUNNEL_PROVIDER = provider;
+  // [TUNNEL-VERIFY] localtunnel يظهر صفحة كلمة مرور/تحقق قبل الموقع ⇒ غير صالح لزر
+  // الويب آب في تيليجرام (يظهر «لا يعمل»). نعلّمه غير موثوق فيُخفى الزر.
+  globalThis.__FW_PUBLIC_TRUSTED = provider !== "localtunnel";
   log(`[TUNNEL] الرابط العام جاهز (${provider}): ${url}`);
   try { onUrl && onUrl(url); } catch {}
   // [TUNNEL-STABLE] الرابط القديم مات (كل تشغيل يعطي نطاقاً جديداً) ⇒ نُبلّغ بالجديد
@@ -61,6 +64,24 @@ async function _downloadCf(log) {
   if (existsSync(BIN_PATH)) {
     try { if (statSync(BIN_PATH).size > 10_000_000) return true; } catch {}
   }
+  // [CF-REUSE] إن كانت الأداة موجودة عند لوحة السيرفر أو في مسار آخر نستخدمها
+  // بدل تحميل جديد (التحميل من GitHub قد يكون محجوباً/بطيئاً على الاستضافة).
+  const reuse = [
+    process.env.BOT_SERVER_CONTROL_DIR ? join(process.env.BOT_SERVER_CONTROL_DIR, "bin", "cloudflared") : "",
+    process.env.BOT_SERVER_CONTROL_DIR ? join(process.env.BOT_SERVER_CONTROL_DIR, "cloudflared") : "",
+    join(__dirname, "..", "bin", "cloudflared"),
+    "/usr/local/bin/cloudflared",
+  ].filter(Boolean);
+  for (const candidate of reuse) {
+    try {
+      if (existsSync(candidate) && statSync(candidate).isFile() && statSync(candidate).size > 10_000_000) {
+        mkdirSync(BIN_DIR, { recursive: true });
+        try { copyFileSync(candidate, BIN_PATH); chmodSync(BIN_PATH, 0o755); } catch { }
+        log(`[TUNNEL] استخدام أداة cloudflared الموجودة (${candidate})`);
+        return true;
+      }
+    } catch { }
+  }
   mkdirSync(BIN_DIR, { recursive: true });
   const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/${_archAsset()}`;
   log(`[TUNNEL] تحميل أداة النفق (مرة واحدة فقط)...`);
@@ -84,7 +105,7 @@ async function _downloadCf(log) {
 }
 
 // يجرب Cloudflare — يرجع الرابط أو null إذا فشل خلال المهلة
-function _tryCloudflare(port, log, timeoutMs = 30000) {
+function _tryCloudflare(port, log, timeoutMs = 90_000) {
   return new Promise(async (resolve) => {
     try { await _downloadCf(log); } catch (e) { log(`[TUNNEL] تعذر تحميل cloudflared: ${e?.message}`); return resolve(null); }
     let resolved = false;
@@ -105,7 +126,14 @@ function _tryCloudflare(port, log, timeoutMs = 30000) {
     const onData = (buf) => {
       const s = buf.toString();
       const m = s.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-      if (m && !gotUrl) gotUrl = m[0];
+      // [CF-VERIFY] يكفي ظهور الرابط — ثم نتحقق فعلياً بنداء /healthz (لا ننتظر
+      // سطر «Registered tunnel connection» الذي لا يظهر في كل الإصدارات)
+      if (m && !gotUrl) {
+        gotUrl = m[0];
+        _probeTunnel(gotUrl, 15_000).then((ok) => {
+          if (ok) { clearTimeout(timer); finish(gotUrl); }
+        }).catch(() => { });
+      }
       // إن تكررت أخطاء الاتصال بالحافة فالمنفذ 7844 محجوب — انتقل للاحتياطي
       if (/Unable to establish connection|TLS handshake with edge error|Serve tunnel error/.test(s)) {
         edgeErrors++;
@@ -129,17 +157,22 @@ function _tryCloudflare(port, log, timeoutMs = 30000) {
 // عند أي خطأ (الحصة 10 أنفاق/ساعة مثلاً) وكان ذلك يقتل البوت نفسه برمز 1.
 let _tmProc = null;
 const COOLDOWN_FILE = join(__dirname, "..", "data", "tunnel-cooldown.json");
-function _readCooldown() {
-  try { const j = JSON.parse(readFileSync(COOLDOWN_FILE, "utf8")); return Number(j?.until) || 0; } catch { return 0; }
+function _readCooldownFile() {
+  try { return JSON.parse(readFileSync(COOLDOWN_FILE, "utf8")) || {}; } catch { return {}; }
 }
-function _writeCooldown(minutes, reason) {
+function _writeCooldown(minutes, reason, provider = "tunnelmole") {
   try {
     mkdirSync(dirname(COOLDOWN_FILE), { recursive: true });
-    writeFileSync(COOLDOWN_FILE, JSON.stringify({ until: Date.now() + minutes * 60000, reason, at: new Date().toISOString() }), { mode: 0o600 });
+    const data = _readCooldownFile();
+    data.providers = data.providers || {};
+    data.providers[provider] = { until: Date.now() + minutes * 60000, reason };
+    data.at = new Date().toISOString();
+    writeFileSync(COOLDOWN_FILE, JSON.stringify(data, null, 1), { mode: 0o600 });
   } catch { }
 }
-function _cooldownActive() {
-  const until = _readCooldown();
+// دقائق التهدئة المتبقية لمزود معيّن (0 = متاح)
+function _cooldownActive(provider = "tunnelmole") {
+  const until = Number(_readCooldownFile()?.providers?.[provider]?.until) || 0;
   return until > Date.now() ? Math.ceil((until - Date.now()) / 60000) : 0;
 }
 
@@ -173,15 +206,18 @@ async function _tryTunnelmole(port, log) {
         finish(null, false);
         return;
       }
-      const m = text.match(/https:\/\/[a-z0-9-]+(?:-[-z0-9]+)?\.tunnelmole\.net/);
-      if (m) finish(m[0], true);
+      const m = text.match(/https:\/\/[a-z0-9-]+(?:-[a-z0-9]+)?\.tunnelmole\.net/);
+      if (m) {
+        // [TUNNEL-VERIFY] نتأكد أن الرابط يصل فعلاً قبل إعلانه
+        _probeTunnel(m[0], 15_000).then((ok) => { if (ok) finish(m[0], true); }).catch(() => { });
+      }
     };
     child.stdout?.on("data", onOut);
     child.stderr?.on("data", onOut);
     child.on("message", (msg) => {
       if (msg?.type === "url" && msg.url) {
         const u = String(msg.url).replace(/^http:/, "https:");
-        finish(u, true);
+        _probeTunnel(u, 15_000).then((ok) => { if (ok) finish(u, true); }).catch(() => { });
       } else if (msg?.type === "error") {
         if (/limit|quota|tunnel/i.test(String(msg.message))) _writeCooldown(65, "quota");
         finish(null, false);
@@ -248,11 +284,15 @@ let _recreateAt = [];
 let _lastProvider = null;
 export function tunnelHealth() { return { url: _url, provider: _lastProvider, fails: _healthFails }; }
 
-async function _probeTunnel(url) {
+async function _probeTunnel(url, timeoutMs = 12_000) {
   const target = String(url).replace(/\/+$/, "") + "/healthz";
   try {
-    const res = await fetch(target, { method: "GET", signal: AbortSignal.timeout(12_000), redirect: "follow" });
-    return res.status > 0 && res.status < 500;
+    const res = await fetch(target, { method: "GET", signal: AbortSignal.timeout(timeoutMs), redirect: "follow" });
+    if (!(res.status > 0 && res.status < 500)) return false;
+    const body = await res.text().catch(() => "");
+    // [TUNNEL-VERIFY] صفحة تحقق localtunnel تُرجع HTML — ليست خدمتنا
+    if (/"ok"\s*:\s*true/.test(body)) return true;
+    return false;
   } catch {
     return false;
   }
@@ -305,8 +345,29 @@ export async function startTunnel(port, logger, onUrl) {
 
     // 1) Cloudflare أولاً — أداة ثنائية خفيفة **بلا حصة شهرية** (tunnelmole المجاني
     //    10 أنفاق/ساعة فقط، ومع كل إعادة تشغيل تُستهلك واحدة ⇒ يتوقف البوت).
-    log(`[TUNNEL] محاولة إنشاء رابط عام عبر Cloudflare...`);
-    const cfUrl = await _tryCloudflare(port, log);
+    const cfWait = _cooldownActive("cloudflare");
+    let cfUrl = null;
+    if (cfWait) {
+      log(`[TUNNEL] Cloudflare في فترة تهدئة (${cfWait} دقيقة) — تخطّيه`);
+    } else {
+      log(`[TUNNEL] محاولة إنشاء رابط عام عبر Cloudflare...`);
+      cfUrl = await _tryCloudflare(port, log);
+      // [TUNNEL-FAILS] فشلان متتاليان ⇒ تهدئة 30 دقيقة (المنفذ 7844 غالباً محجوب)
+      if (!cfUrl) {
+        const data = _readCooldownFile();
+        const fails = (Number(data.cfFails) || 0) + 1;
+        try {
+          data.cfFails = fails;
+          writeFileSync(COOLDOWN_FILE, JSON.stringify(data, null, 1), { mode: 0o600 });
+        } catch { }
+        if (fails >= 2) { _writeCooldown(30, "failures", "cloudflare"); log("[TUNNEL] Cloudflare فشل مرتين — تهدئة 30 دقيقة والتحويل لمزود آخر"); }
+      } else {
+        try {
+          const data = _readCooldownFile();
+          if (data.cfFails) { data.cfFails = 0; writeFileSync(COOLDOWN_FILE, JSON.stringify(data, null, 1), { mode: 0o600 }); }
+        } catch { }
+      }
+    }
     if (cfUrl) {
       _setUrl(cfUrl, "cloudflare", log, onUrl);
       _cfProc?.on("exit", () => {
@@ -334,9 +395,17 @@ export async function startTunnel(port, logger, onUrl) {
     log(`[TUNNEL] Cloudflare محجوب على هذه الاستضافة — التحويل إلى localtunnel...`);
     const ltUrl = await _tryLocaltunnel(port, log);
     if (ltUrl) {
-      _setUrl(ltUrl, "localtunnel", log, onUrl);
-      if (_password) log(`[TUNNEL] كلمة مرور الصفحة الأولى (تُدخل مرة واحدة): ${_password}`);
-      return ltUrl;
+      // [TUNNEL-VERIFY] لا نعلن رابط localtunnel قبل التأكد أنه يصل لخدمتنا
+      // (وإلا يراه المستخدم «غير شغّال» أو صفحة تحقق).
+      const ltOk = await _probeTunnel(ltUrl, 20_000);
+      if (ltOk) {
+        _setUrl(ltUrl, "localtunnel", log, onUrl);
+        if (_password) log(`[TUNNEL] كلمة مرور الصفحة الأولى (تُدخل مرة واحدة): ${_password}`);
+        return ltUrl;
+      }
+      log("[TUNNEL] رابط localtunnel لا يصل للبوت (صفحة تحقق) — لن يُعرض كرابط ويب آب");
+      try { _ltStopped = true; } catch { }
+      return null;
     }
 
     log(`[TUNNEL] تعذر إنشاء رابط عام بأي طريقة — تحقق من اتصال الاستضافة بالإنترنت`);

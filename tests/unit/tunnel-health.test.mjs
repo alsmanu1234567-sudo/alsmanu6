@@ -66,3 +66,31 @@ test('البوت لا يتوقف نهائياً بعد 10 محاولات', () =>
   assert.match(__pm, /انتظار 5 دقائق ثم إعادة المحاولة من جديد/);
   assert.doesNotMatch(__pm, /حُدِّد الحد الأقصى \(\$\{MAX_RESTARTS} إعادة\) — إيقاف نهائي/);
 });
+
+// ── [TUNNEL-VERIFY] لا نعلن رابطاً لا يصل للبوت (localtunnel/page تحقق) ──
+const __auth = __rf(new URL('../../dist/webapp-auth.mjs', import.meta.url), 'utf8');
+
+test('الفحص يتطلب استجابة /healthz الحقيقية ويرفض صفحات التحقق', () => {
+  assert.match(__tunnel, /\[TUNNEL-VERIFY\]/);
+  assert.match(__tunnel, /"ok"\\s\*:\\s\*true/);
+  assert.match(__tunnel, /صفحة تحقق localtunnel/);
+});
+
+test('localtunnel لا يُعلن إلا بعد نجاح الفحص، ويُخفى زر الويب آب', () => {
+  assert.match(__tunnel, /const ltOk = await _probeTunnel\(ltUrl, 20_000\)/);
+  assert.match(__tunnel, /__FW_PUBLIC_TRUSTED = provider !== "localtunnel"/);
+  assert.match(__auth, /__FW_PUBLIC_TRUSTED === false\) return null/);
+});
+
+test('Cloudflare: إعادة استخدام الأداة الموجودة + مهلة أطول + تهدئة عند الفشل', () => {
+  assert.match(__tunnel, /\[CF-REUSE\]/);
+  assert.match(__tunnel, /timeoutMs = 90_000/);
+  assert.match(__tunnel, /\[CF-VERIFY\]/);
+  assert.match(__tunnel, /_writeCooldown\(30, "failures", "cloudflare"\)/);
+  assert.match(__tunnel, /_cooldownActive\("cloudflare"\)/);
+});
+
+test('تهدئة الحصص محفوظة لكل مزود على حدة', () => {
+  assert.match(__tunnel, /providers\[provider\] = \{ until:/);
+  assert.match(__tunnel, /_writeCooldown\(65, "quota"\)/);
+});

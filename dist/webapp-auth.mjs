@@ -61,6 +61,9 @@ export function webappBaseUrl() {
 }
 
 export function webappUrlFor(uid) {
+  // [TUNNEL-VERIFY] إن كان الرابط العام غير موثوق (localtunnel بصفحة تحقق) لا نضع
+  // زر WebApp إطلاقاً — الزر كان يظهر خطأ «لا يعمل» عند المستخدم.
+  if (globalThis.__FW_PUBLIC_TRUSTED === false) return null;
   const base = webappBaseUrl();
   if (!base) return null;
   return `${base}/webapp?token=${tokenForUser(uid)}`;
