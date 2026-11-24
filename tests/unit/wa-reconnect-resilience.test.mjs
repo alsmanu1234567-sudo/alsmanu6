@@ -71,3 +71,17 @@ test('المكنسة تُفرّغ القمامة فعلياً (global.gc) وال
   const pm = readFileSync(new URL('../../infrastructure/process-manager.mjs', import.meta.url), 'utf8');
   assert.match(pm, /--expose-gc/);
 });
+
+// ── [WA-ALIVE-FIX] المشرف كان يظن الاتصال ميتاً (readyState = null) فيقتله كل 30 ثانية ──
+test('حالة الاتصال الحقيقية تُسجَّل في الجلسة وليس readyState فقط', () => {
+  const count = (src.match(/_st[01]\.connState = connection/g) || []).length;
+  assert.equal(count, 2, "يجب تسجيل connState في مساري QR والربط بالرقم");
+  assert.match(src, /_st[01]\.connAt = Date\.now\(\)/);
+});
+
+test('المشرف يعتمد connState === open ولا يقطع اتصالاً سليماً', () => {
+  assert.match(src, /\[WA-ALIVE-FIX\]/);
+  assert.match(src, /if \(st0\.connState === "open" && ready !== 3\) \{ _waSup\.delete\(key\); continue; \}/);
+  // ويظل يتعامل مع السوكت المغلق فعلاً
+  assert.match(src, /if \(ready === 0 \|\| ready === 1\) \{ _waSup\.delete\(key\); continue; \}/);
+});

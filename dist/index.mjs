@@ -293345,6 +293345,12 @@ async function _connectQr(sessKey, chatId, userId) {
         try { logger.info({ userId, sessKey, connection: connection || null }, "[WA] حدث من سوكت قديم — تم تجاهله"); } catch { }
         return;
       }
+      // [WA-ALIVE-FIX] نحفظ حالة الاتصال الحقيقية — readyState يكون null في بعض
+      // إصدارات Baileys، فكان المشرف يظنه ميتاً ويقتل اتصالاً سليماً كل 30 ثانية.
+      try {
+        const _st0 = sessions.get(sessKey);
+        if (_st0 && connection) { _st0.connState = connection; _st0.connAt = Date.now(); sessions.set(sessKey, _st0); }
+      } catch { }
       try { logger.info({ userId, sessKey, connection: connection || null, statusCode: lastDisconnect?.error?.output?.statusCode ?? null, hasQr: !!qr }, "[WA] connection update"); } catch { }
       _diagPush(_diag.conn, { t: Date.now(), userId, sessKey, connection: connection || null, statusCode: lastDisconnect?.error?.output?.statusCode ?? null, reason: lastDisconnect?.error?.message ? String(lastDisconnect.error.message).slice(0, 160) : null });
       let cur = sessions.get(sessKey);
@@ -293708,6 +293714,10 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
         try { logger.info({ userId, sessKey, connection: connection || null }, "[WA] حدث من سوكت قديم — تم تجاهله"); } catch { }
         return;
       }
+      try {
+        const _st1 = sessions.get(sessKey);
+        if (_st1 && connection) { _st1.connState = connection; _st1.connAt = Date.now(); sessions.set(sessKey, _st1); }
+      } catch { }
       const cur = sessions.get(sessKey);
       if (!cur || cur.cancelled) {
         sock.ws?.close?.();
@@ -294258,6 +294268,9 @@ async function _waSupervisorTick() {
     if (!st0 || st0.cancelled) continue;
     if (_isCancelledKey(key)) { sessions.delete(key); continue; } // [FIX-CANCEL-RESURRECT]
     const ready = st0.sock?.ws?.readyState;
+    // [WA-ALIVE-FIX] «open» المسجّل من connection.update هو الحقيقة، وليس readyState
+    // (كان null ⇒ المشرف يقتل اتصالاً سليماً كل 30 ثانية ويعيد بناء كل شيء).
+    if (st0.connState === "open" && ready !== 3) { _waSup.delete(key); continue; }
     if (ready === 0 || ready === 1) { _waSup.delete(key); continue; }
     // [WA-NO-PINGPONG] لا نفتح اتصالاً ثانياً أثناء إغلاق سوكت أو أثناء اتصال جارٍ
     if (ready === 2) continue;
