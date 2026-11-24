@@ -7,7 +7,8 @@ const idx = readFileSync(new URL('../../dist/index.mjs', import.meta.url), 'utf8
 test('فحص شكل الرقم السوداني قبل بدء الربط', () => {
   assert.match(idx, /\[NUMBER-CHECK\]/);
   assert.match(idx, /function _checkPhoneShape\(digits\)/);
-  assert.match(idx, /الجوالات السودانية تبدأ بـ 9 بعد 249/);
+  assert.match(idx, /الجوالات السودانية تبدأ بـ 9 أو 1 بعد 249/);
+  assert.match(idx, /\/\^\[91\]\//);
   assert.match(idx, /nat\.length !== 9/);
 });
 
