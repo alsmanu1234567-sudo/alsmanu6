@@ -294057,6 +294057,13 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
           _pairingCodeInFlight.delete(sessKey);
           try { logger.info({ userId, sessKey }, "[PAIRING] تم تسليم كود الربط"); } catch { }
         }
+        // [PAIRING-PHONE] توثيق الرقم **حرفياً** كما أُرسل لواتساب (jid) — لقطع الشك
+        // في أي تغيير على الرقم: المعروض في تيليجرام = المُرسل لواتساب = نفس jid.
+        {
+          const _jid = String(authState?.creds?.me?.id || "");
+          try { logger.info({ phone: cleanPhone, jid: _jid, code: formatted }, "[PAIRING-PHONE] الرقم والكود المرسلان لواتساب"); } catch { }
+          _writePairDiag({ sessKey, event: "code-issued", code: formatted, jid: _jid, phone: cleanPhone });
+        }
         // [PAIRING-STUCK] لو لم يكتمل الاتصال بعد دقيقتين من تسليم الكود ⇒ تنبيه واضح
         // بدل الصمت والانتظار الأبدي على «جاري تسجيل الدخول».
         setTimeout(() => {
@@ -294089,7 +294096,7 @@ ${formatted}
 4\uFE0F\u20E3 \u0627\u062E\u062A\u0631 *\u0631\u0628\u0637 \u0628\u0627\u0644\u0631\u0642\u0645* \u0623\u0648 \u0627\u0643\u062A\u0628 \u0627\u0644\u0631\u0642\u0645
 5\uFE0F\u20E3 \u0623\u062F\u062E\u0644 \u0627\u0644\u0643\u0648\u062F \u0623\u0639\u0644\u0627\u0647
 
-\u23F3 *\u0627\u0644\u0643\u0648\u062F \u0635\u0627\u0644\u062D \u0644\u0645\u062F\u0629 60 \u062B\u0627\u0646\u064A\u0629* \u2014 \u0633\u064A\u064F\u0631\u0633\u0644 \u0643\u0648\u062F \u062C\u062F\u064A\u062F \u062A\u0644\u0642\u0627\u0626\u064A\u0627\u064B \u0625\u0630\u0627 \u0627\u0646\u062A\u0647\u062A \u0627\u0644\u0645\u0647\u0644\u0629`,
+\u26A0\uFE0F \u0645\u0647\u0645: \u0623\u062F\u062E\u0644 \u0627\u0644\u0643\u0648\u062F \u0645\u0646 \u0646\u0641\u0633 \u0627\u0644\u0647\u0627\u062A\u0641 \u0627\u0644\u0630\u064A \u0641\u064A\u0647 \u0627\u0644\u0631\u0642\u0645 ${cleanPhone}. \u0625\u0646 \u0638\u0647\u0631\u062A \u0631\u0633\u0627\u0644\u0629 \u00AB\u062A\u062D\u0642\u0642 \u0645\u0646 \u0635\u062D\u0629 \u0631\u0642\u0645\u0643 \u0639\u0644\u0649 \u062C\u0647\u0627\u0632\u0643\u00BB \u0641\u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0645\u0643\u062A\u0648\u0628 \u0641\u064A \u0627\u0644\u0647\u0627\u062A\u0641 \u063A\u064A\u0631 \u0645\u0637\u0627\u0628\u0642 \u0644\u0644\u0631\u0642\u0645 \u0623\u0639\u0644\u0627\u0647.\n\n\u23F3 \u0627\u0644\u0643\u0648\u062F \u0635\u0627\u0644\u062D \u0644\u0645\u062F\u0629 60 \u062B\u0627\u0646\u064A\u0629 \u2014 \u0633\u064A\u064F\u0631\u0633\u0644 \u0643\u0648\u062F \u062C\u062F\u064A\u062F \u062A\u0644\u0642\u0627\u0626\u064A\u0627\u064B \u0625\u0630\u0627 \u0627\u0646\u062A\u0647\u062A \u0627\u0644\u0645\u0647\u0644\u0629`,
             {
               parse_mode: "Markdown",
               reply_markup: {
