@@ -293160,6 +293160,12 @@ function makeBaileysSocket(authState, version) {
 async function sendQrToTelegram(chatId, qrRaw, session, userId) {
   if (!botRef) return;
   if (!session || session.cancelled) return; // [FIX-QR-FLOOD] لا صور QR لجلسة ملغاة
+  // [QR-ON-DEMAND] لا نُرسل QR إلا عندما يطلبه المستخدم صراحةً («ربط QR»).
+  // كان QR يصل تلقائياً عند كل إقلاع (استعادة صامتة/جلسة ميتة) بلا أي داعٍ.
+  if (!session.qrRequested) {
+    try { logger.info({ userId, sessKey: session.sessKey || null }, "[QR-ON-DEMAND] تم كتم QR — لم يطلبه المستخدم"); } catch { }
+    return;
+  }
   if (_isCancelledKey(userId)) return;
   try {
     const qrImageBuffer = await import_qrcode.default.toBuffer(qrRaw, {
@@ -293337,6 +293343,7 @@ async function startQrSession(userId, chatId) {
     chatId,
     userId,
     sessKey,
+    qrRequested: true, // [QR-ON-DEMAND] طلب صريح من المستخدم
     retries: 0,
     wasEverConnected: false,
     cancelled: false,
@@ -293782,12 +293789,21 @@ async function _waitSocketOpen(sessKey, sock, ms = 15e3) {
 }
 // [PAIRING-SAME-SOCKET] إعادة المحاولة على **نفس** السوكت: مفتاح الاقتران مرتبط به،
 // وإعادة بناء السوكت تُنتج كوداً لا يقبله واتساب («تحقق من صحة الرقم أو الكود خطأ»).
+// [PAIRING-CODE-EXACT] نُولّد الكود بأنفسنا (Crockford 8) ونمرّره للمكتبة، فيكون
+// المعروض = المُرسل تماماً (بدون أي تحويل أو التباس في الحروف).
+const _CROCKFORD = "123456789ABCDEFGHJKLMNPQRSTVWXYZ";
+function _crockford8() {
+  let out = "";
+  for (let i = 0; i < 8; i++) out += _CROCKFORD[Math.floor(Math.random() * _CROCKFORD.length)];
+  return out;
+}
 async function _requestPairingCodeSafe(sock, phone, tries = 8, gapMs = 3000) {
   let lastErr = null;
   for (let i = 0; i < tries; i++) {
     try {
-      const code = await sock.requestPairingCode(phone);
-      try { logger.info({ attempt: i + 1 }, "[PAIRING-CODE-TRY] تم إصدار الكود"); } catch { }
+      const custom = _crockford8();
+      const code = await sock.requestPairingCode(phone, custom);
+      try { logger.info({ attempt: i + 1, code }, "[PAIRING-CODE-TRY] تم إصدار الكود"); } catch { }
       return code;
     } catch (e) {
       lastErr = e;
@@ -293799,8 +293815,10 @@ async function _requestPairingCodeSafe(sock, phone, tries = 8, gapMs = 3000) {
 }
 function _pairingNeedsNewCode(cur, authState) {
   try { if (authState?.creds?.registered) return false; } catch { }
-  if (!cur?.pairingCode) return true;
-  return (Date.now() - (cur.codeAt || 0)) > 45e3;
+  // [PAIRING-LEARN-ALSMANU5] في المشروع القديم (alsmanu5) كان يُعاد الاتصال دائماً
+  // بـ isFirstTime=false أي **بدون إلغاء كود المستخدم** — وهذا سبب نجاح الربط هناك.
+  // الكود لا يُلغى بمرور الوقت؛ يُلغى فقط إذا لم يكن هناك كود أصلاً.
+  return !cur?.pairingCode;
 }
 async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId) {
   userId = userId || _userIdFromSessKey(sessKey); // [MULTI-NUM] المعرّف الحقيقي لتيليجرام

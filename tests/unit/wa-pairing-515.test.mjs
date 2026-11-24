@@ -106,3 +106,21 @@ test('المشرف لا يلمس سوكت الربط أثناء إدخال ال�
   assert.match(idx, /\[PAIRING-GRACE\]/);
   assert.match(idx, /st0\.pairingCode && Date\.now\(\) - \(st0\.codeAt \|\| 0\) < 150e3/);
 });
+
+// ── v8.17.1: الدروس من alsmanu5 (المشروع القديم) ──
+test('لا نلغي كود المستخدم بمرور الوقت (سلوك alsmanu5 الناجح)', () => {
+  assert.match(idx, /\[PAIRING-LEARN-ALSMANU5\]/);
+  assert.match(idx, /return !cur\?\.pairingCode;/);
+  assert.doesNotMatch(idx, /Date\.now\(\) - \(cur\.codeAt \|\| 0\)\) > 45e3/);
+});
+
+test('QR يُرسل فقط عند الطلب الصريح (مش تلقائياً عند الإقلاع)', () => {
+  assert.match(idx, /\[QR-ON-DEMAND\]/);
+  assert.match(idx, /if \(!session\.qrRequested\) \{/);
+  assert.match(idx, /qrRequested: true, \/\/ \[QR-ON-DEMAND\]/);
+});
+
+test('الكود المعروض هو نفسه المرسل (كود محلي Crockford)', () => {
+  assert.match(idx, /const _CROCKFORD = "123456789ABCDEFGHJKLMNPQRSTVWXYZ"/);
+  assert.match(idx, /sock\.requestPairingCode\(phone, custom\)/);
+});
