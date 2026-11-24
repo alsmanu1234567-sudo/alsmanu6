@@ -17,3 +17,11 @@ test('رفض فوري 401 بعد إصدار الكود = اقتران مرفوض
   assert.match(idx, /event: "401-rejected"/);
   assert.match(idx, /واتساب رفض اقتران هذا الرقم/);
 });
+
+// ── v8.19.0: تقييد واتساب لمحاولات الربط المتكررة (تقييد IP) ──
+test('تهدئة محاولات الربط بعد فشلين 401 في 15 دقيقة', () => {
+  assert.match(idx, /\[PAIRING-COOLDOWN\]/);
+  assert.match(idx, /pairing-401\.json/);
+  assert.match(idx, /_st\.fails >= 2\) _st\.until = Date\.now\(\) \+ 30 \* 60e3/);
+  assert.match(idx, /واتساب يقيّد محاولات الربط الآن/);
+});

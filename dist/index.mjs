@@ -293634,6 +293634,24 @@ async function startPairingSession(userId, chatId, phoneNumber) {
       return;
     }
   }
+  // [PAIRING-COOLDOWN] واتساب يقيّد محاولات الاقتران المتكررة من نفس IP: بعد فشلين
+  // متتاليين نمنع محاولات جديدة 30 دقيقة (المحاولة أثناء التقييد = 401 فوري دائماً).
+  {
+    const _cdFile = path3.join(BOT_DATA_DIR || "data", "pairing-401.json");
+    let _cd = { fails: 0, until: 0 };
+    try { _cd = { ..._cd, ...(JSON.parse(fs6.readFileSync(_cdFile, "utf8")) || {}) }; } catch { }
+    if (Number(_cd.until) > Date.now()) {
+      const mins = Math.ceil((Number(_cd.until) - Date.now()) / 60000);
+      try { logger.warn({ mins }, "[PAIRING-COOLDOWN] محاولات الربط مقيّدة مؤقتاً"); } catch { }
+      if (botRef) await botRef.sendMessage(chatId,
+        "⏳ *واتساب يقيّد محاولات الربط الآن*\n\n" +
+        "محاولات كثيرة فاشلة من نفس الشبكة تجعل واتساب يرفض فوراً (401).\n" +
+        "انتظر **" + mins + " دقيقة** ثم جرّب **مرة واحدة فقط**.\n\n" +
+        "📷 أو استخدم *ربط QR* (زر مستقل ولا يعتمد على الرقم).",
+        { parse_mode: "Markdown" }).catch(() => { });
+      return;
+    }
+  }
   // [MULTI-NUM] مفتاح حتمي لهذا الرقم بالذات — إلغاء/مسح خانة هذا الرقم فقط،
   // وجلسات الأرقام الأخرى لا تُمسّ إطلاقاً (الرقم القديم يظل شغالاً)
   const sessKey = `${userId}_${cleanPhone}`;
@@ -293999,6 +294017,19 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
           if (!cur.wasEverConnected && cur.pairingCode) {
             try { logger.error({ sessKey, phone: cleanPhone, code: cur.pairingCode }, "[PAIRING-401] واتساب رفض اقتران هذا الرقم"); } catch { }
             _writePairDiag({ sessKey, event: "401-rejected", phone: cleanPhone, code: cur.pairingCode });
+            // [PAIRING-COOLDOWN] فشلان خلال 15 دقيقة ⇒ تهدئة 30 دقيقة (تقييد IP من واتساب)
+            try {
+              const _f = path3.join(BOT_DATA_DIR || "data", "pairing-401.json");
+              let _st = { fails: 0, until: 0, at: 0 };
+              try { _st = { ..._st, ...(JSON.parse(fs6.readFileSync(_f, "utf8")) || {}) }; } catch { }
+              if (Date.now() - Number(_st.at || 0) > 15 * 60e3) _st.fails = 0;
+              _st.fails = Number(_st.fails || 0) + 1;
+              _st.at = Date.now();
+              if (_st.fails >= 2) _st.until = Date.now() + 30 * 60e3;
+              fs6.mkdirSync(path3.dirname(_f), { recursive: true });
+              fs6.writeFileSync(_f, JSON.stringify(_st));
+              try { logger.warn({ fails: _st.fails, until: _st.until }, "[PAIRING-COOLDOWN] سجل فشل الاقتران"); } catch { }
+            } catch { }
             try {
               if (botRef) await botRef.sendMessage(chatId,
                 "❌ *واتساب رفض اقتران هذا الرقم*\n\n`+" + cleanPhone + "`\n\n" +
