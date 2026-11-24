@@ -18,6 +18,7 @@ import { existsSync, mkdirSync } from "fs";
 import { writeFile, rename } from "fs/promises";
 import { join, dirname }      from "path";
 import { ok, wrn, logErr } from "../core/logger.mjs";
+import { readMemoryLimitMb, heapFlagsForLimit } from "../bootstrap/memory-guard.mjs";
 
 const MAX_RESTARTS   = 10;         // حد أقصى لإعادات التشغيل المتتالية
 const RESTART_DELAY  = 3_000;      // 3 ثوانٍ انتظار بين كل إعادة تشغيل
@@ -51,6 +52,22 @@ export function validateEntry(baseDir) {
  * @param {boolean}  [options.autoRestart=true] — إعادة التشغيل التلقائية
  * @returns {{ getChild: Function, stop: Function }}
  */
+/**
+ * [RAM-CAP] يبني وسائط تشغيل البوت مع سقف كومة V8 مناسب لحد الحاوية.
+ * بدون هذا السقف يقدّر V8 حده من رام السيرفر الكلي (غيغابايتات) فلا ينظّف
+ * الذاكرة أبداً، فتتجاوز العملية حد الحاوية ويقتلها OOM Killer عند 300MB!
+ * @param {{entry:string, limitMb?:number, reduceMb?:number, baseDir?:string}} input
+ * @returns {string[]}
+ */
+export function buildNodeArgs({ entry, limitMb = 0, reduceMb = 0, baseDir = "" } = {}) {
+  const args = [];
+  // خرائط المصدر تُحمَّل في الذاكرة — نفعّلها فقط إن كانت موجودة فعلاً
+  if (baseDir && existsSync(entry + ".map")) args.push("--enable-source-maps");
+  args.push(...heapFlagsForLimit(limitMb, { reduceMb }));
+  args.push(entry);
+  return args;
+}
+
 export function spawnBot(baseDir, options = {}) {
   const { onSpawn = null, onExit = null, autoRestart = true } = options;
 
@@ -65,6 +82,9 @@ export function spawnBot(baseDir, options = {}) {
   let child        = null;
   let restartCount = 0;
   let stopped      = false;
+  // [RAM-ADAPTIVE] كل قتل OOM سريع (SIGKILL قبل دقيقتين من الإقلاع) يخفّض سقف الكومة
+  const limitMb    = Number(options.memoryLimitMb) > 0 ? Number(options.memoryLimitMb) : readMemoryLimitMb();
+  let heapReduceMb = 0;
   // Bounded latest output snapshot, in the external private control directory.
   const logPath = process.env.BOT_SERVER_CONTROL_LOG;
   let chunks = [], bytes = 0, writing = false, dirty = false;
@@ -77,9 +97,16 @@ export function spawnBot(baseDir, options = {}) {
 
     ok(`🚀 تشغيل البوت... (محاولة ${restartCount + 1})\n`);
 
+    const nodeArgs = buildNodeArgs({ entry, limitMb, reduceMb: heapReduceMb, baseDir });
+    const capFlag = nodeArgs.find((a) => a.startsWith("--max-old-space-size="));
+    if (capFlag) {
+      const capMb = Number(capFlag.split("=")[1]);
+      try { process.env.BOT_NODE_MAX_OLD_SPACE_MB = String(capMb); } catch { }
+      wrn(`[RAM-CAP] تشغيل البوت بسقف كومة ${capMb}MB${limitMb ? ` (حد الحاوية ${limitMb}MB)` : ""}`);
+    }
     child = spawn(
       "node",
-      ["--enable-source-maps", entry],
+      nodeArgs,
       { cwd: baseDir, stdio: logPath ? ["inherit", "pipe", "pipe"] : "inherit", env: process.env }
     );
 
@@ -96,6 +123,17 @@ export function spawnBot(baseDir, options = {}) {
 
       // [STABLE-RESET] تشغيل مستقر = نبدأ العدّاد من جديد
       if (Date.now() - launchStartedAt >= STABLE_RESET_MS) restartCount = 0;
+
+      // [RAM-ADAPTIVE] قُتل بـSIGKILL قبل أن يستقر ⇒ أرجّح أنه OOM: اخفض السقف
+      const ranMs = Date.now() - launchStartedAt;
+      if (signal === "SIGKILL" && ranMs < 120_000) {
+        heapReduceMb = Math.min(400, heapReduceMb + 80);
+        const next = Math.max(200, Number(heapFlagsForLimit(limitMb, { reduceMb: heapReduceMb })[0]?.split("=")[1] || 0));
+        wrn(`[RAM-ADAPTIVE] توقف (SIGKILL) بعد ${Math.round(ranMs / 1000)}s — سقف الكومة القادم ${next}MB (تخفيض ${heapReduceMb}MB)`);
+      } else if (ranMs >= 120_000 && signal === "SIGKILL") {
+        // تشغيل طويل ثم قُتل: لا نقلّل أكثر، لكن نسجّل السبب
+        wrn(`[RAM-ADAPTIVE] توقف (SIGKILL) بعد ${Math.round(ranMs / 60000)} دقيقة — مرشّح OOM من حد الحاوية`);
+      }
 
       // خروج طبيعي بكود 0 — لا إعادة تشغيل
       if (code === 0) {

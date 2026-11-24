@@ -9,6 +9,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { countUnregisteredSessions, pruneUnregisteredSessions } from "../services/session-hygiene.mjs";
+import { readCgroupUsedMb, readTreeRssMb, heapFlagsForLimit } from "../bootstrap/memory-guard.mjs";
 
 const MB = 1048576;
 const mb = (b) => Math.round((Number(b) || 0) / MB);
@@ -109,10 +110,25 @@ const sessions = countUnregisteredSessions(waSessions);
 const logs = dirUsageMb(logsDir);
 const data = dirUsageMb(dataDir);
 
+// [RAM-ACCURATE] استهلاك الحاوية الفعلي — الرقم الذي يقرره OOM Killer
+const cgroupMb = readCgroupUsedMb();
+const selfTreeMb = readTreeRssMb(process.pid);
+const pct = limit && cgroupMb ? Math.round((cgroupMb / limit) * 100) : 0;
+const cap = heapFlagsForLimit(limit)[0] || "بلا سقف";
+
 const lines = [];
 lines.push("════════ تقرير الرام والجلسات ════════");
 lines.push(`السيرفر: متاح ${mi.MemAvailable ?? "?"}MB من ${mi.MemTotal ?? limit ?? "?"}MB`);
 lines.push(`حاوية البوت: حد ${limit || "غير معروف"}MB`);
+lines.push(`استهلاك الحاوية الآن: ${cgroupMb || "?"}MB${limit && cgroupMb ? ` (${pct}%)` : ""}`);
+lines.push(`سقف كومة V8 المفترض لهذا الحد: ${cap}`);
+lines.push(`شجرة هذه العملية: ${selfTreeMb}MB`);
+if (limit && cgroupMb && pct >= 80) {
+  lines.push("⚠️ استهلاك الحاوية فوق 80% — OOM Killer سيقتل البوت قريباً.");
+  lines.push("   الحل: البوت يجب أن يعمل بسقف كومة (bootstrap يفعله تلقائياً)، وتقليل ما لا تحتاجه:");
+  lines.push("   • أوقف لوحة السيرفر عندما لا تستخدمها.");
+  lines.push("   • شغّل: node scripts/ram-report.mjs --prune  لحذف الجلسات غير المكتملة.");
+}
 lines.push("");
 lines.push("— عمليات Node/الأنفاق (الأكثر استهلاكاً) —");
 if (!procs.length) lines.push("  لا توجد");

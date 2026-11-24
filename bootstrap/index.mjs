@@ -14,7 +14,7 @@ import { ensure as ensurePackages, missingDeclaredPackages } from "../infrastruc
 import { ensureYtDlp, ensureFfmpegStatic } from "../infrastructure/binary-manager.mjs";
 import { spawnBot } from "../infrastructure/process-manager.mjs";
 import { ensureNodeCompatibility } from "./compat.mjs";
-import { startMemoryGuard, readMemoryLimitMb } from "./memory-guard.mjs";
+import { startMemoryGuard, readMemoryLimitMb, heapFlagsForLimit } from "./memory-guard.mjs";
 import {
   getExternalDepsDir,
   describeExternalDeps,
@@ -280,40 +280,58 @@ async function main() {
   const serverControlDir = join(EXTERNAL_DEPS_DIR, "server-control");
   try { mkdirSync(serverControlDir, { recursive: true, mode: 0o700 }); cpSync(join(BASE_DIR, "server-control"), serverControlDir, { recursive: true }); process.env.BOT_SERVER_CONTROL_DIR = serverControlDir; process.env.BOT_SERVER_CONTROL_LOG = join(serverControlDir, "bot.log"); }
   catch (error) { wrn("لوحة السيرفر المستقلة غير جاهزة: " + error.message); }
+  // [RAM-PRESSURE] تحرير الذاكرة بلا إسقاط البوت: إيقاف لوحة السيرفر (عملية Node + نفق)
+  // + تنظيف مجلدات الجلسات غير المكتملة. تُستخدم عند الضغط وقبل أي إعادة تشغيل.
+  const releaseMemory = async () => {
+    const dir = process.env.BOT_SERVER_CONTROL_DIR;
+    if (dir) {
+      try {
+        const { stopServerControl, serverControlStatus } = await import("../services/developer/server-control-launcher.mjs");
+        const status = await serverControlStatus(dir);
+        if (status.running) {
+          wrn("[PANEL-RAM-GUARD] إيقاف لوحة السيرفر لتحرير الذاكرة");
+          await stopServerControl(dir);
+        }
+      } catch (error) {
+        wrn(`[PANEL-RAM-GUARD] تعذر إيقاف اللوحة: ${error?.message || error}`);
+      }
+    }
+    try {
+      const { pruneUnregisteredSessions } = await import("../services/session-hygiene.mjs");
+      const root = process.env.BOT_WA_SESSIONS_DIR || join(BASE_DIR, "wa-sessions");
+      const res = pruneUnregisteredSessions(root, { minAgeMs: 30 * 60 * 1000 });
+      if (res?.removed?.length) wrn(`[RAM-PRESSURE] حُذفت ${res.removed.length} جلسة غير مكتملة`);
+    } catch { }
+  };
   const port = Number.parseInt(process.env.PORT ?? "5000", 10);
   const { startEngine } = await import("../engine/index.mjs");
+  // [RAM-CAP] نقرأ حد الحاوية أولاً ونمرّره للمشغّل ليفرض سقف كومة V8 مناسب
+  const limitMb = readMemoryLimitMb();
   runner = spawnBot(BASE_DIR, {
     autoRestart: true,
+    memoryLimitMb: limitMb,
     onSpawn: (child) => engine?.setChildProcess?.(child),
   });
   // [MEMORY-GUARD] حارس الرام: تسجيل دوري + إعادة تشغيل واقية قبل أن يخنق السيرفر
   try {
-    const limitMb = readMemoryLimitMb();
     const guard = startMemoryGuard({
       // [RAM-512] على حاويات صغيرة (512MB) لا نعيد التشغيل عند 85% حتى لا تدخل
       // العملية في حلقة إعادة تشغيل؛ نرفع العتبة إلى 92% ونترك التنظيف يعمل أولاً.
-      ratio: limitMb > 0 && limitMb <= 768 ? 0.92 : 0.85,
+      ratio: limitMb > 0 && limitMb <= 768 ? 0.9 : 0.85,
+      // [RAM-ACCURATE] نبدأ التحرير الاستباقي عند 70% بدل الانتظار حتى القتل
+      warnRatio: 0.7,
+      intervalMs: 60 * 1000,
       getChild: () => runner.getChild(),
       logger: { info: (m) => ok(m), warn: (m) => wrn(m) },
       restart: (child) => { try { child.kill("SIGKILL"); } catch { } },
       // [PANEL-RAM-GUARD] نوقف لوحة السيرفر أولاً (تحرير عملية Node + نفق) قبل أي إعادة تشغيل
-      beforeRestart: async () => {
-        const dir = process.env.BOT_SERVER_CONTROL_DIR;
-        if (!dir) return;
-        try {
-          const { stopServerControl, serverControlStatus } = await import("../services/developer/server-control-launcher.mjs");
-          const status = await serverControlStatus(dir);
-          if (status.running) {
-            wrn("[PANEL-RAM-GUARD] إيقاف لوحة السيرفر لتحرير الذاكرة");
-            await stopServerControl(dir);
-          }
-        } catch (error) {
-          wrn(`[PANEL-RAM-GUARD] تعذر إيقاف اللوحة: ${error?.message || error}`);
-        }
-      },
+      beforeRestart: async () => releaseMemory(),
+      // [RAM-PRESSURE] تحرير استباقي بلا إسقاط البوت عند 70%+
+      onPressure: async () => releaseMemory(),
     });
     globalThis.__memoryGuard = guard;
     ok(`حارس الذاكرة يعمل — حد الذاكرة المكتشف: ${limitMb ? `${limitMb}MB` : "غير معروف (افتراضي 1200MB)"}`);
+    ok(`[RAM-CAP] سقف كومة البوت المحسوب: ${heapFlagsForLimit(limitMb)[0] || "بلا سقف (حد الحاوية غير معروف)"}`);
   } catch (error) {
     wrn(`تعذر تشغيل حارس الذاكرة: ${error.message}`);
   }
