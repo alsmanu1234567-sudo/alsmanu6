@@ -23,7 +23,7 @@ import {webappUrlFor} from './webapp-auth.mjs';
 import { sendInteractiveAutoReply, resolveInteractiveAnswer, formatInteractiveFallback } from '../services/auto-reply-interactive.mjs';
 import { setMessageCutoff, advanceMessageCutoff, setMessageProcessingPaused } from "../engine/message-cutoff.mjs";
 import { isGeneratedAutoReply, protectAutoReplySocket, matchesReplyTarget } from '../services/auto-reply-routing.mjs';
-import { attachGroupGuard } from '../services/group-guard.mjs';
+import { attachGroupGuard, exportGuardSettings, importGuardSettings, listGuardUserIds } from '../services/group-guard.mjs';
 import { sendAiReply } from '../services/ai-card.mjs';
 // PATCH_MASTER_FIX_APPLIED
 // PATCH_FIXES_V3_APPLIED
@@ -124053,6 +124053,13 @@ function saveUser(telegramId, data) {
 }
 function getUserReplies(userId) {
   return inMemoryDB.autoReplies.get(userId) || [];
+}
+// [SETTINGS-BACKUP] كتابة قائمة الردود كاملة عند استعادة نسخة احتياطية
+function setUserReplies(userId, replies) {
+  const list = Array.isArray(replies) ? replies.slice(0, 500) : [];
+  inMemoryDB.autoReplies.set(String(userId), list);
+  persistReplies();
+  return list.length;
 }
 function saveAutoReply(userId, reply) {
   const replies = getUserReplies(userId);
@@ -330086,7 +330093,19 @@ try {
   const { createSiteGenWebService } = await import("./sitegen-web.mjs");
   init_channel_guard();
   const adminService=createAdminService({getAllUsers,saveUser,addPoints,workerManager,inMemoryDB,tiers:TIER_MAX_NUMBERS,tierNames:TIER_NAMES,tierCosts:TIER_COSTS,getDynamicPrice,setDynamicPrice,getBot:()=>bot,channelGuard:{get:getGuardConfig,enabled:setGuardEnabled,add:addGuardChannel,remove:removeGuardChannel,message:setGuardMessage}});
-  developerConsole=createDeveloperWeb({developerId:DEVELOPER_ID,diagnostics,replyDiag:createDevDiagService(),admin:adminService,sites:createSiteGenWebService({developerId:DEVELOPER_ID}),github:{hasToken:()=>{init_github();return !!GITHUB_TOKEN},repos:()=>{init_github();return getAllRepos()},fetch:(...args)=>{init_github();return ghFetch(...args)}},ai:{key:getNvidiaKey,model:getUserSelectedModel},texts:{list:getTextKeys,get:getText,set:setText,reset:resetText},stats:()=>({users:inMemoryDB.users.size,workers:workerManager.getStats(),uptime:Math.floor(process.uptime()),memoryMB:Math.round(process.memoryUsage().rss/1048576)})});
+  const { createBackupService } = await import("../services/developer/backup-service.mjs");
+  const backupService = createBackupService({
+    getAllUsers,
+    getUser,
+    saveUser,
+    getReplies: getUserReplies,
+    setReplies: setUserReplies,
+    guardExport: exportGuardSettings,
+    guardImport: importGuardSettings,
+    guardUsers: listGuardUserIds,
+    github: { hasToken: () => { init_github(); return !!GITHUB_TOKEN; }, repos: () => { init_github(); return getAllRepos(); }, fetch: (...args) => { init_github(); return ghFetch(...args); } },
+  });
+  developerConsole=createDeveloperWeb({developerId:DEVELOPER_ID,diagnostics,backup:backupService,replyDiag:createDevDiagService(),admin:adminService,sites:createSiteGenWebService({developerId:DEVELOPER_ID}),github:{hasToken:()=>{init_github();return !!GITHUB_TOKEN},repos:()=>{init_github();return getAllRepos()},fetch:(...args)=>{init_github();return ghFetch(...args)}},ai:{key:getNvidiaKey,model:getUserSelectedModel},texts:{list:getTextKeys,get:getText,set:setText,reset:resetText},stats:()=>({users:inMemoryDB.users.size,workers:workerManager.getStats(),uptime:Math.floor(process.uptime()),memoryMB:Math.round(process.memoryUsage().rss/1048576)})});
   developerConsole.register(app);
 } catch (e) {logger.warn({e}, "[DEVELOPER WEB] mount failed");}
 try {

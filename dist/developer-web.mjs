@@ -5,7 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {runShell} from '../services/developer/shell.mjs';
 import {askCodeAI} from '../services/developer/code-ai.mjs';
 import {webappBaseUrl} from './webapp-auth.mjs';
-export function createDeveloperWeb({developerId,github,ai,texts,stats,sites,admin,diagnostics,replyDiag,clock=Date.now}){
+export function createDeveloperWeb({developerId,github,ai,texts,stats,sites,admin,diagnostics,replyDiag,backup=null,clock=Date.now}){
  const tokens=new Map(),life=15*60*1000,serverFiles=createServerFiles();
  const check=uid=>{if(String(uid)!==String(developerId))throw Error('غير مصرح')};
  function issue(uid){check(uid);const base=webappBaseUrl();if(!base||!/^https:\/\//i.test(base))throw Error('اضبط WEBAPP_URL على رابط HTTPS عام أولاً');for(const [key,expiry] of tokens)if(expiry<=clock())tokens.delete(key);tokens.clear();const token=randomBytes(32).toString('base64url');tokens.set(token,clock()+life);return `${base.replace(/\/+$/,'')}/developer-console#${token}`}
@@ -35,6 +35,16 @@ export function createDeveloperWeb({developerId,github,ai,texts,stats,sites,admi
   app.post('/api/developer/revoke',auth,guarded(async()=>({ok:true,revoked:revoke(developerId)})));
   app.post('/api/developer/text',auth,guarded(async req=>{const {key,value,reset}=req.body||{};if(!texts.list().includes(key))throw Error('النص غير معروف');if(reset)texts.reset(key);else {if(typeof value!=='string'||value.length>4000)throw Error('النص غير صالح');texts.set(key,value)}return {ok:true}}));
   app.get('/api/developer/text',auth,guarded(async req=>{const key=String(req.query.key||'');if(!texts.list().includes(key))throw Error('النص غير معروف');return {key,value:texts.get(key)}}));
+  // ═══ [SETTINGS-BACKUP] نسخ إعدادات المستخدمين احتياطياً (بدون بيانات شخصية) ═══
+  if(backup){
+   app.get('/api/developer/backup/overview',auth,guarded(async()=>backup.overview()));
+   app.post('/api/developer/backup/snapshot',auth,guarded(async req=>backup.snapshot(developerId,{areas:req.body?.areas})));
+   app.post('/api/developer/backup/restore',auth,guarded(async req=>backup.restore(developerId,{snapshot:req.body?.snapshot,mode:req.body?.mode,areas:req.body?.areas,onlyExistingUsers:req.body?.onlyExistingUsers!==false})));
+   app.get('/api/developer/backup/github/list',auth,guarded(async req=>backup.githubList(developerId,{repo:req.query?.repo,dir:req.query?.dir,branch:req.query?.branch})));
+   app.post('/api/developer/backup/github/push',auth,guarded(async req=>backup.githubPush(developerId,{repo:req.body?.repo,path:req.body?.path,branch:req.body?.branch,areas:req.body?.areas,message:req.body?.message})));
+   app.post('/api/developer/backup/github/pull',auth,guarded(async req=>backup.githubPull(developerId,{repo:req.body?.repo,path:req.body?.path,branch:req.body?.branch,mode:req.body?.mode,areas:req.body?.areas,restore:req.body?.restore!==false})));
+   app.get('/api/developer/backup/github/repos',auth,guarded(async()=>backup.repos().map(r=>({name:r.full_name,private:r.private,defaultBranch:r.default_branch}))));
+  }
   app.get('/api/developer/repos',auth,guarded(async()=>{if(!github.hasToken())throw Error('أضف توكن GitHub في البوت أولاً');return (await github.repos()).map(r=>({name:r.full_name,private:r.private,defaultBranch:r.default_branch,url:r.html_url}))}));
   app.get('/api/developer/files',auth,guarded(async req=>{const repo=validRepo(req.query.repo),path=validPath(req.query.path),ref=String(req.query.ref||'');const data=await github.fetch(`/repos/${repo}/contents/${path}${ref?'?ref='+encodeURIComponent(ref):''}`);if(Array.isArray(data))return {items:data.map(x=>({name:x.name,path:x.path,type:x.type}))};if(data.type!=='file'||data.encoding!=='base64'||data.size>500000)throw Error('الملف غير مدعوم أو أكبر من 500 كيلوبايت');const bytes=Buffer.from(data.content,'base64'),content=bytes.toString('utf8');if(!Buffer.from(content,'utf8').equals(bytes)||content.includes('\0'))throw Error('هذا ملف ثنائي ولا يمكن تعديله من المحرر النصي');return {file:{path:data.path,sha:data.sha,content}}}));
   app.post('/api/developer/files',auth,guarded(async req=>{const {repo,path,sha,content,message,branch}=req.body||{};const p=validPath(path),r=validRepo(repo);if(!p||typeof content!=='string'||Buffer.byteLength(content)>500000||typeof sha!=='string'||!sha)throw Error('بيانات الملف غير صالحة');const body={message:String(message||'Update file from developer console').slice(0,200),content:Buffer.from(content).toString('base64'),sha};if(branch)body.branch=String(branch).slice(0,200);const result=await github.fetch(`/repos/${r}/contents/${p}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return {ok:true,sha:result.content?.sha}}));

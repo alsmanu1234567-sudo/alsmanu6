@@ -609,3 +609,21 @@ test("نظافة الذاكرة: تنظيف خرائط الحماية لا يت�
     fs.rmSync(new URL(`../../bot-data/group-guard/${uid}.json`, import.meta.url), { force: true });
   } catch { }
 });
+
+test('نسخ إعدادات الحماية: تصدير بلا أرقام أعضاء واستيراد يدمج', async () => {
+  const guard = await import('../../services/group-guard.mjs');
+  const uid = `bg-${Date.now()}`;
+  const gid = '120363000000000999@g.us';
+  guard.updateGroupConfig(uid, gid, { enabled: true, maxWarnings: 4, words: ['كلمة'], whitelist: ['249111111111@s.whatsapp.net'] });
+  const exported = guard.exportGuardSettings(uid);
+  assert.equal(exported[gid].maxWarnings, 4);
+  assert.deepEqual(exported[gid].words, ['كلمة']);
+  assert.equal(exported[gid].whitelist, undefined, 'أرقام الأعضاء لا تُصدَّر');
+  assert.ok(!JSON.stringify(exported).includes('249111111111'));
+  guard.updateGroupConfig(uid, gid, { maxWarnings: 9 });
+  const result = guard.importGuardSettings(uid, exported);
+  assert.equal(result.applied, 1);
+  assert.equal(guard.getGroupConfig(uid, gid).maxWarnings, 4, 'الاستعادة ترجّع القيمة القديمة');
+  assert.ok(Array.isArray(guard.listGuardUserIds()));
+  try { (await import('node:fs')).rmSync(new URL(`../../bot-data/group-guard/${uid}.json`, import.meta.url), { force: true }); } catch { }
+});

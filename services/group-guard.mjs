@@ -328,6 +328,65 @@ function fileFor(userId) {
   return path.join(DATA_DIR, `${String(userId).replace(/[^\w.-]/g, "")}.json`);
 }
 
+// ═══ [SETTINGS-BACKUP] تصدير/استيراد إعدادات الحماية فقط (بدون أرقام أعضاء أو مخالفات) ═══
+// نصدّر إعدادات المجموعات فقط: الأعلام والنصوص والقوائم — لا التحذيرات ولا قوائم الطرد
+// ولا سجلات الأعضاء (تلك معلومات شخصية لا تُرفع).
+const BACKUP_CONFIG_KEYS = [
+  "enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard",
+  "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport",
+  "maxWarnings", "stickerWarnEvery", "kickDelaySec", "floodCount", "floodWindowSec",
+  "dailyReportHour", "words", "blockedDomains", "allowedDomains",
+  "welcome", "goodbye", "quiet", "cards",
+];
+
+export function exportGuardSettings(userId) {
+  const state = getState(userId);
+  const groups = {};
+  for (const [groupJid, cfg] of Object.entries(state.groups || {})) {
+    if (!cfg || typeof cfg !== "object") continue;
+    const picked = {};
+    for (const key of BACKUP_CONFIG_KEYS) {
+      if (cfg[key] === undefined) continue;
+      if (key === "whitelist") continue; // أرقام أعضاء = بيانات شخصية
+      picked[key] = cfg[key];
+    }
+    if (Object.keys(picked).length) groups[String(groupJid)] = picked;
+  }
+  return groups;
+}
+
+export function importGuardSettings(userId, groups, { replace = false } = {}) {
+  if (!groups || typeof groups !== "object") throw Error("إعدادات المجموعات غير صالحة");
+  const state = getState(userId);
+  const allowed = new Set(Object.keys(state.groups || {}));
+  let applied = 0;
+  const skipped = [];
+  for (const [groupJid, cfg] of Object.entries(groups)) {
+    if (!/^[\w.:-]+@g\.us$/.test(String(groupJid))) { skipped.push(String(groupJid)); continue; }
+    if (!replace && allowed.size && !allowed.has(String(groupJid))) {
+      // مجموعة غير معروفة عند هذا المستخدم: نضيفها كإعدادات جاهزة (قد تكون مجموعة قديمة)
+    }
+    const patch = {};
+    for (const key of BACKUP_CONFIG_KEYS) {
+      if (key === "whitelist") continue;
+      if (cfg[key] !== undefined) patch[key] = cfg[key];
+    }
+    if (Object.keys(patch).length) { updateGroupConfig(userId, String(groupJid), patch); applied++; }
+  }
+  persist(userId);
+  return { applied, skipped };
+}
+
+export function listGuardUserIds() {
+  try {
+    return fs.readdirSync(DATA_DIR)
+      .filter((name) => name.endsWith(".json") && !name.endsWith(".tmp"))
+      .map((name) => name.slice(0, -5));
+  } catch {
+    return [];
+  }
+}
+
 export function getState(userId) {
   const key = String(userId);
   if (store.has(key)) return store.get(key);
