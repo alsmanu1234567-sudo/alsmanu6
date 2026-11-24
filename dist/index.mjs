@@ -293764,6 +293764,28 @@ function _writePairDiag(entry) {
     fs6.writeFileSync(f, JSON.stringify(arr, null, 1));
   } catch { }
 }
+// [PAIRING-WAIT-OPEN] لا تطلب الكود قبل أن يفتح السوكت فعلاً. كان الطلب يتم بعد 5
+// ثوانٍ ثابتة، وعلى سيرفر بطيء ينتهي بمهلة ⇒ «انتهت مهلة الكود» ثم كود جديد لا يطابق.
+async function _waitSocketOpen(sock, ms = 20e3) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    const rs = sock?.ws?.readyState;
+    if (rs === 1) return true;
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return sock?.ws?.readyState === 1;
+}
+// [PAIRING-SAME-SOCKET] إعادة المحاولة على **نفس** السوكت: مفتاح الاقتران مرتبط به،
+// وإعادة بناء السوكت تُنتج كوداً لا يقبله واتساب («تحقق من صحة الرقم أو الكود خطأ»).
+async function _requestPairingCodeSafe(sock, phone, tries = 3) {
+  let lastErr = null;
+  for (let i = 0; i < tries; i++) {
+    await _waitSocketOpen(sock, i === 0 ? 20e3 : 8e3);
+    try { return await sock.requestPairingCode(phone); }
+    catch (e) { lastErr = e; await new Promise((r) => setTimeout(r, 2500)); }
+  }
+  throw lastErr || new Error("requestPairingCode failed");
+}
 function _pairingNeedsNewCode(cur, authState) {
   try { if (authState?.creds?.registered) return false; } catch { }
   if (!cur?.pairingCode) return true;
@@ -293957,7 +293979,7 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
       }
     });
     if (isFirstTime && !authState.creds.registered) {
-      await new Promise((r) => setTimeout(r, 5e3));
+      await _waitSocketOpen(sock, 20e3); // [PAIRING-WAIT-OPEN]
       if (sessions.get(sessKey)?.cancelled) return;
       // [FIX-DUP-CODE] لا تطلب كودين في نفس الوقت لنفس الرقم، ولا كوداً جديداً وكود سارٍ لم يمضِ 45ث
       {
@@ -293967,7 +293989,7 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
         _pairingCodeInFlight.add(sessKey);
       }
       try {
-        const code = await sock.requestPairingCode(cleanPhone);
+        const code = await _requestPairingCodeSafe(sock, cleanPhone, 3);
         const formatted = String(code).replace(/[^A-Za-z0-9]/g, "").toUpperCase();
         const cur = sessions.get(sessKey);
         if (cur) {
@@ -294027,20 +294049,32 @@ ${formatted}
         // [FIX-NO-CODE] أي فشل مؤقت (408/428/500/Connection Closed) يُعاد معه الطلب بسرعة بدل الاستسلام
         const isTimeoutErr = errMsg.includes("timed out") || errMsg.includes("408") || errMsg.includes("timeout")
           || errMsg.includes("428") || errMsg.includes("500") || /closed|not open|Connection/i.test(errMsg);
-        if (isTimeoutErr && cur.retries < 3) {
-          cur.retries++;
-          cur.cancelled = false;
+        if (isTimeoutErr && (cur.codeTries = (cur.codeTries || 0) + 1) <= 3) {
           sessions.set(sessKey, cur);
-          logger.info({ userId, sessKey }, "Pairing timeout - retrying with fresh socket");
-          try {
-            sock.ws?.close?.();
-          } catch {
-          }
-          setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, true, userId), 4e3);
-          if (botRef) {
-            await botRef.sendMessage(chatId, "\u23F3 \u0627\u0646\u062A\u0647\u062A \u0645\u0647\u0644\u0629 \u0627\u0644\u0643\u0648\u062F\u060C \u062C\u0627\u0631\u064A \u0627\u0644\u0645\u062D\u0627\u0648\u0644\u0629 \u0645\u0646 \u062C\u062F\u064A\u062F \u062A\u0644\u0642\u0627\u0626\u064A\u0627\u064B...").catch(() => {
-            });
-          }
+          try { logger.warn({ userId, sessKey, codeTries: cur.codeTries }, "[PAIRING-SAME-SOCKET] إعادة طلب الكود على نفس السوكت (بدون تفكيك)"); } catch { }
+          _writePairDiag({ sessKey, event: "request-timeout", codeTries: cur.codeTries });
+          // [PAIRING-SAME-SOCKET] لا تفكيك ولا سوكت جديد — نفس مفتاح الاقتران
+          setTimeout(async () => {
+            try {
+              const code2 = await _requestPairingCodeSafe(sock, cleanPhone, 3);
+              const f2 = String(code2).replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+              const c2 = sessions.get(sessKey);
+              if (c2) { c2.pairingCode = f2; c2.codeAt = Date.now(); sessions.set(sessKey, c2); }
+              _writePairDiag({ sessKey, event: "code", code: f2, attempt: cur.codeTries });
+              if (botRef) {
+                await botRef.sendMessage(chatId,
+                  "\u{1F522} *\u0643\u0648\u062F \u0631\u0628\u0637 \u0648\u0627\u062A\u0633\u0627\u0628 (\u0645\u062D\u0627\u0648\u0644\u0629 " + cur.codeTries + ")*\n\n```\n" + f2 + "\n```\n\n" +
+                  "\u{1F4F1} \u0627\u0644\u0631\u0642\u0645: `+" + cleanPhone + "`\n\n" +
+                  "\u26A0\uFE0F \u0627\u0644\u0643\u0648\u062F \u0627\u0644\u0633\u0627\u0628\u0642 \u0645\u0644\u063A\u0649 \u2014 \u0627\u0633\u062A\u062E\u062F\u0645 \u0647\u0630\u0627 \u0641\u0642\u0637 \u0648\u0623\u062F\u062E\u0644\u0647 \u062e\u0644\u0627\u0644 60 \u062b\u0627\u0646\u064A\u0629.",
+                  { parse_mode: "Markdown" }).catch(() => { });
+              }
+            } catch (e2) {
+              // [PAIRING-FALLBACK-QR] فشل متكرر ⇒ QR (لا يعتمد على النفق)
+              try { logger.warn({ err: String(e2?.message || e2).slice(0, 120) }, "[PAIRING-FALLBACK-QR] تعذر إصدار الكود — تحويل إلى QR"); } catch { }
+              try { const cc = sessions.get(sessKey); if (cc) { delete cc.phoneNumber; sessions.set(sessKey, cc); } } catch { }
+              setTimeout(() => { _connectQr(sessKey, chatId, userId).catch(() => { }); }, 1200);
+            }
+          }, 2500);
           return;
         }
         cur.cancelled = true;
@@ -294453,6 +294487,9 @@ async function _waSupervisorTick() {
     // [WA-ALIVE-FIX] «open» المسجّل من connection.update هو الحقيقة، وليس readyState
     // (كان null ⇒ المشرف يقتل اتصالاً سليماً كل 30 ثانية ويعيد بناء كل شيء).
     if (st0.connState === "open" && ready !== 3) { _waSup.delete(key); continue; }
+    // [PAIRING-GRACE] أثناء إدخال المستخدم لكود الربط لا نلمس السوكت إطلاقاً —
+    // إنهاؤه يلغي الكود ويُظهر «تحقق من صحة الرقم أو الكود خطأ».
+    if (st0.pairingCode && Date.now() - (st0.codeAt || 0) < 150e3) { _waSup.delete(key); continue; }
     if (ready === 0 || ready === 1) { _waSup.delete(key); continue; }
     // [WA-NO-PINGPONG] لا نفتح اتصالاً ثانياً أثناء إغلاق سوكت أو أثناء اتصال جارٍ
     if (ready === 2) continue;
