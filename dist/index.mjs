@@ -300164,6 +300164,7 @@ function githubMenuKeyboard() {
       [{ text: "🤖 مساعد AI للكود", callback_data: "gh_ai" }],
       [{ text: "\u2139\uFE0F \u0645\u0639\u0644\u0648\u0645\u0627\u062A \u0627\u0644\u062D\u0633\u0627\u0628", callback_data: "gh_whoami" }],
       [{ text: "🔑 تغيير التوكن", callback_data: "gh_set_token" }, { text: "🗑️ حذف التوكن", callback_data: "gh_del_token" }],
+      [{ text: "🩺 تشخيص GitHub (لماذا القائمة فارغة؟)", callback_data: "gh_diag" }],
       [{ text: "\u{1F519} \u0644\u0648\u062D\u0629 \u0627\u0644\u062A\u062D\u0643\u0645", callback_data: "dev_panel" }]
     ]
   };
@@ -300208,6 +300209,28 @@ async function handleGithubCallback(bot2, chatId, userId, data) {
   if (data === "gh_del_token") {
     _ghDeleteToken();
     await bot2.sendMessage(chatId, "✅ تم حذف GITHUB_TOKEN", { reply_markup: { inline_keyboard: [[{ text: "���� إضافة توكن جديد", callback_data: "gh_set_token" }], [{ text: "���� GitHub", callback_data: "dev_github" }]] } });
+    return true;
+  }
+  if (data === "gh_diag") {
+    // [GH-DIAG] تشخيص كامل لقسم GitHub من تيليجرام
+    const st0 = await ghStatus().catch((e) => ({ hasToken: false, error: String(e && e.message || e) }));
+    let reposInfo = "";
+    try {
+      const list = await getAllRepos(true);
+      reposInfo = `\n📦 المستودعات المتاحة: *${list.length}*` + (list.slice(0, 5).length ? `\n• ${list.slice(0, 5).map((r) => r.full_name).join("\n• ")}` : "");
+    } catch (e) { reposInfo = `\n📦 المستودعات: ❌ ${_ghAuthError(e)}`; }
+    const kindAr = { "fine-grained": "توكن دقيق الصلاحيات (github_pat_)", "classic": "توكن كلاسيكي (ghp_)", "none": "لا يوجد", "unknown": "غير معروف" }[st0.tokenKind] || "غير معروف";
+    await bot2.sendMessage(chatId,
+      `🩺 *تشخيص GitHub*\n\n` +
+      `🔑 التوكن: ${st0.hasToken ? "✅ موجود" : "❌ غير موجود"}\n` +
+      `🏷 النوع: ${kindAr}\n` +
+      `👤 الحساب: ${st0.login ? "`" + st0.login + "`" : "—"}\n` +
+      `📄 ملف الإعدادات: ${st0.configPath ? "`" + String(st0.configPath).slice(-46) + "` " + (st0.configExists ? "✅" : "❌") : "—"}` +
+      reposInfo +
+      (st0.error ? `\n\n⚠️ ${_ghAuthError({ message: st0.error })}` : "") +
+      `\n\nإن كانت القائمة صفراً: افتح GitHub → Settings → Developer settings → Tokens وتأكد من Metadata: Read وRepository access.`,
+      { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "🔑 تغيير التوكن", callback_data: "gh_set_token" }, { text: "📋 قائمة المستودعات", callback_data: "gh_list" }], [{ text: "🐙 GitHub", callback_data: "dev_github" }]] } }
+    );
     return true;
   }
   if (!GITHUB_TOKEN && data !== "gh_ai" && !data.startsWith("gh_ai_model_")) {
@@ -301023,9 +301046,16 @@ async function handleGithubTextInput(bot2, chatId, userId, text, state) {
     (globalThis.__ghSaveToken || function(t){GITHUB_TOKEN=t;process.env.GITHUB_TOKEN=t;})(rawToken);
     try {
       const info2 = await ghFetch("/user");
-      await bot2.sendMessage(chatId, "✅ تم تحديث GITHUB_TOKEN — متصل كـ: " + info2.login, { reply_markup: { inline_keyboard: [[{ text: "🐙 إدارة GitHub", callback_data: "dev_github" }]] } });
+      // [GH-DIAG] بعد الحفظ: كم مستودعاً يرى هذا التوكن فعلاً؟
+      let reposLine = "";
+      try {
+        const list = await getAllRepos(true);
+        reposLine = `\n📦 مستودعات مرئية: *${list.length}*`;
+        if (!list.length) reposLine += "\n⚠️ التوكن صالح لكنه لا يرى مستودعات — عدّل Repository access في التوكن.";
+      } catch (e3) { reposLine = `\n📦 المستودعات: ❌ ${_ghAuthError(e3)}`; }
+      await bot2.sendMessage(chatId, "✅ تم تحديث GITHUB_TOKEN — متصل كـ: " + info2.login + reposLine, { reply_markup: { inline_keyboard: [[{ text: "🐙 إدارة GitHub", callback_data: "dev_github" }], [{ text: "🩺 تشخيص", callback_data: "gh_diag" }]] } });
     } catch(e2) {
-      await bot2.sendMessage(chatId, "✅ تم حفظ التوكن (تحقّق منه في لوحة GitHub)", { reply_markup: { inline_keyboard: [[{ text: "🐙 GitHub", callback_data: "dev_github" }]] } });
+      await bot2.sendMessage(chatId, "⚠️ تم حفظ التوكن لكنه لم يعمل مع GitHub: " + String(e2 && e2.message || e2) + "\n\nتأكد أن التوكن صالح وغير منتهٍ، ثم جرّب 🩺 تشخيص.", { reply_markup: { inline_keyboard: [[{ text: "🩺 تشخيص", callback_data: "gh_diag" }], [{ text: "🔑 إعادة إدخال التوكن", callback_data: "gh_set_token" }]] } });
     }
     return true;
   }
@@ -301507,6 +301537,40 @@ var init_github = __esm({
           for (const f of list) { try { if (_fs2.existsSync(f)) return f; } catch { } }
           return list[0] || "config.json";
         }
+        // [GH-TOKENFILE] ملف توكن مستقل — لأن config.json قد يُعاد كتابته من أقسام أخرى
+        // فيضيع المفتاح. نكتب في مكانين ونقرأ من أولهما المتاح.
+        function _ghTokenFileCandidates() {
+          const out = [];
+          const push = (dir) => {
+            if (!dir || typeof dir !== "string") return;
+            try { const f = _path2.join(dir, "bot-data", "github-token.enc"); if (!out.includes(f)) out.push(f); } catch { }
+          };
+          push(BOT_ROOT); push(process.env.BOT_BASE_DIR); push(process.env.BOT_ROOT); push(process.cwd());
+          push("/home/container/alsmanu6");
+          return out;
+        }
+        function _ghReadTokenFile() {
+          for (const f of _ghTokenFileCandidates()) {
+            try {
+              if (!_fs2.existsSync(f)) continue;
+              const enc = _fs2.readFileSync(f, "utf8").trim();
+              if (!enc) continue;
+              const tok = _ghDecodeToken(enc);
+              if (tok) return tok;
+            } catch { }
+          }
+          return "";
+        }
+        function _ghWriteTokenFile(encoded) {
+          for (const f of _ghTokenFileCandidates()) {
+            try {
+              _fs2.mkdirSync(_path2.dirname(f), { recursive: true });
+              _fs2.writeFileSync(f, encoded, { mode: 384 });
+              return f;
+            } catch { }
+          }
+          return "";
+        }
         function _ghLoadToken() {
           if (GITHUB_TOKEN) return GITHUB_TOKEN;
           try {
@@ -301518,6 +301582,7 @@ var init_github = __esm({
               else if (cfg.GITHUB_TOKEN) GITHUB_TOKEN = String(cfg.GITHUB_TOKEN);
             }
           } catch { }
+          if (!GITHUB_TOKEN) { try { GITHUB_TOKEN = _ghReadTokenFile(); } catch { } }
           if (GITHUB_TOKEN) process.env.GITHUB_TOKEN = GITHUB_TOKEN;
           return GITHUB_TOKEN;
         }
@@ -301535,6 +301600,7 @@ var init_github = __esm({
             delete cfg.GITHUB_TOKEN;
             _fs2.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), "utf8");
           } catch(e) {}
+          try { _ghWriteTokenFile(_ghEncodeToken(rawToken)); } catch(e3) {}
           GITHUB_TOKEN = rawToken;
           process.env.GITHUB_TOKEN = rawToken;
           try { globalThis.__ghClearReposCache?.(); } catch { } // توكن جديد = لا نعرض قائمة قديمة
@@ -301551,6 +301617,7 @@ var init_github = __esm({
               _fs2.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), "utf8");
             }
           } catch(e) {}
+          try { for (const f of _ghTokenFileCandidates()) { if (_fs2.existsSync(f)) _fs2.rmSync(f, { force: true }); } } catch(e4) {}
           GITHUB_TOKEN = "";
           process.env.GITHUB_TOKEN = "";
           try { globalThis.__ghClearReposCache?.(); } catch { }

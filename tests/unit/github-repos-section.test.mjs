@@ -112,3 +112,22 @@ test("واجهة اللوحة تعبّئ القائمتين وتُظهر سبب 
   assert.match(js, /fillRepos\(true\)/, "التحديث القسري");
   assert.match(js, /backup\/github\/repos\?'\?refresh=1'|refresh=1/, "يمرر refresh للخادم");
 });
+
+test("حفظ التوكن من تيليجرام يبقى بعد إعادة التشغيل (ملف مستقل + config)", () => {
+  const src = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+  assert.match(src, /function _ghTokenFileCandidates\(\)/, "مسارات ملف التوكن");
+  assert.match(src, /github-token\.enc/, "ملف توكن مستقل");
+  assert.match(src, /function _ghWriteTokenFile\(encoded\)/, "كتابة الملف");
+  assert.match(src, /_ghWriteTokenFile\(_ghEncodeToken\(rawToken\)\)/, "يكتب عند الحفظ");
+  assert.match(src, /if \(!GITHUB_TOKEN\) \{ try \{ GITHUB_TOKEN = _ghReadTokenFile\(\); \} catch \{ \} \}/, "يقرأ عند الإقلاع");
+  assert.match(src, /_ghTokenFileCandidates\(\)\) \{ if \(_fs2\.existsSync\(f\)\) _fs2\.rmSync/, "يحذف الملف مع التوكن");
+});
+
+test("بعد إدخال التوكن من تيليجرام يظهر عدد المستودعات + سبب الفشل", () => {
+  const src = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+  assert.match(src, /مستودعات مرئية/, "يعرض العدد بعد الحفظ");
+  assert.match(src, /لم يعمل مع GitHub/, "رسالة فشل واضحة بدل صمت");
+  assert.match(src, /data === "gh_diag"/, "زر تشخيص");
+  assert.match(src, /تشخيص GitHub \(لماذا القائمة فارغة/, "زر التشخيص في القائمة");
+  assert.match(src, /_ghAuthError/, "رسائل أخطاء عربية");
+});
