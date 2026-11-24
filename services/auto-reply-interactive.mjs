@@ -27,8 +27,9 @@ export function makeInteractiveMessage(rule) {
     : [listButton('عرض الخيارات',[{title:'اختر من القائمة',rows:config.entries.map((e,i)=>({title:e.label,id:id(i)}))}])];
   return {text:config.text,buttons,footer:'اختر من الخيارات'};
 }
-export async function sendInteractiveAutoReply(sock,chatId,rule) {
-  return sendInteractive(sock,chatId,{headerTitle:'⚡ رد تلقائي',...makeInteractiveMessage(rule)});
+export async function sendInteractiveAutoReply(sock,chatId,rule,{image=null}={}) {
+  // [REPLY-IMAGE] الصورة اختيارية وتُرسل داخل رأس الرسالة التفاعلية (واتساب يسمح بها مع الأزرار والقوائم)
+  return sendInteractive(sock,chatId,{headerTitle:'⚡ رد تلقائي',...makeInteractiveMessage(rule),...(image?{image}:{})});
 }
 export function resolveInteractiveAnswer(rule,index) {
   if (!['button_quick','button_list'].includes(rule?.replyType)) return null;

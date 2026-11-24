@@ -4,6 +4,27 @@
 
 ---
 
+## v8.5.0 — 2026-11-20 (تسهيلات المستوى 1)
+
+### Added
+- **قائمة أعضاء المجموعة** داخل إعدادات المجموعة: مطويّة افتراضياً، بزر عرض وإخفاء، تعرض لكل عضو
+  الاسم + الرقم الحقيقي الكامل (`+24996050662`) + عدد الرسائل، مع بحث وإجماليات.
+  `GET /api/fw/groups/guard/members` + `services/group-directory.mjs` + `services/group-activity.mjs`.
+- **صورة مع أي رد**: رد نصي، ذكاء اصطناعي، أزرار سريعة/روابط/قائمة — تُختار من المعرض وتُخزَّن في مجلد الحساب.
+  `services/reply-media.mjs` + `GET /api/replies/image`.
+- **اختبار فعلي للرد**: `POST /api/replies/test` + زر «🧪 إرسال تجربة» في المحرر.
+- `services/auto-reply-buttons.mjs`: `normalizeButtonRows` / `rowsToInteractiveContent` / `entriesToButtonObjects`.
+- `tests/unit/reply-facilities.test.mjs` (19 اختباراً).
+
+### Changed
+- **إنشاء الأزرار بلا كتابة «|»**: صفوف عنوان/قيمة مع زر إضافة وحذف، والقيمة اختيارية (تُؤخذ من العنوان).
+  ينطبق على الأزرار السريعة والقوائم وأزرار البطاقات.
+- **إصلاح البطاقات (carousel)**: صور البطاقات صارت اختيارية ومن المعرض، والإرسال يجرّب أربع طرق
+  (viewOnce → viewOnceMessageV2 → مباشرة → بطاقة مفردة لكل عنصر) ويُظهر الخطأ الحقيقي عند الفشل.
+- **الأرقام في واجهة الحماية**: لا يُعرض معرّف LID كرقم هاتف؛ يُكتب «رقم غير متاح» بدل رقم مضلّل.
+
+---
+
 ## v8.0.11 — 2026-06-30 (الإصدار الحالي)
 
 ### Added — Phase 12: Comprehensive Test Infrastructure & Quality Gate

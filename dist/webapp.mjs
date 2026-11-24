@@ -40,6 +40,7 @@ import {
   previewWebGroupAutoPost,
   publishWebGroupAutoPostNow,
   webGuardTestWelcome,
+  webGuardDirectory,
   webGuardReAdd,
   webGuardKick,
   webGuardKickOffenders,
@@ -248,6 +249,14 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     const groupId = guardGroupId(req);
     return webGuardTestWelcome(uid, groupId, req.body?.phoneNumber || null, Array.isArray(req.body?.jids) ? req.body.jids : []);
   }));
+  // [MEMBERS-VIEW] أعضاء المجموعة: الاسم + الرقم الكامل + عدد الرسائل (قائمة مطويّة في الواجهة)
+  app.get('/api/fw/groups/guard/members', guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    return webGuardDirectory(uid, groupId, req.query?.phoneNumber || null, {
+      search: req.query?.q || '',
+      limit: req.query?.limit || 400,
+    });
+  }));
   app.post('/api/fw/groups/guard/undo', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);
     const result = groupGuard.undoWarning(uid, groupId, String(req.body?.jid || ""));
@@ -387,6 +396,23 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/replies/duplicate', parseJson, guard(async (uid, req) => reply().duplicate(uid, req.body?.id)));
   app.post('/api/replies/import', parseJson, guard(async (uid, req) => reply().import(uid, req.body?.replies)));
   app.post('/api/replies/upload', parseJson, guard(async (uid, req) => await reply().upload(uid, req.body || {})));
+  // [REPLY-TEST] اختبار فعلي لرد (بطاقة/أزرار/نص) مع إرجاع الطريقة الناجحة أو الخطأ الحقيقي
+  app.post('/api/replies/test', parseJson, guard(async (uid, req) => {
+    const id = String(req.body?.id || '');
+    const rule = reply().list(uid).find(r => String(r.id) === id);
+    if (!rule) throw new Error('الرد غير موجود');
+    const { webReplyTest } = await import('./reply-test.mjs');
+    return webReplyTest(uid, rule, { groupId: req.body?.groupId || null, phoneNumber: req.body?.phoneNumber || null });
+  }));
+  // [REPLY-IMAGE] معاينة صورة محفوظة داخل محرر الردود (لا يخرج عن مجلد صاحب الحساب)
+  app.get('/api/replies/image', guard(async (uid, req, res) => {
+    const { readImageRef } = await import('../services/reply-media.mjs');
+    const image = await readImageRef(uid, req.query?.ref || '');
+    if (!image) throw new Error('لا توجد صورة بهذا المرجع');
+    res.setHeader('Content-Type', image.mimetype);
+    res.setHeader('Cache-Control', 'private, max-age=120');
+    res.end(image.buffer);
+  }));
   app.get('/api/replies/typing',guard(async uid=>reply().typing(uid)));
   app.post('/api/replies/typing',parseJson,guard(async(uid,req)=>reply().saveTyping(uid,req.body)));
   app.post('/api/replies/delay', parseJson, guard(async (uid, req) => reply().delay(uid, req.body?.id, req.body?.enabled)));

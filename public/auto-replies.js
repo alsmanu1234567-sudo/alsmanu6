@@ -57,19 +57,108 @@
     openSheet(`<div class="ar-sheet-top"><div><span class="ar-kicker">الاستيراد والتصدير</span><h2>🤖 برومبت دليل الذكاء</h2></div><button class="ar-close" id="arClose">×</button></div><p class="ar-note">انسخ الدليل إلى أداة الذكاء، ثم استورد JSON الناتج. الوسائط تحتاج إعادة رفع عند النقل لجهاز آخر.</p><textarea class="ar-guide" id="arGuideText" readonly>${e(guide)}</textarea><button class="btn btn-p" id="arCopyGuide">نسخ البرومبت</button>`);
     click('arClose',close);click('arCopyGuide',async()=>{try{await navigator.clipboard.writeText(guide);toast('✅ تم النسخ')}catch{const t=$('arGuideText');t.select();if(document.execCommand('copy'))toast('✅ تم النسخ');else toast('تعذّر النسخ')}});
   }
+  // ═══════════════════════════════════════════════════════════════
+  // [REPLY-EASE] إنشاء الأزرار بصفوف بلا كتابة «|» + إرفاق صورة من المعرض
+  // ═══════════════════════════════════════════════════════════════
+  const BTN_KIND={button_quick:'quick',button_url:'url',button_list:'list',card:'card'};
+  const BTN_MAX={quick:3,url:3,list:9,card:3};
+  let pendingReplyImage=null;      // ملف جديد اختاره المستخدم
+  let clearReplyImage=false;       // طلب إزالة الصورة المحفوظة
+  let cardFileMap=new WeakMap();   // صورة كل بطاقة اختارها المستخدم
+
+  function btnRow(entry={},kind='quick'){return `<div class="ar-btn-row" data-btn-row><input class="br-label" maxlength="24" placeholder="عنوان الزر" value="${e(entry.label||'')}"><input class="br-value" placeholder="${kind==='url'?'الرابط https://…':'النص الذي يرسله البوت (اختياري)'}" value="${e(entry.value||'')}"><button type="button" class="ar-btn-del" data-del-row title="حذف الزر">✕</button></div>`}
+  function btnRows(entries,kind){const rows=(Array.isArray(entries)&&entries.length?entries:[{}]);return `<div class="ar-btn-rows" data-kind="${kind}">${rows.map(x=>btnRow(x,kind)).join('')}</div><button type="button" class="btn btn-s" id="arAddRow">＋ إضافة زر</button><p class="ar-note">اكتب عنوان الزر فقط؛ القيمة اختيارية (إن تركتها فارغة يُرسل البوت العنوان). لا تحتاج لكتابة أي فاصل.</p>`}
+  function wireBtnRows(){const box=document.querySelector('#arTypeFields .ar-btn-rows:not([data-kind="card"])')||document.querySelector('.ar-btn-rows:not([data-kind="card"])');if(!box)return;const kind=box.dataset.kind||'quick';document.querySelectorAll('[data-del-row]').forEach(b=>b.onclick=()=>{const rows=box.querySelectorAll('[data-btn-row]');if(rows.length<=1){toast('اترك زراً واحداً على الأقل');return}b.closest('[data-btn-row]').remove()});click('arAddRow',()=>{const count=box.querySelectorAll('[data-btn-row]').length;const max=BTN_MAX[kind]||3;if(count>=max){toast(`الحد ${max} أزرار`);return}box.insertAdjacentHTML('beforeend',btnRow({},kind));wireBtnRows()})}
+  function readBtnRows(){const box=document.querySelector('#arTypeFields .ar-btn-rows:not([data-kind="card"])')||document.querySelector('.ar-btn-rows:not([data-kind="card"])');if(!box)return [];return [...box.querySelectorAll('[data-btn-row]')].map(row=>({label:row.querySelector('.br-label').value.trim(),value:row.querySelector('.br-value').value.trim()})).filter(x=>x.label||x.value)}
+
+  function imagePickerField(currentRef,{id='arReplyImage',title='صورة مع الرد (اختياري)'}={}){
+    const has=String(currentRef||'').startsWith('local:');
+    pendingReplyImage=null;clearReplyImage=false;
+    return `<div class="ar-field ar-img-pick"><span>${e(title)}</span><div class="ar-img-row"><label class="ar-img-btn">🖼️ اختر من المعرض<input type="file" id="${id}" accept="image/*" hidden></label><button type="button" class="ar-img-del" id="${id}Clear" ${has?'':'hidden'}>✕ إزالة</button></div><div class="ar-img-preview" id="${id}Preview" ${has?'':'hidden'}>${has?`<img alt="معاينة الصورة" src="/api/replies/image?ref=${encodeURIComponent(currentRef)}&token=${encodeURIComponent(typeof TOKEN==='string'?TOKEN:'')}">`:''}</div></div>`;
+  }
+  function wireImagePicker(currentRef,{id='arReplyImage'}={}){
+    const inputEl=$(id),clear=$(id+'Clear'),preview=$(id+'Preview');
+    if(!inputEl)return;
+    inputEl.addEventListener('change',()=>{
+      const file=inputEl.files?.[0];if(!file)return;
+      if(!/^image\//.test(file.type)){toast('❌ اختر صورة فقط');inputEl.value='';return}
+      if(file.size>4*1024*1024){toast('❌ الصورة أكبر من 4 ميغابايت');inputEl.value='';return}
+      pendingReplyImage=file;clearReplyImage=false;
+      if(preview){preview.hidden=false;preview.innerHTML=`<img alt="معاينة الصورة" src="${URL.createObjectURL(file)}">`}
+      if(clear)clear.hidden=false;
+    });
+    if(clear)clear.onclick=()=>{pendingReplyImage=null;clearReplyImage=String(currentRef||'').startsWith('local:');inputEl.value='';if(preview){preview.hidden=true;preview.innerHTML=''}clear.hidden=true};
+  }
+  async function uploadPickedImage(file){
+    const encoded=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result||'').split(',')[1]||'');reader.onerror=()=>reject(Error('تعذّر قراءة الصورة'));reader.readAsDataURL(file)});
+    if(!encoded)throw Error('تعذّر قراءة الصورة');
+    const saved=await api('/api/replies/upload',{name:file.name,data:encoded,type:'image',mime:file.type||'image/jpeg'});
+    return saved.replyContent;
+  }
+  async function resolveImageRefForSave(currentRef){
+    if(pendingReplyImage){return await uploadPickedImage(pendingReplyImage)}
+    if(clearReplyImage)return '';
+    return currentRef||'';
+  }
+
+  // ═══ بطاقات: صورة من المعرض بدل الرابط فقط ═══
   const blankCard=()=>({title:'',body:'',imageUrl:'',buttons:[{type:'cta_url',label:'',value:''}]});
-  function cardEditor(c,i){return `<div class="ar-form-section ar-carousel-card"><h3>البطاقة ${i+1}</h3>${input('unused','اسم البطاقة (حتى 60 حرفاً)',c.title||'').replace('id="unused"','class="cc-title"')}${area('unused','الوصف',c.body||'').replace('id="unused"','class="cc-body"')}${input('unused','رابط الصورة المباشر (يبدأ بـ https://)',c.imageUrl||'','text').replace('id="unused"','class="cc-image"')}${area('unused','الأزرار', (c.buttons||[]).map(b=>`${b.type==='cta_url'?'رابط':'رد'}|${b.label}|${b.value}`).join('\n'),'كل سطر: رابط|عنوان الزر|https://... أو رد|عنوان الزر|النص الذي يرسله البوت. حتى 3 أزرار.').replace('id="unused"','class="cc-buttons"')}<button type="button" class="btn btn-s cc-remove">حذف البطاقة</button></div>`}
-  function readCards(){return [...document.querySelectorAll('.ar-carousel-card')].map(el=>({title:el.querySelector('.cc-title').value,body:el.querySelector('.cc-body').value,imageUrl:el.querySelector('.cc-image').value,buttons:el.querySelector('.cc-buttons').value.split('\n').filter(x=>x.trim()).map(line=>{const [kind,label,...value]=line.split('|');if(!['رابط','رد'].includes(kind?.trim())||!value.length)throw Error('صيغة الزر: رابط|العنوان|الرابط أو رد|العنوان|النص');return {type:kind.trim()==='رابط'?'cta_url':'quick_reply',label:label.trim(),value:value.join('|').trim()}})}))}
-  function wireCards(){const list=$('arCards');if(!list)return;const paint=cards=>{list.innerHTML=cards.map(cardEditor).join('');list.querySelectorAll('.cc-remove').forEach((b,i)=>b.onclick=()=>{try{const cards=readCards();cards.splice(i,1);paint(cards)}catch(err){toast('❌ '+err.message)}})};click('arAddCard',()=>{try{const cards=readCards();if(cards.length>=10)throw Error('الحد 10 بطاقات');cards.push(blankCard());paint(cards)}catch(err){toast('❌ '+err.message)}});list.querySelectorAll('.cc-remove').forEach((b,i)=>b.onclick=()=>{try{const cards=readCards();cards.splice(i,1);paint(cards)}catch(err){toast('❌ '+err.message)}})}
+  function cardEditor(c,i){
+    const has=String(c.imageLocal||'').startsWith('local:');
+    const previewSrc=has?('/api/replies/image?ref='+encodeURIComponent(c.imageLocal)+'&token='+encodeURIComponent(typeof TOKEN==='string'?TOKEN:'')):'';
+    const rows=(Array.isArray(c.buttons)&&c.buttons.length?c.buttons:[{}]).map(b=>`<div class="ar-btn-row" data-btn-row><input class="cc-b-label" maxlength="24" placeholder="عنوان الزر" value="${e(b.label||'')}"><input class="cc-b-value" placeholder="نص الرد أو رابط https:// (اتركه فارغاً ليُرسل العنوان)" value="${e(b.value||'')}"><select class="cc-b-type"><option value="quick_reply" ${b.type!=='cta_url'?'selected':''}>رد</option><option value="cta_url" ${b.type==='cta_url'?'selected':''}>رابط</option></select><button type="button" class="ar-btn-del" data-del-row title="حذف">✕</button></div>`).join('');
+    return `<div class="ar-form-section ar-carousel-card" data-card="${i}"><h3>البطاقة ${i+1}</h3>${input('unused','اسم البطاقة (حتى 60 حرفاً)',c.title||'').replace('id="unused"','class="cc-title"')}${area('unused','الوصف',c.body||'').replace('id="unused"','class="cc-body"')}<div class="ar-field ar-img-pick"><span>صورة البطاقة (من المعرض)</span><div class="ar-img-row"><label class="ar-img-btn">🖼️ اختر صورة<input type="file" class="cc-image-file" accept="image/*" hidden></label><button type="button" class="ar-img-del cc-image-clear" ${has?'':'hidden'}>✕ إزالة</button></div><div class="ar-img-preview cc-image-preview" ${has?'':'hidden'}>${has?`<img alt="معاينة الصورة" src="${previewSrc}">`:''}</div></div><div class="ar-field"><span>أو رابط صورة مباشر (اختياري)</span><input class="cc-image" placeholder="https://…" value="${e(c.imageUrl||'')}"></div><div class="ar-field"><span>أزرار البطاقة (حتى 3)</span><div class="ar-btn-rows" data-kind="card">${rows}</div><button type="button" class="btn btn-s cc-add-btn">＋ إضافة زر</button></div><input type="hidden" class="cc-image-local" value="${e(c.imageLocal||'')}"><button type="button" class="btn btn-s cc-remove">حذف البطاقة</button></div>`;
+  }
+  function readCards(){return [...document.querySelectorAll('.ar-carousel-card')].map(el=>({title:el.querySelector('.cc-title').value.trim(),body:el.querySelector('.cc-body').value.trim(),imageUrl:(el.querySelector('.cc-image')?.value||'').trim(),imageLocal:(el.querySelector('.cc-image-local')?.value||'').trim(),buttons:[...el.querySelectorAll('[data-btn-row]')].map(row=>({type:row.querySelector('.cc-b-type')?.value==='cta_url'?'cta_url':'quick_reply',label:row.querySelector('.cc-b-label').value.trim(),value:row.querySelector('.cc-b-value').value.trim()})).filter(b=>b.label||b.value)}))}
+  function wireCard(card){
+    const fileEl=card.querySelector('.cc-image-file'),preview=card.querySelector('.cc-image-preview'),clear=card.querySelector('.cc-image-clear'),hidden=card.querySelector('.cc-image-local');
+    if(fileEl)fileEl.addEventListener('change',()=>{
+      const file=fileEl.files?.[0];if(!file)return;
+      if(!/^image\//.test(file.type)){toast('❌ اختر صورة فقط');fileEl.value='';return}
+      if(file.size>4*1024*1024){toast('❌ الصورة أكبر من 4 ميغابايت');fileEl.value='';return}
+      if(preview){preview.hidden=false;preview.innerHTML='<img alt="معاينة الصورة" src="'+URL.createObjectURL(file)+'">'}
+      if(clear)clear.hidden=false;
+      if(hidden)hidden.dataset.pending='1';
+    });
+    if(clear)clear.addEventListener('click',()=>{if(hidden){hidden.value='';delete hidden.dataset.pending}fileEl.value='';if(preview){preview.hidden=true;preview.innerHTML=''}clear.hidden=true});
+    const addBtn=card.querySelector('.cc-add-btn');
+    if(addBtn)addBtn.addEventListener('click',()=>{
+      const rowsBox=card.querySelector('.ar-btn-rows');
+      if(rowsBox.querySelectorAll('[data-btn-row]').length>=3){toast('الحد 3 أزرار للبطاقة');return}
+      rowsBox.insertAdjacentHTML('beforeend','<div class="ar-btn-row" data-btn-row><input class="cc-b-label" maxlength="24" placeholder="عنوان الزر"><input class="cc-b-value" placeholder="نص الرد أو رابط https://"><select class="cc-b-type"><option value="quick_reply">رد</option><option value="cta_url">رابط</option></select><button type="button" class="ar-btn-del" data-del-row title="حذف">✕</button></div>');
+      wireCard(card);
+    });
+    card.querySelectorAll('[data-del-row]').forEach(btn=>btn.onclick=()=>{
+      const rowsBox=card.querySelector('.ar-btn-rows');
+      if(rowsBox.querySelectorAll('[data-btn-row]').length<=1){toast('اترك زراً واحداً على الأقل للبطاقة');return}
+      btn.closest('[data-btn-row]').remove();
+    });
+  }
+  function wireCards(){
+    const list=$('arCards');if(!list)return;
+    const paint=cards=>{
+      list.innerHTML=cards.map(cardEditor).join('');
+      list.querySelectorAll('.ar-carousel-card').forEach((card,index)=>{
+        wireCard(card);
+        const rm=card.querySelector('.cc-remove');
+        if(rm)rm.onclick=()=>{try{const all=readCards();if(all.length<=2){toast('أقل عدد بطاقات 2');return}all.splice(index,1);paint(all)}catch(err){toast('❌ '+err.message)}};
+      });
+    };
+    let initial=[blankCard(),blankCard()];
+    try{const parsed=JSON.parse(editing?.replyContent||'{}');if(Array.isArray(parsed.cards)&&parsed.cards.length)initial=parsed.cards}catch{}
+    paint(initial);
+    click('arAddCard',()=>{try{const cards=readCards();if(cards.length>=10)throw Error('الحد 10 بطاقات');cards.push(blankCard());paint(cards)}catch(err){toast('❌ '+err.message)}});
+  }
   function makeBody(type,r){
     if(['xo_ultra','xo_multi','ludo'].includes(type))return `<div class="ar-note">${type==='ludo'?'لودو لاثنين إلى أربعة لاعبين. تُرسل اللعبة للمجموعة وتحتاج HTTPS.':type==='xo_multi'?'تُرسل اللعبة في المجموعة؛ أول شخصين يضغطان لعب يتنافسان. تحتاج رابط HTTPS عاماً.':'لعبة XO ضد الجهاز.'}</div><label class="ar-check"><input type="checkbox" id="arXoFallback" ${r.xoFallbackEnabled!==false?'checked':''}> إرسال رسالة الرابط البديل</label>${area('arXoFallbackText','نص رسالة الرابط (اختياري)',r.xoFallbackText||'','اكتب _get في موضع الرابط؛ اترك النص فارغاً للرسالة الافتراضية.')}`;
-    if(type==='carousel'){let cfg={caption:'',footer:'',cards:[blankCard(),blankCard()]};try{const parsed=JSON.parse(r.replyContent||'{}');if(Array.isArray(parsed.cards))cfg=parsed}catch{}return area('arCarouselCaption','نص الرسالة',cfg.caption||'')+input('arCarouselFooter','التذييل (اختياري)',cfg.footer||'')+'<p class="ar-note">املأ العنوان والوصف والصورة والزر في كل بطاقة، بما فيها البطاقة الثانية. الاسم نص عادي؛ رابط الصورة فقط يجب أن يبدأ بـ https://. أضف من 2 إلى 10 بطاقات.</p><div id="arCards">'+(cfg.cards||[]).map(cardEditor).join('')+'</div><button type="button" class="btn btn-s" id="arAddCard">＋ إضافة بطاقة</button>';}
+    if(type==='carousel'){let cfg={caption:'',footer:'',cards:[blankCard(),blankCard()]};try{const parsed=JSON.parse(r.replyContent||'{}');if(Array.isArray(parsed.cards))cfg=parsed}catch{}return area('arCarouselCaption','نص الرسالة',cfg.caption||'')+input('arCarouselFooter','التذييل (اختياري)',cfg.footer||'')+'<p class="ar-note">املأ العنوان والوصف واختر صورة كل بطاقة من المعرض (أو اتركها بلا صورة). الأزرار تُضاف بصفوف: عنوان فقط يكفي. أضف من 2 إلى 10 بطاقات.</p><div id="arCards">'+(cfg.cards||[]).map(cardEditor).join('')+'</div><button type="button" class="btn btn-s" id="arAddCard">＋ إضافة بطاقة</button>';}
     if(type==='xo')return '<div class="ar-note">🎮 يرسل لعبة ضد البوت عند مطابقة المفتاح.</div>';
     if(media.includes(type))return `<div class="ar-note">ارفع ملفاً حتى 4 ميغابايت.${type==='sticker'?' الملصق يجب أن يكون WebP.':''} ${r.replyContent?.startsWith('local:')?'يوجد ملف محفوظ؛ اترك الخانة فارغة للاحتفاظ به.':''}</div><label class="ar-field"><span>ملف الوسائط</span><input id="arFile" type="file" accept="${({image:'image/*',video:'video/*',audio:'audio/*',sticker:'image/webp',document:'*/*'})[type]}"></label>`;
     if(type==='rotating')return area('arRotating','الرسائل المتناوبة',(r.rotatingMessages||[]).join('\n'),'رسالة واحدة في كل سطر، وتُرسل بالتتابع.');
     if(type==='morphing')return area('arContent','النص الأولي',r.replyContent||'')+area('arMorph','التعديلات',(r.morphEdits||[]).map(x=>`${x.delaySeconds}|${x.text}`).join('\n'),'كل سطر: الثواني|النص الجديد');
-    if(type.startsWith('button_')){let cfg={text:'',entries:[]};try{cfg=JSON.parse(r.replyContent||'{}')}catch{}return area('arButtonBody','نص الرسالة',cfg.text||'')+area('arButtonRows','إعداد الخيارات',(cfg.entries||[]).map(x=>`${x.label}|${x.value}`).join('\n'),type==='button_url'?'كل سطر: عنوان الزر|https://الرابط':'كل سطر: عنوان الزر|الرد عند الضغط. حتى 9 خيارات.');}
-    return area('arContent',type==='ai'?'برومبت الرد (اختياري)':type==='reaction'?'الإيموجي':'نص الرد',r.replyContent==='__ai_default__'?'':r.replyContent||'',type==='text'?'المتغيرات: {name} {number} {group} {time} {date} {random}':type==='ai'?'اتركه فارغاً لاستخدام الإعداد الافتراضي.':'');
+    if(type.startsWith('button_')){let cfg={text:'',entries:[]};try{cfg=JSON.parse(r.replyContent||'{}')}catch{}const kind=BTN_KIND[type]||'quick';return area('arButtonBody','نص الرسالة',cfg.text||'')+btnRows(cfg.entries||[],kind)+imagePickerField(r.imageRef,{title:'صورة مع الأزرار (اختياري)'});}
+    const withImage=['text','ai'].includes(type)?imagePickerField(r.imageRef,{title:'صورة مع الرد (اختياري)'}):'';
+    return area('arContent',type==='ai'?'برومبت الرد (اختياري)':type==='reaction'?'الإيموجي':'نص الرد',r.replyContent==='__ai_default__'?'':r.replyContent||'',type==='text'?'المتغيرات: {name} {number} {group} {time} {date} {random}':type==='ai'?'اتركه فارغاً لاستخدام الإعداد الافتراضي.':'')+withImage;
   }
   function openEditor(rule){
     editing=rule?structuredClone(rule):{trigger:'',triggerType:'exact',replyType:'text',target:'all',scope:'both',isActive:true};
@@ -79,11 +168,25 @@
       <section class="ar-form-section"><h3>٢ · ماذا يرسل؟</h3>${select('arType','نوع الرد',Object.entries(types),editing.replyType)}<div id="arTypeFields">${makeBody(editing.replyType,editing)}</div></section>
       <section class="ar-form-section"><h3>٣ · لمن وأين؟</h3>${select('arTarget','الهدف',[['all','الجميع'],['self','رسائلي أنا'],['specific','شخص محدد'],['multiple','عدة أشخاص']],editing.target||'all')}<div id="arNumbersWrap">${area('arNumbers','الأرقام الدولية',(editing.targetNumbers||[]).join('\n'),'رقم لكل سطر مع مفتاح الدولة، بدون علامة +.')}</div>${select('arScope','النطاق',[['both','الخاص والمجموعات'],['private','الخاص فقط'],['groups','المجموعات فقط']],editing.scope==='group'?'groups':editing.scope||'both')}</section>
       <details class="ar-advanced"><summary>⚙️ الحدود والجدولة واللغة</summary><div class="ar-grid">${input('arDaily','الحد اليومي (0 بلا حد)',editing.dailyLimit||0,'number','min="0" max="100000"')}${input('arPerUser','حد كل شخص / 8 ساعات',editing.perUserLimit||0,'number','min="0" max="100000"')}${input('arFrom','من',editing.scheduleFrom||'','time')}${input('arTo','إلى',editing.scheduleTo||'','time')}</div>${select('arLang','فلتر اللغة',[['','كل اللغات'],['arabic','عربي'],['english','إنجليزي']],editing.langFilter||'')}</details>
-      <label class="ar-check"><input type="checkbox" id="arActive" ${editing.isActive!==false?'checked':''}> الرد مفعّل</label><div class="ar-form-actions"><button class="btn btn-s" type="button" id="arCancel">إلغاء</button><button class="btn btn-p" id="arSave" type="submit">💾 حفظ الرد</button></div></form>`);
+      <label class="ar-check"><input type="checkbox" id="arActive" ${editing.isActive!==false?'checked':''}> الرد مفعّل</label><p class="ar-note">🧪 «إرسال تجربة» يرسل هذا الرد الآن إلى رقمك على واتساب لتتأكد أنه يعمل (يُحفظ الرد أولاً).</p><div class="ar-form-actions"><button class="btn btn-s" type="button" id="arTest">🧪 إرسال تجربة</button><button class="btn btn-s" type="button" id="arCancel">إلغاء</button><button class="btn btn-p" id="arSave" type="submit">💾 حفظ الرد</button></div></form>`);
     click('arClose',close);click('arCancel',close);
     const syncNumbers=()=>{$('arNumbersWrap').style.display=['specific','multiple'].includes($('arTarget').value)?'':'none'}; $('arTarget').addEventListener('change',syncNumbers);syncNumbers();
-    $('arType').addEventListener('change',()=>{$('arTypeFields').innerHTML=makeBody($('arType').value,{});wireCards()});
-    wireCards();$('arForm').addEventListener('submit',saveEditor);
+    $('arType').addEventListener('change',()=>{
+      $('arTypeFields').innerHTML=makeBody($('arType').value,{});
+      wireCards();wireBtnRows();wireImagePicker(editing.imageRef||'');
+    });
+    wireCards();wireBtnRows();wireImagePicker(editing.imageRef||'');
+    click('arTest',async()=>{
+      if(!editing.id)return toast('احفظ الرد أولاً ثم اختبره');
+      const btn=$('arTest');const label=btn.textContent;btn.disabled=true;btn.textContent='جارٍ الإرسال…';
+      try{
+        const res=await api('/api/replies/test',{id:editing.id});
+        if(res.ok)toast(`✅ وصلت التجربة إلى رقمك (${res.strategy||'تم الإرسال'})${res.withImage?' مع الصورة':''}`);
+        else toast('❌ '+(res.error||'تعذّر الإرسال'));
+      }catch(err){toast('❌ '+err.message)}
+      finally{btn.disabled=false;btn.textContent=label}
+    });
+    $('arForm').addEventListener('submit',saveEditor);
   }
   async function saveEditor(event){
     event.preventDefault();const b=$('arSave');b.disabled=true;b.textContent='جارٍ الحفظ…';
@@ -92,8 +195,28 @@
       if(['xo_ultra','xo_multi','ludo'].includes(type)){payload.xoFallbackEnabled=$('arXoFallback').checked;payload.xoFallbackText=$('arXoFallbackText').value;}
       if(type==='rotating')payload.rotatingMessages=$('arRotating').value.split('\n');
       if(type==='morphing')payload.morphEdits=$('arMorph').value.split('\n').filter(x=>x.trim()).map(line=>{const p=line.indexOf('|');if(p<0)throw Error('كل تعديل يجب أن يكون بالشكل ثواني|نص');return {delaySeconds:Number(line.slice(0,p).trim()),text:line.slice(p+1).trim()}});
-      if(type==='carousel')payload.replyContent=JSON.stringify({caption:$('arCarouselCaption').value,footer:$('arCarouselFooter').value,cards:readCards()});
-      if(type.startsWith('button_')){const rows=$('arButtonRows').value.split('\n').filter(x=>x.trim()).map(line=>{const p=line.indexOf('|');if(p<1)throw Error('كل خيار يجب أن يكون بالشكل عنوان|قيمة');return {label:line.slice(0,p).trim(),value:line.slice(p+1).trim()}});payload.replyContent=JSON.stringify({text:$('arButtonBody').value.trim(),entries:rows});}
+      if(type==='carousel'){
+        const cards=readCards();
+        const cardEls=[...document.querySelectorAll('.ar-carousel-card')];
+        for(let i=0;i<cards.length;i++){
+          const file=cardEls[i]?.querySelector('.cc-image-file')?.files?.[0];
+          if(file){b.textContent='جارٍ رفع صورة البطاقة…';cards[i].imageLocal=await uploadPickedImage(file);}
+          if(!cards[i].imageLocal)delete cards[i].imageLocal;
+          if(!cards[i].imageUrl)delete cards[i].imageUrl;
+        }
+        payload.replyContent=JSON.stringify({caption:$('arCarouselCaption').value,footer:$('arCarouselFooter').value,cards});
+      }
+      if(type.startsWith('button_')){
+        const entries=readBtnRows();
+        if(!entries.length)throw Error('أضف زراً واحداً على الأقل');
+        if(type==='button_url'&&entries.some(x=>!/^https?:\/\//i.test(x.value)))throw Error('أزرار الروابط تحتاج رابطاً يبدأ بـ https://');
+        payload.replyContent=JSON.stringify({text:$('arButtonBody').value.trim(),entries:entries.map(x=>({label:x.label,value:x.value||x.label}))});
+      }
+      // [REPLY-IMAGE] صورة اختيارية مع أي رد نصي أو أزرار
+      if(['text','ai','button_quick','button_url','button_list'].includes(type)){
+        const ref=await resolveImageRefForSave(editing.imageRef||'');
+        payload.imageRef=ref;
+      }
       if(media.includes(type)){
         const file=$('arFile').files?.[0];
         if(file){if(file.size>4*1024*1024)throw Error('الملف أكبر من 4 ميغابايت');if(type==='sticker'&&!/\.webp$/i.test(file.name))throw Error('اختر ملصق WebP');const encoded=(await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(Error('تعذّر قراءة الملف'));reader.readAsDataURL(file)})).split(',')[1];Object.assign(payload,await api('/api/replies/upload',{name:file.name,type,mime:file.type,data:encoded}));}

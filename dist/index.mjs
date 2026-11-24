@@ -15,6 +15,8 @@ var BOT_WA_SESSIONS_DIR = __botRootJoin(BOT_ROOT, "wa-sessions");
 var BOT_CONFIG_FILE = __botRootJoin(BOT_ROOT, "config.json");
 process.env.BOT_BASE_DIR = BOT_ROOT;
 import {sendCarouselAutoReply,carouselAnswer,carouselFallback} from '../services/auto-reply-carousel.mjs';
+import {readImageRef as _readReplyImage} from '../services/reply-media.mjs';
+import {recordMemberMessage as _recordGroupMemberMessage} from '../services/group-activity.mjs';
 import {waitForTyping,typingSettings,startTyping} from '../services/reply-typing.mjs';
 import {deleteSentMessages} from '../services/fast-message-delete.mjs';
 import {getMessageCutoff as replyCutoff,isMessageAfterCutoff as replyIsFresh,isMessageProcessingPaused,getProcessingDiagnostics,clearMessageCutoff} from '../engine/message-cutoff.mjs';
@@ -294189,6 +294191,10 @@ function registerMessageHandler(sock, userId) {
         if(((stats.received||0)+(stats.sent||0))%20===0)saveUser(userId,{messageStats:stats});
       }
       const isGroup = jid.endsWith("@g.us");
+      // [MEMBERS-COUNTS] عدّ رسائل كل عضو داخل المجموعة (لقائمة الأعضاء في إعدادات المجموعة)
+      if (isGroup && !msg.key.fromMe) {
+        try { _recordGroupMemberMessage(userId, jid, msg.key.participant || msg.key.participantAlt || ""); } catch { }
+      }
       const cacheKey = `${userId}:${jid}`;
       async function runAutoReplies(baseSock, msg, text, senderName) {
         if (!text || isGeneratedAutoReply(msg.key?.id)) return;
@@ -294269,12 +294275,14 @@ function registerMessageHandler(sock, userId) {
         if (dailyLimit > 0) inMemoryDB[replyDailyKey] = dailyCount + 1;
         incrementReplyStat(userId, reply.id);
         if (reply.replyType === 'carousel') {
-          try { await sendCarouselAutoReply(sock, jid, reply); }
+          try { const _car = await sendCarouselAutoReply(sock, jid, reply, { userId }); logger.info({ strategy: _car?.strategy, cards: _car?.cards }, 'Carousel auto-reply sent'); }
           catch(err) { logger.error({err}, 'Carousel auto-reply failed'); try { await sock.sendMessage(jid, {text:carouselFallback(reply)}); } catch(fallbackErr) { logger.error({err:fallbackErr}, 'Carousel fallback failed'); } }
           break;
         }
         if (['button_quick', 'button_url', 'button_list'].includes(reply.replyType)) {
-          try { await sendInteractiveAutoReply(sock, jid, reply); }
+          let _btnImage = null;
+          if (reply.imageRef) { try { _btnImage = (await _readReplyImage(userId, reply.imageRef))?.buffer || null; } catch (e) { logger.warn({ e }, 'Interactive reply image skipped'); } }
+          try { await sendInteractiveAutoReply(sock, jid, reply, { image: _btnImage }); }
           catch (err) { logger.error({err}, 'Interactive auto-reply failed'); try { await sock.sendMessage(jid, {text:formatInteractiveFallback(reply)}); } catch (fallbackErr) { logger.error({err:fallbackErr}, 'Interactive fallback failed'); } }
           break;
         }
@@ -294391,7 +294399,16 @@ function registerMessageHandler(sock, userId) {
         }
         const responseText = (reply.replyContent || "").replace(/{name}/g, senderName).replace(/{number}/g, jid.split("@")[0]).replace(/{group}/g, isGroup ? jid : "").replace(/{time}/g, (/* @__PURE__ */ new Date()).toLocaleTimeString("ar")).replace(/{date}/g, (/* @__PURE__ */ new Date()).toLocaleDateString("ar")).replace(/{random}/g, String(Math.floor(Math.random() * 1e3))).replace(/{count}/g, "1");
         try {
-          await sock.sendMessage(jid, { text: responseText });
+          // [REPLY-IMAGE] صورة اختيارية مع أي رد نصي
+          let _replyImage = null;
+          if (reply.imageRef) {
+            try { _replyImage = await _readReplyImage(userId, reply.imageRef); } catch (e) { logger.warn({ e }, 'Reply image skipped'); }
+          }
+          if (_replyImage?.buffer?.length) {
+            await sock.sendMessage(jid, { image: _replyImage.buffer, caption: responseText, mimetype: _replyImage.mimetype });
+          } else {
+            await sock.sendMessage(jid, { text: responseText });
+          }
         } catch (err) {
           logger.error({ err }, "Error sending WhatsApp reply");
         }

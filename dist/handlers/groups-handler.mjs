@@ -1531,6 +1531,53 @@ export async function webGuardKickOffenders(userId, groupId, phoneNumber = null)
   return { ok: true, kicked: done, failed, kickedList: guard.listKicked(String(userId), id) };
 }
 
+/** [MEMBERS-VIEW] دليل أعضاء المجموعة: الاسم + الرقم الحقيقي الكامل + عدد الرسائل */
+export async function webResolveActiveSocket(userId, phoneNumber = null) {
+  for (const sock of findSockets(String(userId))) {
+    if (!socketMatchesPhone(sock, phoneNumber)) continue;
+    if (sock?.user?.id && typeof sock.sendMessage === "function") return sock;
+  }
+  return null;
+}
+
+export async function webGuardDirectory(userId, groupId, phoneNumber = null, options = {}) {
+  const id = String(groupId || "").trim();
+  if (!id.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+  const sock = await findSocketForGroup(String(userId), id, phoneNumber);
+  if (!sock) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
+  const metadata = await sock.groupMetadata(id).catch(() => null);
+  const participants = Array.isArray(metadata?.participants) ? metadata.participants : [];
+  if (!participants.length) throw new Error("تعذّر تحميل أعضاء المجموعة من واتساب");
+  const { resolvePhoneMap, buildGroupDirectory } = await import("../../services/group-directory.mjs");
+  const { getGroupMessageCounts, describeActivity } = await import("../../services/group-activity.mjs");
+  const phoneMap = await resolvePhoneMap(sock, participants).catch(() => new Map());
+  const counts = getGroupMessageCounts(String(userId), id);
+  const directory = buildGroupDirectory({
+    participants,
+    phoneMap,
+    counts,
+    nameFor: (participant) => resolveGroupMemberName(sock, participant, metadata),
+    selfJid: sock.user?.id || "",
+  });
+  const search = String(options.search || "").trim().toLowerCase().slice(0, 100);
+  const filtered = search
+    ? directory.members.filter((member) =>
+      member.name.toLowerCase().includes(search) ||
+      (member.phone || "").includes(search) ||
+      member.jid.includes(search))
+    : directory.members;
+  const limit = Math.min(Math.max(Number(options.limit) || 400, 1), 2000);
+  return {
+    groupId: id,
+    subject: String(metadata?.subject || "").slice(0, 120),
+    members: filtered.slice(0, limit),
+    totals: directory.totals,
+    activity: describeActivity(counts),
+    truncated: filtered.length > limit,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
 /** [GUARD] إرسال ترحيب تجريبي للمجموعة للتأكد أن نظام الترحيب يعمل */
 export async function webGuardTestWelcome(userId, groupId, phoneNumber = null, sampleJids = []) {
   const id = String(groupId || "").trim();

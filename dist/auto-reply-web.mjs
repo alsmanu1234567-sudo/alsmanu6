@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { validateInteractiveConfig } from '../services/auto-reply-interactive.mjs';
+import { normalizeImageRef } from '../services/reply-media.mjs';
 
 const TYPES = new Set(['text','ai','reaction','rotating','morphing','xo','xo_ultra','xo_multi','ludo','button_quick','button_list','button_url','carousel','image','video','audio','document','sticker']);
 const MEDIA = new Set(['image','video','audio','document','sticker']);
@@ -16,6 +17,28 @@ function localMedia(uid, content) {
   const full=path.resolve(content.slice(6)), root=mediaRoot(uid);
   if (!full.startsWith(root+path.sep)) throw Error('الملف لا يخص حسابك؛ ارفع الملف من جديد');
   return content;
+}
+const IMAGE_REPLY_TYPES = new Set(['text','ai','button_quick','button_url','button_list']);
+// [REPLY-IMAGE] يُتحقق أن صور البطاقات المختارة من المعرض تخص صاحب الحساب
+function sanitizeCarouselImages(uid, raw) {
+  let cfg; try { cfg = JSON.parse(raw); } catch { return raw; }
+  if (!cfg || !Array.isArray(cfg.cards)) return raw;
+  cfg.cards = cfg.cards.map(card => {
+    if (!card || typeof card !== 'object') return card;
+    const next = { ...card };
+    const local = next.imageLocal;
+    if (local) next.imageLocal = normalizeImageRef(uid, local) || '';
+    else if (next.imageLocal === '' || next.imageLocal === null) delete next.imageLocal;
+    return next;
+  });
+  return JSON.stringify(cfg);
+}
+function normalizeReplyImage(uid, replyType, input, existing) {
+  if (!IMAGE_REPLY_TYPES.has(replyType)) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(input, 'imageRef')) return undefined;
+  const raw = String(input.imageRef || '').trim();
+  if (!raw) return '';
+  return normalizeImageRef(uid, raw);
 }
 export function validateWebReply(uid, input, existing = {}) {
   const trigger=STR(input.trigger,300,'المفتاح'); if(!trigger) throw Error('أدخل المفتاح');
@@ -45,12 +68,16 @@ export function validateWebReply(uid, input, existing = {}) {
     morphEdits=input.morphEdits.map(e=>{const text=STR(e.text,4000,'نص التعديل'), delaySeconds=Number(e.delaySeconds);if(!text||!Number.isFinite(delaySeconds)||delaySeconds<0.1||delaySeconds>300) throw Error('التعديل يحتاج نصاً ومدة بين 0.1 و300 ثانية');return {text,delaySeconds};});
   }
   if(replyType.startsWith('button_')) validateInteractiveConfig(replyType,replyContent);
-  if(replyType==='carousel') validateCarousel(replyContent);
+  if(replyType==='carousel'){ validateCarousel(replyContent); replyContent=sanitizeCarouselImages(uid,replyContent); }
   const langFilter=String(input.langFilter||''); if(!['','arabic','english'].includes(langFilter)) throw Error('فلتر اللغة غير صالح');
   const scheduleFrom=String(input.scheduleFrom||''),scheduleTo=String(input.scheduleTo||'');
   const time=/^(?:[01]\d|2[0-3]):[0-5]\d$/;
   if ((scheduleFrom||scheduleTo) && (!time.test(scheduleFrom)||!time.test(scheduleTo))) throw Error('أدخل وقت البداية والنهاية بصيغة 24 ساعة');
-  return {...existing,trigger,triggerType,caseSensitive:input.caseSensitive===true,replyType,replyContent,target,targetNumbers,scope,
+  const imageRef = normalizeReplyImage(uid, replyType, input, existing);
+  const base = {...existing};
+  if (imageRef === '' || (imageRef === undefined && !IMAGE_REPLY_TYPES.has(replyType))) delete base.imageRef;
+  return {...base,trigger,triggerType,caseSensitive:input.caseSensitive===true,replyType,replyContent,target,targetNumbers,scope,
+    ...(imageRef ? {imageRef} : {}),
     isActive: input.isActive !== false, dailyLimit:integer(input.dailyLimit,'الحد اليومي'),perUserLimit:integer(input.perUserLimit,'حد الشخص'),
     scheduleFrom:scheduleFrom||null,scheduleTo:scheduleTo||null,langFilter:langFilter||null,rotatingMessages,morphEdits,
     ...(["xo_ultra","xo_multi","ludo"].includes(replyType) ? {xoFallbackEnabled:input.xoFallbackEnabled !== false, xoFallbackText:STR(input.xoFallbackText||"",2000,"رسالة الرابط")} : {}),

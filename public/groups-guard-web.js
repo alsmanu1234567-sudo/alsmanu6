@@ -167,9 +167,14 @@
   const CARD_LABELS = { warn1: "تحذير 1 (أصفر)", warn2: "تحذير 2 (أصفر)", warn3: "الإنذار الأخير (أحمر)", welcome: "كرت الترحيب بالجدد", join: "كرت الانضمام", leave: "كرت المغادرة" };
 
   // [GG-UI-L2] أدوات عرض موحّدة: اسم العضو بدل الرقم + وقت مفهوم + أحرف أولى للأفاتار
-  function jidNumber(jid) {
-    const digits = String(jid || "").split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
-    return digits ? `+${digits}` : String(jid || "—");
+  // [MEMBERS-VIEW] أرقام حقيقية فقط: لا نعرض معرّف LID كأنه رقم هاتف
+  function jidNumber(row) {
+    const phone = typeof row === "object" && row ? String(row.phone || "") : "";
+    if (phone) return `+${phone.replace(/[^0-9]/g, "")}`;
+    const jid = String((typeof row === "object" && row ? row.jid : row) || "");
+    if (!/@s\.whatsapp\.net$/i.test(jid)) return "رقم غير متاح";
+    const digits = jid.split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
+    return digits ? `+${digits}` : "رقم غير متاح";
   }
   function displayName(row) {
     const nm = String(row?.name || "").trim();
@@ -277,6 +282,16 @@
         </div>
 
         <div class="gg-grid">
+          <div class="gg-card gg-members-card">
+            <button class="gg-members-toggle" id="ggMembersToggle" type="button" aria-expanded="false">
+              <span class="gg-members-title">👥 أعضاء المجموعة</span>
+              <span class="gg-tag" id="ggMembersCount">اضغط للعرض</span>
+              <span class="gg-members-chev" aria-hidden="true">▾</span>
+            </button>
+            <div class="mut">اضغط على العنوان لعرض الأعضاء: الاسم والرقم الكامل وعدد الرسائل. القائمة مطويّة دائماً حتى تفتحها.</div>
+            <div class="gg-members-body" id="ggMembersBody" hidden></div>
+          </div>
+
           <div class="gg-card">
             <h3>المفتاح الرئيسي</h3>
             <div class="mut">أوقف الحماية كاملة من هنا دون فقدان الإعدادات.</div>
@@ -491,7 +506,105 @@
     return patch;
   }
 
+  // ═══ [MEMBERS-VIEW] قائمة أعضاء المجموعة: مطويّة افتراضياً، اسم + رقم كامل + عدد الرسائل ═══
+  let membersCache = null;
+  let membersOpen = false;
+  function membersStyles() {
+    if (document.getElementById("ggMembersStyles")) return;
+    const style = document.createElement("style");
+    style.id = "ggMembersStyles";
+    style.textContent = `
+      .gg-members-toggle{width:100%;display:flex;align-items:center;gap:8px;justify-content:space-between;background:none;border:0;padding:0;cursor:pointer;color:inherit;font:inherit}
+      .gg-members-toggle .gg-members-title{font-weight:700;font-size:16px}
+      .gg-members-chev{transition:transform .2s ease;opacity:.7}
+      .gg-members-toggle[aria-expanded="true"] .gg-members-chev{transform:rotate(180deg)}
+      .gg-members-body{margin-top:10px;max-height:420px;overflow:auto;-webkit-overflow-scrolling:touch}
+      .gg-member{display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid rgba(255,255,255,.07)}
+      .gg-member:last-child{border-bottom:0}
+      .gg-member-av{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:rgba(255,255,255,.09);font-size:12px;font-weight:700;flex:0 0 auto}
+      .gg-member-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;line-height:1.35}
+      .gg-member-main b{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .gg-member-main small{font-size:12px;opacity:.75;direction:ltr;text-align:right}
+      .gg-member-count{flex:0 0 auto;text-align:center;min-width:52px}
+      .gg-member-count b{display:block;font-size:14px}
+      .gg-member-count small{font-size:10px;opacity:.65}
+      .gg-member-tools{display:flex;gap:8px;margin-bottom:8px}
+      .gg-member-totals{font-size:12px;opacity:.75;margin-bottom:8px}
+      .gg-member-hide{width:100%;margin-top:10px}
+      .gg-badge-admin{font-size:10px;padding:1px 6px;border-radius:8px;background:rgba(255,200,0,.18);color:#ffd75e}
+    `;
+    document.head.appendChild(style);
+  }
+  function membersHtml(data) {
+    const members = data.members || [];
+    const totals = data.totals || {};
+    if (!members.length) return `<div class="gg-empty">لا يوجد أعضاء للعرض.</div>`;
+    return `<div class="gg-member-totals">${totals.members || members.length} عضواً · ${totals.admins || 0} مشرفاً · إجمالي الرسائل ${totals.messages || 0}${totals.withoutPhone ? ` · ${totals.withoutPhone} بلا رقم معروف` : ""}</div>
+      <div class="gg-member-tools"><input class="gg-in gg-search" id="ggMemberSearch" placeholder="ابحث بالاسم أو الرقم…"></div>
+      <div id="ggMemberList">${members.map((m) => memberRowHtml(m)).join("")}</div>
+      <button class="gg-btn alt gg-member-hide" id="ggMembersHide" type="button">🙈 إخفاء القائمة</button>`;
+  }
+  function memberRowHtml(m) {
+    const name = String(m.name || "").trim();
+    const shown = name || "بدون اسم محفوظ";
+    const avatar = (name || String(m.phone || "")).slice(0, 2) || "؟";
+    return `<div class="gg-member">
+      <div class="gg-member-av">${esc(avatar)}</div>
+      <div class="gg-member-main">
+        <b>${esc(shown)}${m.isSelf ? " (أنت)" : ""}${m.isAdmin ? ' <span class="gg-badge-admin">مشرف</span>' : ""}</b>
+        <small>${esc(m.phoneDisplay || (m.phone ? "+" + m.phone : "رقم غير متاح"))}</small>
+      </div>
+      <div class="gg-member-count"><b>${Number(m.messages) || 0}</b><small>رسالة</small></div>
+    </div>`;
+  }
+  function wireMembers(body) {
+    const toggle = body.querySelector("#ggMembersToggle");
+    const panel = body.querySelector("#ggMembersBody");
+    const countTag = body.querySelector("#ggMembersCount");
+    if (!toggle || !panel) return;
+    membersStyles();
+    const close = () => {
+      membersOpen = false;
+      panel.hidden = true;
+      toggle.setAttribute("aria-expanded", "false");
+      if (countTag) countTag.textContent = membersCache ? `${(membersCache.totals || {}).members || membersCache.members.length} عضواً` : "اضغط للعرض";
+    };
+    const open = async () => {
+      membersOpen = true;
+      panel.hidden = false;
+      toggle.setAttribute("aria-expanded", "true");
+      if (countTag) countTag.textContent = "جارٍ التحميل…";
+      try {
+        if (!membersCache) {
+          membersCache = await api(`/api/fw/groups/guard/members?groupId=${encodeURIComponent(state.groupId)}`);
+        }
+        panel.innerHTML = membersHtml(membersCache);
+        if (countTag) countTag.textContent = `${(membersCache.totals || {}).members || membersCache.members.length} عضواً`;
+        const hide = panel.querySelector("#ggMembersHide");
+        if (hide) hide.addEventListener("click", () => close());
+        const search = panel.querySelector("#ggMemberSearch");
+        if (search) search.addEventListener("input", () => {
+          const term = search.value.trim().toLowerCase();
+          const list = panel.querySelector("#ggMemberList");
+          if (!list) return;
+          const rows = (membersCache.members || []).filter((m) =>
+            !term || String(m.name || "").toLowerCase().includes(term) || String(m.phone || "").includes(term));
+          list.innerHTML = rows.length ? rows.map((m) => memberRowHtml(m)).join("") : `<div class="gg-empty">لا نتائج مطابقة.</div>`;
+        });
+      } catch (error) {
+        panel.innerHTML = `<div class="gg-empty">❌ ${esc(error.message)}</div>
+          <button class="gg-btn alt gg-member-hide" id="ggMembersHide" type="button">🙈 إخفاء</button>`;
+        const hide = panel.querySelector("#ggMembersHide");
+        if (hide) hide.addEventListener("click", () => close());
+        if (countTag) countTag.textContent = "تعذّر التحميل";
+      }
+    };
+    toggle.addEventListener("click", () => { if (membersOpen) close(); else void open(); });
+    if (!membersOpen) close();
+  }
+
   function bind(body) {
+    wireMembers(body);
     body.querySelectorAll("[data-toggle]").forEach((input) => {
       input.addEventListener("change", async () => {
         try {
