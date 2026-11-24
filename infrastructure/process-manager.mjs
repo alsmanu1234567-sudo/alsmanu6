@@ -150,8 +150,12 @@ export function spawnBot(baseDir, options = {}) {
         wrn(`⚠️  البوت توقف (${exitInfo}) — إعادة التشغيل ${restartCount}/${MAX_RESTARTS} بعد ${RESTART_DELAY}ms`);
         setTimeout(launch, RESTART_DELAY);
       } else if (restartCount >= MAX_RESTARTS) {
-        logErr(`🛑 حُدِّد الحد الأقصى (${MAX_RESTARTS} إعادة) — إيقاف نهائي`);
-        process.exit(code ?? 1);
+        // [NEVER-DIE] كان البوت يتوقف نهائياً بعد 10 محاولات (شاهده المستخدم:
+        // «حُدِّد الحد الأقصى (10 إعادة) — إيقاف نهائي») فيبقى ميتاً حتى يتدخل يدوياً.
+        // الآن: انتظار 5 دقائق ثم تصفير العدّاد والمحاولة من جديد — بلا توقف نهائي.
+        restartCount = 0;
+        wrn(`♻️ بلغ الحد (${MAX_RESTARTS} إعادة) — انتظار 5 دقائق ثم إعادة المحاولة من جديد (لن يتوقف البوت نهائياً)`);
+        setTimeout(() => { if (!stopped) launch(); }, 5 * 60 * 1000).unref?.();
       } else {
         process.exit(code ?? 1);
       }

@@ -29,3 +29,40 @@ test('الفحص العام لا يحمل أي توكن', () => {
   assert.doesNotMatch(__tunnel, /_probeTunnel[\s\S]{0,300}x-control-token/);
   assert.doesNotMatch(__tunnel, /_probeTunnel[\s\S]{0,300}token=/);
 });
+
+// ── [TUNNEL-ISOLATE] مكتبة tunnelmole تستدعي process.exit(1) وتقتل البوت ──
+const __tmRunner = __rf(new URL('../../dist/tunnel-tm-runner.mjs', import.meta.url), 'utf8');
+const __pm = __rf(new URL('../../infrastructure/process-manager.mjs', import.meta.url), 'utf8');
+
+test('tunnelmole تعمل في عملية فرعية معزولة (لا تقتل البوت)', () => {
+  assert.match(__tmRunner, /export|import \{ tunnelmole \}/);
+  assert.match(__tunnel, /\[TUNNEL-ISOLATE\]/);
+  assert.match(__tunnel, /fork\(runner, \[String\(port\)\]/);
+  // لا نداء مباشر للمكتبة داخل عملية البوت
+  assert.doesNotMatch(__tunnel, /await import\("tunnelmole"\)/);
+  assert.doesNotMatch(__tunnel, /\btm\(\{ port \}\)/);
+});
+
+test('حصة المزود (10 أنفاق/ساعة) تُفعّل تهدئة محفوظة على القرص', () => {
+  assert.match(__tunnel, /10 tunnels per hour/);
+  assert.match(__tunnel, /_writeCooldown\(65, "quota"\)/);
+  assert.match(__tunnel, /tunnel-cooldown\.json/);
+  assert.match(__tunnel, /_cooldownActive\(\)/);
+});
+
+test('Cloudflare أولاً (بلا حصة) ثم tunnelmole', () => {
+  const cfAt = __tunnel.indexOf("محاولة إنشاء رابط عام عبر Cloudflare");
+  const tmAt = __tunnel.indexOf("محاولة tunnelmole");
+  assert.ok(cfAt > 0 && tmAt > cfAt, "الترتيب يجب أن يكون Cloudflare ثم tunnelmole");
+});
+
+test('سقف إعادة إنشاء النفق 3 مرات في الساعة', () => {
+  assert.match(__tunnel, /\[TUNNEL-BUDGET\]/);
+  assert.match(__tunnel, /_recreateAt\.length >= 3/);
+});
+
+test('البوت لا يتوقف نهائياً بعد 10 محاولات', () => {
+  assert.match(__pm, /\[NEVER-DIE\]/);
+  assert.match(__pm, /انتظار 5 دقائق ثم إعادة المحاولة من جديد/);
+  assert.doesNotMatch(__pm, /حُدِّد الحد الأقصى \(\$\{MAX_RESTARTS} إعادة\) — إيقاف نهائي/);
+});

@@ -6,7 +6,8 @@
 import { existsSync, mkdirSync, chmodSync, createWriteStream, statSync, renameSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { spawn } from "child_process";
+import { spawn, fork } from "child_process";
+import { readFileSync, writeFileSync } from "fs";
 import net from "net";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -123,59 +124,79 @@ function _tryCloudflare(port, log, timeoutMs = 30000) {
   });
 }
 
-// ─── المزود الأول: tunnelmole (يعمل عبر WSS منفذ 443 — الأكثر توافقاً) ──
+// ─── tunnelmole (WSS منفذ 443 — الأكثر توافقاً) ──────────────────────
+// [TUNNEL-ISOLATE] تعمل دائماً في عملية فرعية: مكتبتها تستدعي process.exit(1)
+// عند أي خطأ (الحصة 10 أنفاق/ساعة مثلاً) وكان ذلك يقتل البوت نفسه برمز 1.
 let _tmProc = null;
+const COOLDOWN_FILE = join(__dirname, "..", "data", "tunnel-cooldown.json");
+function _readCooldown() {
+  try { const j = JSON.parse(readFileSync(COOLDOWN_FILE, "utf8")); return Number(j?.until) || 0; } catch { return 0; }
+}
+function _writeCooldown(minutes, reason) {
+  try {
+    mkdirSync(dirname(COOLDOWN_FILE), { recursive: true });
+    writeFileSync(COOLDOWN_FILE, JSON.stringify({ until: Date.now() + minutes * 60000, reason, at: new Date().toISOString() }), { mode: 0o600 });
+  } catch { }
+}
+function _cooldownActive() {
+  const until = _readCooldown();
+  return until > Date.now() ? Math.ceil((until - Date.now()) / 60000) : 0;
+}
+
 async function _tryTunnelmole(port, log) {
-  // 1) كمكتبة مثبتة (الأسرع)
-  try {
-    const mod = await import("tunnelmole");
-    const tm = mod.tunnelmole || mod.default;
-    if (typeof tm === "function") {
-      const url = await Promise.race([
-        tm({ port }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 45000)),
-      ]);
-      if (url) return String(url).replace(/^http:/, "https:");
-    }
-  } catch {}
-  // [RAM-LEAN-TUNNEL] npx يشغّل عملية Node إضافية (~120-180MB) — على حاوية 512MB
-  // هذا وحده كان يرفع الاستهلاك لحد القتل. إن كانت أداة cloudflared الثنائية موجودة
-  // (خفيفة جداً) نترك المزود التالي يجربها بدل npx.
-  let cfReady = false;
-  try { cfReady = existsSync(BIN_PATH) && statSync(BIN_PATH).size > 10_000_000; } catch { }
-  if (cfReady) {
-    log("[TUNNEL] tunnelmole (مكتبة) غير مثبت — استخدام cloudflared الخفيف بدل عملية npx إضافية");
+  const waitMin = _cooldownActive();
+  if (waitMin) {
+    log(`[TUNNEL] tunnelmole في فترة تهدئة (${waitMin} دقيقة متبقية) — نستخدم مزوداً آخر`);
     return null;
   }
-  // 2) عبر npx (لا يتطلب تثبيتاً مسبقاً — فقط Node + npm)
-  try {
-    log("[TUNNEL] تشغيل tunnelmole عبر npx — عملية Node إضافية (~150MB رام)");
-    return await new Promise((resolve) => {
-      const p = spawn("npx", ["-y", "tunnelmole", String(port)], {
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, NODE_OPTIONS: "" },
-      });
-      let done = false;
-      const finish = (v, keep) => {
-        if (done) return;
-        done = true;
-        if (!keep) { try { p.kill(); } catch {} }
-        resolve(v);
-      };
-      const timer = setTimeout(() => finish(null, false), 90000);
-      const onData = (b) => {
-        const m = b.toString().match(/https:\/\/[a-z0-9-]+(?:-ip-[0-9-]+)?\.tunnelmole\.net/);
-        if (m) { clearTimeout(timer); _tmProc = p; finish(m[0], true); }
-      };
-      p.stdout.on("data", onData);
-      p.stderr.on("data", onData);
-      p.on("exit", () => { clearTimeout(timer); finish(null, false); });
-      p.on("error", () => { clearTimeout(timer); finish(null, false); });
+  const runner = join(__dirname, "tunnel-tm-runner.mjs");
+  if (!existsSync(runner)) { log("[TUNNEL] مشغّل tunnelmole غير موجود"); return null; }
+  return await new Promise((resolve) => {
+    let done = false;
+    const finish = (value, keep) => {
+      if (done) return;
+      done = true;
+      if (!keep) { try { child.kill(); } catch { } }
+      resolve(value);
+    };
+    // [TUNNEL-ISOLATE] عملية فرعية معزولة — موتها لا يقتل البوت
+    const child = fork(runner, [String(port)], { stdio: ["ignore", "pipe", "pipe", "ipc"], execArgv: [] });
+    _tmProc = child;
+    let out = "";
+    const onOut = (b) => {
+      const text = b.toString();
+      out += text;
+      // الحصة المجانية: 10 أنفاق/ساعة ⇒ تهدئة ساعة كاملة بدل حرق الحصة كل تشغيل
+      if (/10 tunnels per hour|upgrade\/run-more-tunnels-faster|tunnel limit/i.test(out)) {
+        _writeCooldown(65, "quota");
+        log("[TUNNEL] تجاوزت حصة tunnelmole المجانية (10 أنفاق/ساعة) — تهدئة ساعة والتحويل لمزود آخر");
+        finish(null, false);
+        return;
+      }
+      const m = text.match(/https:\/\/[a-z0-9-]+(?:-[-z0-9]+)?\.tunnelmole\.net/);
+      if (m) finish(m[0], true);
+    };
+    child.stdout?.on("data", onOut);
+    child.stderr?.on("data", onOut);
+    child.on("message", (msg) => {
+      if (msg?.type === "url" && msg.url) {
+        const u = String(msg.url).replace(/^http:/, "https:");
+        finish(u, true);
+      } else if (msg?.type === "error") {
+        if (/limit|quota|tunnel/i.test(String(msg.message))) _writeCooldown(65, "quota");
+        finish(null, false);
+      }
     });
-  } catch (e) {
-    log(`[TUNNEL] فشل tunnelmole: ${e?.message}`);
-    return null;
-  }
+    child.on("exit", (code) => {
+      if (!done) {
+        if (/10 tunnels per hour|run-more-tunnels-faster/i.test(out)) _writeCooldown(65, "quota");
+        log(`[TUNNEL] tunnelmole (عملية فرعية) خرج بالرمز ${code} — لن يتأثر البوت`);
+      }
+      finish(null, false);
+    });
+    child.on("error", () => finish(null, false));
+    setTimeout(() => finish(null, false), 90_000).unref?.();
+  });
 }
 
 // ─── المزود الاحتياطي: localtunnel (بروتوكول مبني ببايثات Node فقط) ──
@@ -223,6 +244,7 @@ async function _tryLocaltunnel(port, log) {
 // «No matching tunnelmole domain». لذلك نفحص كل 3 دقائق ونعيد الإنشاء عند الفشل.
 let _healthTimer = null;
 let _healthFails = 0;
+let _recreateAt = [];
 let _lastProvider = null;
 export function tunnelHealth() { return { url: _url, provider: _lastProvider, fails: _healthFails }; }
 
@@ -247,6 +269,15 @@ function _startTunnelWatch(getArgs) {
     try { logger?.warn?.(`[TUNNEL] الرابط العام لا يستجيب (${_healthFails}/2): ${url}`); } catch { }
     if (_healthFails < 2) return;
     _healthFails = 0;
+    // [TUNNEL-BUDGET] سقف 3 إعادات في الساعة — إعادة الإنشاء باستهلاك غير محدود
+    // تحرق حصة المزود وتدخل في حلقة (10 أنفاق/ساعة في tunnelmole المجاني).
+    const now = Date.now();
+    _recreateAt = _recreateAt.filter((t) => now - t < 60 * 60 * 1000);
+    if (_recreateAt.length >= 3) {
+      try { logger?.warn?.("[TUNNEL] تم استهلاك سقف إعادة إنشاء النفق لهذه الساعة — المحاولة لاحقاً"); } catch { }
+      return;
+    }
+    _recreateAt.push(now);
     try { logger?.warn?.("[TUNNEL] إعادة إنشاء النفق برابط جديد (الرابط السابق ميت)"); } catch { }
     try { _tmProc?.kill?.(); } catch { }
     try { _cfProc?.kill?.(); } catch { }
@@ -272,9 +303,22 @@ export async function startTunnel(port, logger, onUrl) {
       return envUrl;
     }
 
-    // 1) tunnelmole أولاً — يعمل عبر WSS على منفذ 443 (يمر من أي جدار حماية)
-    //    بدون صفحة وسيطة وبدون كلمة مرور — مثالي لزر Telegram WebApp
-    log(`[TUNNEL] محاولة إنشاء رابط عام عبر tunnelmole...`);
+    // 1) Cloudflare أولاً — أداة ثنائية خفيفة **بلا حصة شهرية** (tunnelmole المجاني
+    //    10 أنفاق/ساعة فقط، ومع كل إعادة تشغيل تُستهلك واحدة ⇒ يتوقف البوت).
+    log(`[TUNNEL] محاولة إنشاء رابط عام عبر Cloudflare...`);
+    const cfUrl = await _tryCloudflare(port, log);
+    if (cfUrl) {
+      _setUrl(cfUrl, "cloudflare", log, onUrl);
+      _cfProc?.on("exit", () => {
+        _url = null; globalThis.__FW_PUBLIC_URL = null; _starting = false;
+        log("[TUNNEL] النفق أُغلق — إعادة تشغيل خلال 5 ثوانٍ...");
+        setTimeout(() => startTunnel(port, logger, onUrl), 5000);
+      });
+      return cfUrl;
+    }
+
+    // 2) tunnelmole (عملية فرعية معزولة — لا تقتل البوت) مع احترام حصة المزود
+    log(`[TUNNEL] Cloudflare غير متاح — محاولة tunnelmole...`);
     const tmUrl = await _tryTunnelmole(port, log);
     if (tmUrl) {
       _setUrl(tmUrl, "tunnelmole", log, onUrl);
@@ -284,20 +328,6 @@ export async function startTunnel(port, logger, onUrl) {
         setTimeout(() => startTunnel(port, logger, onUrl), 5000);
       });
       return tmUrl;
-    }
-
-    // 2) Cloudflare (بدون صفحة وسيطة — يتطلب منفذ 7844 صادراً)
-    log(`[TUNNEL] tunnelmole غير متاح — محاولة Cloudflare...`);
-    const cfUrl = await _tryCloudflare(port, log);
-    if (cfUrl) {
-      _setUrl(cfUrl, "cloudflare", log, onUrl);
-      // مراقبة انهيار النفق وإعادة التشغيل
-      _cfProc?.on("exit", () => {
-        _url = null; globalThis.__FW_PUBLIC_URL = null; _starting = false;
-        log("[TUNNEL] النفق أُغلق — إعادة تشغيل خلال 5 ثوانٍ...");
-        setTimeout(() => startTunnel(port, logger, onUrl), 5000);
-      });
-      return cfUrl;
     }
 
     // 3) الاحتياطي الأخير: localtunnel

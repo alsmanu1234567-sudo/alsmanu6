@@ -125,15 +125,13 @@ test("قارئ anon موجود ويعيد رقماً منطقياً", () => {
   assert.ok(typeof anon === "number" && anon >= 0);
 });
 
-test("النفق لا يشغّل عملية npx إضافية عندما تكون أداة cloudflared جاهزة", async () => {
+test("النفق بلا عمليات npm/npx ثقيلة (tunnelmole في عملية فرعية أو cloudflared)", async () => {
   const fs = await import("node:fs");
   const src = fs.readFileSync(new URL("../../dist/tunnel.mjs", import.meta.url), "utf8");
-  const at = src.indexOf("[RAM-LEAN-TUNNEL]");
-  assert.ok(at > 0, "غياب مسار النفق الخفيف");
-  const slice = src.slice(at, at + 700);
-  assert.match(slice, /return null/);
-  assert.ok(src.indexOf("[RAM-LEAN-TUNNEL]") < src.indexOf('spawn("npx"'));
-  // tunnelmole كمكتبة (اختياري) لتفادي العملية الإضافية
+  // لم يبقَ أي مسار يشغّل npx (كان يكلّف ~150MB)
+  assert.doesNotMatch(src, /spawn\("npx"/, "لا يجوز تشغيل npx");
+  assert.match(src, /fork\(runner/, "tunnelmole يجب أن تعمل في عملية فرعية معزولة");
+  // tunnelmole مكتبة اختيارية (لا تُفشل الإقلاع)
   const pkg = JSON.parse(fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
   assert.ok(pkg.optionalDependencies?.tunnelmole, "tunnelmole يجب أن تكون اختيارية");
   assert.ok(!pkg.dependencies?.tunnelmole, "لا يجب أن تكون إلزامية حتى لا توقف الإقلاع");
