@@ -24,6 +24,9 @@ import {
 } from "./external-deps.mjs";
 
 const BASE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// [PATH-PORTABILITY] نسجّل المجلد الذي شُغّل منه المشغّل لرصد تشغيله من مسار قديم
+const INHERITED_CWD = (() => { try { return process.cwd(); } catch { return ""; } })();
+process.env.BOT_START_CWD = INHERITED_CWD;
 // [SMART-PATHS] نكتشف مجلد المكتبات من المسار الفعلي (مهما تغيّر اسم المجلد أو الاستضافة)
 const EXTERNAL_INFO = (() => {
   try { return describeExternalDeps(BASE_DIR); } catch (error) { return { project: BASE_DIR, dir: getExternalDepsDir(BASE_DIR), source: "fallback-after-error", score: 0, error: String(error?.message || error) }; }
@@ -31,6 +34,9 @@ const EXTERNAL_INFO = (() => {
 const EXTERNAL_DEPS_DIR = getExternalDepsDir(BASE_DIR);
 // نُصدّر المسار للأبناء (البوت + اللوحة) حتى تستخدم نفس المخزن
 process.env.BOT_EXTERNAL_DEPS_DIR = EXTERNAL_DEPS_DIR;
+// [PATH-PORTABILITY] نُثبّت مسار المشروع في البيئة كي تستخدمه اللوحة والأدوات
+// بدل process.cwd() الذي قد يشير لمجلد استضافة قديمة.
+process.env.BOT_BASE_DIR = BASE_DIR;
 const EXTERNAL_NODE_MODULES_DIR = join(EXTERNAL_DEPS_DIR, "node_modules");
 const NO_INSTALL = process.argv.includes("--no-install");
 const RUNTIME_DIR = join(BASE_DIR, ".runtime");
@@ -200,6 +206,14 @@ async function main() {
   process.once("exit", () => rmSync(PID_FILE, { force: true }));
 
   banner("WhatsApp Bot Pro — Safe Bootstrap");
+  // [PATH-PORTABILITY] نطبع تخطيط المسارات بوضوح حتى لا يظهر «مسار استضافة قديمة» بالخطأ
+  try {
+    const inheritedCwd = String(process.env.BOT_START_CWD ?? process.cwd());
+    ok(`مجلد المشروع الحالي: ${BASE_DIR}`);
+    if (inheritedCwd && resolve(inheritedCwd) !== BASE_DIR) {
+      wrn(`مجلد التشغيل الموروث (${inheritedCwd}) مختلف عن المشروع — سيُستخدم مسار المشروع في كل الملفات واللوحة.`);
+    }
+  } catch { }
   ok(`مجلد البوت: ${BASE_DIR}`);
   ok(`مجلد المكتبات الخارجي: ${EXTERNAL_DEPS_DIR} (مصدر الاكتشاف: ${EXTERNAL_INFO.source}${EXTERNAL_INFO.score ? ` · الثقة ${EXTERNAL_INFO.score}` : ""})`);
   prepareExternalNodeModules(BASE_DIR, EXTERNAL_DEPS_DIR);

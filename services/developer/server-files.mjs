@@ -5,7 +5,8 @@ import {createHash,randomBytes} from 'node:crypto';
 
 // Operates with the bot's OS permissions; never follows a final-component symlink.
 // The visual manager additionally prevents writes to known credential/session paths.
-export function createServerFiles({home=process.cwd()}={}){
+const DEFAULT_HOME=process.env.BOT_BASE_DIR||process.cwd();
+export function createServerFiles({home=DEFAULT_HOME}={}){
  const start=path.resolve(home);
  const isSensitive=p=>/(^|\/)(?:wa-sessions|bot-data|\.git|node_modules|\.env(?:\.[^/]*)?|config\.json|creds\.json|auth_info|auth-state|sessions?)(\/|$)/i.test(p)||/(^|\/)data\/poof-api-key\.txt$/i.test(p)||/(^|\/)(?:core\/config\.mjs|dist\/index\.mjs)$/i.test(p);
  const validate=p=>{if(typeof p!=='string'||p.length>4096||p.includes('\0'))throw Error('المسار غير صالح');return path.resolve(p||start)};

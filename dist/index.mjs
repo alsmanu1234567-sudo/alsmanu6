@@ -1,3 +1,19 @@
+import { dirname as __botRootDirname, resolve as __botRootResolve, join as __botRootJoin } from "node:path";
+import { fileURLToPath as __botRootFileUrl, pathToFileURL as __botRootUrlTo } from "node:url";
+// ═══ [BOT_ROOT_v8] جذر المشروع الحقيقي — بديل process.cwd() ═══
+// كان الاعتماد على cwd يجعل البوت يقرأ بيانات ومسارات «الاستضافة القديمة»
+// عندما يُشغَّل من مجلد مختلف. الآن الجذر يُحسم مرة واحدة بشكل موثوق.
+var BOT_ROOT = (() => {
+  try {
+    if (process.env.BOT_BASE_DIR) return __botRootResolve(process.env.BOT_BASE_DIR);
+    const here = __botRootDirname(__botRootFileUrl(import.meta.url));
+    return __botRootResolve(here, "..");
+  } catch { return process.cwd(); }
+})();
+var BOT_DATA_DIR = __botRootJoin(BOT_ROOT, "bot-data");
+var BOT_WA_SESSIONS_DIR = __botRootJoin(BOT_ROOT, "wa-sessions");
+var BOT_CONFIG_FILE = __botRootJoin(BOT_ROOT, "config.json");
+process.env.BOT_BASE_DIR = BOT_ROOT;
 import {sendCarouselAutoReply,carouselAnswer,carouselFallback} from '../services/auto-reply-carousel.mjs';
 import {waitForTyping,typingSettings,startTyping} from '../services/reply-typing.mjs';
 import {deleteSentMessages} from '../services/fast-message-delete.mjs';
@@ -124186,7 +124202,7 @@ var init_database = __esm({
     import_mongoose = __toESM(require_mongoose2(), 1);
     init_logger();
     MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/whatsapp-bot-pro";
-    DATA_DIR = path.join(process.cwd(), "bot-data");
+    DATA_DIR = BOT_DATA_DIR;
     USERS_FILE = path.join(DATA_DIR, "users.json");
     REPLIES_FILE = path.join(DATA_DIR, "replies.json");
     POINTS_FILE = path.join(DATA_DIR, "points.json");
@@ -125439,7 +125455,7 @@ var init_number_manager = __esm({
   "src/bot/core/number-manager.ts"() {
     "use strict";
     init_logger();
-    DATA_DIR2 = path2.join(process.cwd(), "bot-data");
+    DATA_DIR2 = BOT_DATA_DIR;
     NUMBERS_FILE = path2.join(DATA_DIR2, "numbers.json");
     db = {};
     load();
@@ -297003,7 +297019,7 @@ var init_baileys_session = __esm({
     userSentMsgCache = /* @__PURE__ */ new Map();
     // [FIX-CACHE-PERF] Set موازٍ لـ O(1) dedup بدلاً من Array.some() O(n*m)
     userSentMsgIdSet = /* @__PURE__ */ new Map();
-    WA_SESSIONS_ROOT = path3.join(process.cwd(), "wa-sessions");
+    WA_SESSIONS_ROOT = BOT_WA_SESSIONS_DIR;
   }
 });
 
@@ -297790,7 +297806,7 @@ var init_text_editor = __esm({
   "src/bot/core/text-editor.ts"() {
     "use strict";
     init_logger();
-    DATA_DIR3 = path4.join(process.cwd(), "bot-data");
+    DATA_DIR3 = BOT_DATA_DIR;
     TEXTS_FILE = path4.join(DATA_DIR3, "custom-texts.json");
     texts = {};
     load2();
@@ -297882,7 +297898,7 @@ var init_channel_guard = __esm({
     "use strict";
     init_logger();
     init_constants();
-    DATA_DIR4 = path5.join(process.cwd(), "bot-data");
+    DATA_DIR4 = BOT_DATA_DIR;
     GUARD_FILE = path5.join(DATA_DIR4, "channel-guard.json");
     config = {
       enabled: false,
@@ -300114,7 +300130,7 @@ async function handleGithubCallback(bot2, chatId, userId, data) {
       const fsLib = await import("fs");
       const pathLib = await import("path");
       const cryptoLib = await import("crypto");
-      const dataDir = pathLib.join(process.cwd(), "bot-data");
+      const dataDir = pathLib.join(BOT_ROOT, "bot-data");
       if (!fsLib.existsSync(dataDir)) throw new Error("لا يوجد مجلد bot-data/");
       // التحقق من وجود المستودع أو إنشاؤه
       try { await ghFetch(`/repos/${fullName}`); } catch(_) {
@@ -300151,7 +300167,7 @@ async function handleGithubCallback(bot2, chatId, userId, data) {
         await new Promise(r => setTimeout(r, 200));
       }
       // رفع ملف الجلسات (wa-sessions) بشكل مضغوط
-      const waDir = pathLib.join(process.cwd(), "wa-sessions");
+      const waDir = pathLib.join(BOT_ROOT, "wa-sessions");
       if (fsLib.existsSync(waDir)) {
         try {
           const archiver = await import("archiver");
@@ -300216,7 +300232,7 @@ async function handleGithubCallback(bot2, chatId, userId, data) {
       let restored = 0, failed = 0;
       try {
         const files = await ghFetch(`/repos/${fullName}/contents/bot-data-enc`);
-        const dataDir = pathLib.join(process.cwd(), "bot-data");
+        const dataDir = pathLib.join(BOT_ROOT, "bot-data");
         fsLib.mkdirSync(dataDir, { recursive: true });
         for (const f of (files || [])) {
           try {
@@ -300265,7 +300281,7 @@ async function handleGithubCallback(bot2, chatId, userId, data) {
       const fsLib = await import("fs");
       const pathLib = await import("path");
       const cryptoLib = await import("crypto");
-      const dataDir = pathLib.join(process.cwd(), "bot-data");
+      const dataDir = pathLib.join(BOT_ROOT, "bot-data");
       if (!fsLib.existsSync(dataDir)) throw new Error("لا يوجد مجلد bot-data/");
       // التحقق من وجود المستودع أو إنشاؤه
       try { await ghFetch(`/repos/${fullName}`); } catch(_) {
@@ -300302,7 +300318,7 @@ async function handleGithubCallback(bot2, chatId, userId, data) {
         await new Promise(r => setTimeout(r, 200));
       }
       // رفع ملف الجلسات (wa-sessions) بشكل مضغوط
-      const waDir = pathLib.join(process.cwd(), "wa-sessions");
+      const waDir = pathLib.join(BOT_ROOT, "wa-sessions");
       if (fsLib.existsSync(waDir)) {
         try {
           const archiver = await import("archiver");
@@ -300367,7 +300383,7 @@ async function handleGithubCallback(bot2, chatId, userId, data) {
       let restored = 0, failed = 0;
       try {
         const files = await ghFetch(`/repos/${fullName}/contents/bot-data-enc`);
-        const dataDir = pathLib.join(process.cwd(), "bot-data");
+        const dataDir = pathLib.join(BOT_ROOT, "bot-data");
         fsLib.mkdirSync(dataDir, { recursive: true });
         for (const f of (files || [])) {
           try {
@@ -300416,7 +300432,7 @@ async function handleGithubCallback(bot2, chatId, userId, data) {
     try {
       const fsLib = await import("fs");
       const pathLib = await import("path");
-      const botDir = process.cwd();
+      const botDir = BOT_ROOT;
       const SKIP = new Set([".git", "node_modules", ".cache", ".local", ".upm", "__pycache__", ".pythonlibs", "venv"]);
       const EXT_SKIP = new Set([".log", ".tmp", ".pyc"]);
       const allFiles = [];
@@ -300734,7 +300750,7 @@ async function handleGithubTextInput(bot2, chatId, userId, text, state) {
         await ghFetch("/user/repos", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ name: rname2, private: true, auto_init: true }) });
       }
       const fsQ = await import("fs"); const pathQ = await import("path");
-      const botDirQ = process.cwd();
+      const botDirQ = BOT_ROOT;
       const SKIP_Q = new Set([".git","node_modules",".cache",".local",".upm","__pycache__","wa-sessions"]);
       const allFilesQ = [];
       function walkQ(dir) { let e2; try { e2 = fsQ.default.readdirSync(dir); } catch { return; } for (const en of e2) { if (SKIP_Q.has(en)) continue; const full = pathQ.default.join(dir,en); let st2; try { st2 = fsQ.default.statSync(full); } catch { continue; } if (st2.isDirectory()) walkQ(full); else if (st2.size <= 49*1024*1024) allFilesQ.push({ rel: pathQ.default.relative(botDirQ,full).split("\\").join("/"), full }); } }
@@ -301079,7 +301095,7 @@ var init_github = __esm({
     function _ghSaveToken(rawToken) {
       try {
         const { readFileSync: _rfs, writeFileSync: _wfs, existsSync: _efs } = require("fs");
-        const cfgPath = require("path").join(process.cwd(), "config.json");
+        const cfgPath = require("path").join(BOT_ROOT, "config.json");
         let cfg = {};
         if (_efs(cfgPath)) { try { cfg = JSON.parse(_rfs(cfgPath, "utf8")); } catch {} }
         cfg.GITHUB_TOKEN_ENC = _ghEncodeToken(rawToken);
@@ -301093,7 +301109,7 @@ var init_github = __esm({
     function _ghDeleteToken() {
       try {
         const { readFileSync: _rfs, writeFileSync: _wfs, existsSync: _efs } = require("fs");
-        const cfgPath = require("path").join(process.cwd(), "config.json");
+        const cfgPath = require("path").join(BOT_ROOT, "config.json");
         if (_efs(cfgPath)) {
           let cfg = {};
           try { cfg = JSON.parse(_rfs(cfgPath, "utf8")); } catch {}
@@ -301143,7 +301159,7 @@ var init_github = __esm({
 
         function _ghCfgPath() {
           // ابحث عن config.json في مجلد العمل أو مجل�� الملف
-          const cwd  = _path2.join(process.cwd(), "config.json");
+          const cwd  = _path2.join(BOT_ROOT, "config.json");
           const here = _path2.join(_path2.dirname(process.argv[1] || ""), "config.json");
           if (_fs2.existsSync(cwd))  return cwd;
           if (_fs2.existsSync(here)) return here;
@@ -301423,7 +301439,7 @@ async function openServerControl(bot2,chatId,userId,minutes){
   if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId)){await bot2.sendMessage(chatId,'هذه الخدمة للمطور في المحادثة الخاصة فقط.');return;}
   const dir=process.env.BOT_SERVER_CONTROL_DIR;if(!dir){await bot2.sendMessage(chatId,'لوحة السيرفر غير جاهزة: شغّل البوت عبر bootstrap/index.mjs أولاً.');return;}
   await bot2.sendMessage(chatId,'⏳ جارٍ تشغيل لوحة السيرفر وإنشاء رابط مستقل، قد يستغرق دقيقة أو أكثر.');
-  try{const {launchServerControl}=await import('../services/developer/server-control-launcher.mjs');const result=await launchServerControl({directory:dir,base:process.cwd(),minutes});await bot2.sendMessage(chatId,'🔴 رابط لوحة السيرفر المستقلة؛ لا تشاركه. ينتهي في '+new Date(result.expiry).toLocaleString('ar')+'.'+(result.provider==='localtunnel'&&result.password?'\nإذا ظهرت صفحة حماية النفق أدخل هذا العنوان: '+result.password:''),{reply_markup:{inline_keyboard:[[{text:'🖥 فتح لوحة السيرفر',url:result.url}],[{text:'📋 إرسال الرابط كنص',callback_data:'dev_serverlink_text'}],[{text:'🔒 إيقاف الرابط',callback_data:'dev_serverlink_stop'}]]}})}catch(e){await bot2.sendMessage(chatId,'تعذر إنشاء رابط السيرفر: '+String(e.message||e).slice(0,300));}
+  try{const {launchServerControl}=await import('../services/developer/server-control-launcher.mjs');const result=await launchServerControl({directory:dir,base:process.env.BOT_BASE_DIR||process.cwd(),minutes});await bot2.sendMessage(chatId,'🔴 رابط لوحة السيرفر المستقلة؛ لا تشاركه. ينتهي في '+new Date(result.expiry).toLocaleString('ar')+'.'+(result.provider==='localtunnel'&&result.password?'\nإذا ظهرت صفحة حماية النفق أدخل هذا العنوان: '+result.password:''),{reply_markup:{inline_keyboard:[[{text:'🖥 فتح لوحة السيرفر',url:result.url}],[{text:'📋 إرسال الرابط كنص',callback_data:'dev_serverlink_text'}],[{text:'🔒 إيقاف الرابط',callback_data:'dev_serverlink_stop'}]]}})}catch(e){await bot2.sendMessage(chatId,'تعذر إنشاء رابط السيرفر: '+String(e.message||e).slice(0,300));}
 }
 async function sendServerControlLinkText(bot2,chatId,userId){if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId))return;try{const dir=process.env.BOT_SERVER_CONTROL_DIR;if(!dir)throw Error('لوحة السيرفر غير مهيأة');const {getServerControlLink}=await import('../services/developer/server-control-launcher.mjs');const url=await getServerControlLink(dir);await bot2.sendMessage(chatId,url?'🔐 رابط التحكم الكامل؛ لا تشاركه:\n'+url:'لا يوجد رابط صالح محفوظ؛ أنشئ رابطاً جديداً.',{disable_web_page_preview:true})}catch(e){await bot2.sendMessage(chatId,'تعذر إرسال الرابط: '+e.message)}}
 function createDevDiagService() {
@@ -301907,7 +301923,7 @@ var require_depd = __commonJS({
   "../../node_modules/.pnpm/depd@2.0.0/node_modules/depd/index.js"(exports2, module2) {
     var relative = __require("path").relative;
     module2.exports = depd;
-    var basePath = process.cwd();
+    var basePath = BOT_ROOT;
     function containsNamespace(str, namespace) {
       var vals = str.split(/[ ,]+/);
       var ns = String(namespace).toLowerCase();
@@ -325425,7 +325441,7 @@ async function startBot() {
   let savedToken = "";
   try {
     const { readFileSync } = await import("fs");
-    const raw = readFileSync("data/telegram_token.json", "utf8");
+    const raw = readFileSync(__botRootJoin(BOT_ROOT, "data", "telegram_token.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (parsed?.token && parsed.token.match(/^\d{8,12}:[\w-]{35,}$/)) {
       savedToken = parsed.token;
