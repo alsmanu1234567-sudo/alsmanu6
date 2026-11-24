@@ -293696,12 +293696,26 @@ async function _connectCodSession(userId, waSock, waJid, cleanPhone, key, isFirs
     }
   }
 }
+// [PAIRING-NO-NEW-CODE] لا نطلب كوداً جديداً إذا كانت الجلسة قد سُجّلت (creds.registered)
+// أو إذا كان الكود الحالي ما زال صالحاً — طلب كود جديد يُلغي الكود الذي يدخله المستخدم
+// ويترك هاتفه عالقاً على «جاري تسجيل الدخول».
+function _pairingNeedsNewCode(cur, authState) {
+  try { if (authState?.creds?.registered) return false; } catch { }
+  if (!cur?.pairingCode) return true;
+  return (Date.now() - (cur.codeAt || 0)) > 45e3;
+}
 async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId) {
   userId = userId || _userIdFromSessKey(sessKey); // [MULTI-NUM] المعرّف الحقيقي لتيليجرام
   const s = sessions.get(sessKey);
   if (!s || s.cancelled) return;
   if (_waConnecting.has(sessKey)) {
     try { logger.warn({ userId, sessKey }, "[WA] اتصال قيد التنفيذ لنفس الجلسة — تم تجاهل الطلب"); } catch { }
+    return;
+  }
+  // [PAIRING-SINGLE] سوكت ثانٍ لنفس الرقم أثناء الربط يُفسد مصافحة الجهاز ويترك
+  // واتساب على «جاري تسجيل الدخول» للأبد ⇒ لا نُنشئ واحداً وسوكت حيّ/قيد الربط.
+  if (s.sock && s.sockAt && Date.now() - s.sockAt < 120e3 && s.connState !== "close" && s.connState !== "closed") {
+    try { logger.warn({ userId, sessKey, connState: s.connState || null }, "[PAIRING-SINGLE] سوكت قائم — لن نُنشئ آخر"); } catch { }
     return;
   }
   _waConnecting.add(sessKey);
@@ -293719,6 +293733,7 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
     const { state: authState, saveCreds } = await useMultiFileAuthState2(authDir);
     const sock = makeBaileysSocket(authState);
     s.sock = sock;
+    s.sockAt = Date.now(); // [PAIRING-SINGLE] عمر السوكت لمنع الازدواج
     sessions.set(sessKey, s);
     _waConnecting.delete(sessKey);
     sock.ev.on("creds.update", saveCreds);
@@ -293773,13 +293788,24 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
           }
           return;
         }
+        // [PAIRING-515] بعد إدخال الكود، واتساب يغلق الاتصال بطلب «إعادة تشغيل» (515).
+        // هذا **نجاح جزئي** ويجب إعادة الاتصال بالبيانات المحفوظة فوراً وبدون طلب كود
+        // جديد — وإلا يبقى الهاتف على «جاري تسجيل الدخول» والكود المُدخل يُلغى.
+        if (statusCode === 515) {
+          cur.retries = 0;
+          cur.connState = "connecting";
+          sessions.set(sessKey, cur);
+          try { logger.info({ userId, sessKey }, "[PAIRING-515] واتساب يطلب إعادة الاتصال بعد الربط — اتصال فوري بدون كود جديد"); } catch { }
+          setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, false, userId), 2e3);
+          return;
+        }
         // [WA-NO-PINGPONG] تعارض 440: فاصل تصاعدي طويل بدل حلقة 5 ثوانٍ
         if (statusCode === 440) {
           cur.conflicts = (cur.conflicts || 0) + 1;
           sessions.set(sessKey, cur);
           const delayConflict = Math.min(15000 * cur.conflicts, 120000);
           try { logger.warn({ userId, sessKey, conflicts: cur.conflicts, delay: delayConflict }, "[WA] تعارض جلسة (440) — إعادة اتصال مؤجلة"); } catch { }
-          setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, !cur.pairingCode || (Date.now() - (cur.codeAt || 0) > 45e3), userId), delayConflict);
+          setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, _pairingNeedsNewCode(cur, authState), userId), delayConflict);
           return;
         }
         if (cur.retries < 15) {
@@ -293791,7 +293817,7 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
             : Math.min(cur.retries * 5e3, 6e4);
           logger.info({ userId, sessKey, retries: cur.retries, statusCode, delay: delay2 }, "Reconnecting pairing session");
           // [FIX-PAIRING-RETRY] إن لم يُسلَّم كود بعد → اطلب كوداً جديداً بدل اتصال بلا كود (يولّد QR)
-          setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, !cur.pairingCode || (Date.now() - (cur.codeAt || 0) > 45e3), userId), delay2);
+          setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, _pairingNeedsNewCode(cur, authState), userId), delay2);
         } else {
           if (botRef) await botRef.sendMessage(
             chatId,
@@ -293824,6 +293850,20 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
           _pairingCodeInFlight.delete(sessKey);
           try { logger.info({ userId, sessKey }, "[PAIRING] تم تسليم كود الربط"); } catch { }
         }
+        // [PAIRING-STUCK] لو لم يكتمل الاتصال بعد دقيقتين من تسليم الكود ⇒ تنبيه واضح
+        // بدل الصمت والانتظار الأبدي على «جاري تسجيل الدخول».
+        setTimeout(() => {
+          try {
+            const st = sessions.get(sessKey);
+            if (!st || st.cancelled || st.wasEverConnected || st.connState === "open") return;
+            if (botRef) {
+              botRef.sendMessage(Number(chatId), "\u231B *\u0644\u0645 \u064A\u0643\u062A\u0645\u0644 \u0627\u0644\u0631\u0628\u0637 \u0628\u0639\u062F*\n\n\u0625\u0630\u0627 \u0638\u0644 \u0648\u0627\u062A\u0633\u0627\u0628 \u0639\u0644\u0649 \u00AB\u062C\u0627\u0631\u064A \u062A\u0633\u062C\u064A\u0644 \u0627\u0644\u062F\u062E\u0648\u0644\u00BB \u0641\u0627\u0644\u0633\u0628\u0628 \u0623\u0646 \u0627\u0644\u0643\u0648\u062F \u0627\u0646\u062A\u0647\u062A \u0635\u0644\u0627\u062D\u064A\u062A\u0647 \u0642\u0628\u0644 \u0625\u062F\u062E\u0627\u0644\u0647 (60 \u062B\u0627\u0646\u064A\u0629 \u0641\u0642\u0637).\n\u0627\u0636\u063A\u0637 \u0627\u0644\u0632\u0631 \u0644\u0637\u0644\u0628 \u0643\u0648\u062F \u062C\u062F\u064A\u062F \u0648\u0623\u062F\u062E\u0644\u0647 \u0641\u0648\u0631\u0627\u064B \u2014 \u0644\u0627 \u062A\u063A\u0644\u0642 \u0627\u0644\u0635\u0641\u062D\u0629.", {
+                parse_mode: "Markdown",
+                reply_markup: { inline_keyboard: [[{ text: "\u{1F522} \u0643\u0648\u062F \u062C\u062F\u064A\u062F", callback_data: "connect_pairing" }]] }
+              }).catch(() => { });
+            }
+          } catch { }
+        }, 12e4).unref?.();
         if (botRef) {
           await botRef.sendMessage(
             chatId,
