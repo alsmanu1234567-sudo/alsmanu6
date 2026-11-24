@@ -330838,6 +330838,16 @@ async function main() {
           push();
         });
       } catch { }
+      // [TUNNEL-FAIL-HOOK] لو استُنفدت حصص كل المزودين: رسالة واحدة تشرح الوضع
+      // (بدون إرسال أي رابط) — ولا تُرسل إلا كل 30 دقيقة، والبوت يعمل عادي.
+      try {
+        t.setTunnelFailHook((reason) => {
+          const text = reason === "quota"
+            ? "\u26A0\uFE0F *\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u064A\u0628 \u0622\u0628 \u063A\u064A\u0631 \u0645\u062A\u0627\u062D \u0645\u0624\u0642\u062A\u0627\u064B*\n\n\u0627\u0633\u062A\u064F\u0646\u0641\u062F\u062A \u062D\u0635\u0629 \u0645\u0632\u0648\u062F \u0627\u0644\u0646\u0641\u0642 \u0627\u0644\u0645\u062C\u0627\u0646\u064A. \u0627\u0644\u0628\u0648\u062A \u064A\u0639\u0645\u0644 \u0639\u0627\u062F\u064A \u2014 \u0648\u0633\u064A\u0635\u0644\u0643 \u0627\u0644\u0631\u0627\u0628\u0637 \u062A\u0644\u0642\u0627\u0626\u064A\u0627\u064B \u0639\u0646\u062F \u062A\u062C\u062F\u062F\u0647\u0627."
+            : "\u26A0\uFE0F *\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u064A\u0628 \u0622\u0628 \u063A\u064A\u0631 \u0645\u062A\u0627\u062D \u0645\u0624\u0642\u062A\u0627\u064B*\n\n\u0645\u0632\u0648\u062F\u0648 \u0627\u0644\u0646\u0641\u0642 \u0645\u062D\u062C\u0648\u0628\u0648\u0646 \u062D\u0627\u0644\u064A\u0627\u064B. \u0627\u0644\u0628\u0648\u062A \u064A\u0639\u0645\u0644 \u0639\u0627\u062F\u064A \u2014 \u0648\u0633\u0646\u062D\u0627\u0648\u0644 \u0645\u062C\u062F\u062F\u0627\u064B \u0643\u0644 10 \u062F\u0642\u0627\u0626\u0642.";
+          try { if (botRef && DEVELOPER_ID) botRef.sendMessage(String(DEVELOPER_ID), text, { parse_mode: "Markdown", disable_web_page_preview: true }).catch(() => { }); } catch { }
+        });
+      } catch { }
       return t.startTunnel(port, logger);
     })
     .catch((e) => logger.warn({ err: e?.message }, "[TUNNEL] init failed"));

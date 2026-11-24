@@ -25,12 +25,19 @@ let _ltStopped = false;
 // [TUNNEL-STABLE] هوك يُبلَّغ عند تغيّر الرابط العام (بعد إعادة إنشاء النفق)
 let _urlHook = null;
 let _lastNotified = null;
+// [TUNNEL-FAIL-HOOK] إبلاغ واحد فقط عند تعذر كل المزودين (لا نرسل روابط وهمية)
+let _failHook = null;
+let _lastFailAt = 0;
+let _retryTimer = null;
 export function setTunnelUrlHook(fn) { _urlHook = typeof fn === "function" ? fn : null; }
+export function setTunnelFailHook(fn) { _failHook = typeof fn === "function" ? fn : null; }
 export function tunnelUrl() { return _url; }
 export function tunnelProvider() { return _provider; }
 export function tunnelPassword() { return _password; }
 
 function _setUrl(url, provider, log, onUrl) {
+  try { if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; } } catch { }
+  _lastFailAt = 0;
   _url = url;
   _provider = provider;
   _lastProvider = provider;
@@ -409,6 +416,22 @@ export async function startTunnel(port, logger, onUrl) {
     }
 
     log(`[TUNNEL] تعذر إنشاء رابط عام بأي طريقة — تحقق من اتصال الاستضافة بالإنترنت`);
+    // [TUNNEL-FAIL-HOOK] لا نرسل رابطاً وهمياً: نُبلّغ مرة واحدة (كل 30 دقيقة) أن
+    // الرابط غير متاح مؤقتاً، ونعيد المحاولة تلقائياً بعد 10 دقائق حتى يعود وحده.
+    try {
+      if (_failHook && Date.now() - _lastFailAt > 30 * 60 * 1000) {
+        _lastFailAt = Date.now();
+        const why = _cooldownActive("tunnelmole") || _cooldownActive("cloudflare") ? "quota" : "blocked";
+        Promise.resolve().then(() => _failHook(why)).catch(() => { });
+      }
+    } catch { }
+    if (!_retryTimer) {
+      _retryTimer = setTimeout(() => {
+        _retryTimer = null;
+        if (!_url) startTunnel(port, logger, onUrl).catch(() => { });
+      }, 10 * 60 * 1000);
+      if (typeof _retryTimer.unref === "function") _retryTimer.unref();
+    }
     return null;
   } catch (e) {
     log(`[TUNNEL] فشل إنشاء النفق: ${e?.message || e}`);

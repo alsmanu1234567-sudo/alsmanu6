@@ -94,3 +94,24 @@ test('تهدئة الحصص محفوظة لكل مزود على حدة', () => {
   assert.match(__tunnel, /providers\[provider\] = \{ until:/);
   assert.match(__tunnel, /_writeCooldown\(65, "quota"\)/);
 });
+
+// ── [TUNNEL-SKIP] نفاد حصة مزود ⇒ انتقال للمزود التالي بلا إرسال أي رابط ──
+test('نفاد الحصة ينتقل للمزود التالي بلا إعلان رابط', () => {
+  // عند اكتشاف الحصة: تهدئة + إرجاع null (لا رابط) ⇒ السلسلة تكمل
+  const quotaBlock = __tunnel.slice(__tunnel.indexOf("10 tunnels per hour"));
+  assert.match(quotaBlock, /_writeCooldown\(65, "quota"\)/);
+  assert.match(quotaBlock, /finish\(null, false\)/);
+  // المزود المتوقف/المحجوب لا يُعلن رابطاً
+  assert.match(__tunnel, /_cooldownActive\("cloudflare"\)/);
+});
+
+test('لا رابط وهمي عند فشل الجميع: إبلاغ واحد + إعادة محاولة تلقائية', () => {
+  assert.match(__tunnel, /setTunnelFailHook/);
+  assert.match(__tunnel, /_lastFailAt > 30 \* 60 \* 1000/);
+  assert.match(__tunnel, /_retryTimer = setTimeout/);
+  assert.match(__tunnel, /10 \* 60 \* 1000/);
+  assert.match(__index, /t\.setTunnelFailHook/);
+  // رسالة الفشل لا تحتوي رابطاً
+  const failBlock = __index.slice(__index.indexOf("t.setTunnelFailHook"));
+  assert.doesNotMatch(failBlock.slice(0, 1800), /https?:\/\//);
+});
