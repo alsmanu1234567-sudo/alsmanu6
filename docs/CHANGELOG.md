@@ -4,6 +4,28 @@
 
 ---
 
+## v8.18.0 — 2026-11-20 (تطبيق طريقة بوت STEAM في الربط)
+
+### ما قرأته في `BOT-STEAM` (STEAM-BOT-v3-6 → `whatsapp/connection.js`)
+```js
+if ((u.connection === 'connecting' || u.qr) && !state.creds.registered && !requestedPairing) {
+  requestedPairing = true;
+  const code = await sock.requestPairingCode(phone.replace(/\D/g, ''));
+}
+```
+ثلاث نقاط قوة طبّقتها حرفياً:
+
+| في STEAM | تطبيقه عندنا |
+|---|---|
+| الكود يُطلب **داخل حدث `connection.update`** لحظة `connecting` أو أول `qr` — لا بتأخير أعمى | **[STEAM-LEARN]** `_pairReady` promise يُحلّ من الحدث، ومهلة 20s كحد أقصى |
+| `makeCacheableSignalKeyStore(state.keys, logger)` | تُلفّ المفاتيح بنفس الدالة (أداء + منع «Key used already») |
+| لا إعادة طلب كود طالما `!creds.registered` فقط (بلا شرط زمني) | مطبَّق من 8.17.1 |
+| فلاغ `requestedPairing` يمنع كودين لنفس السوكت | `_pairingCodeInFlight` + هدّئة 20 ثانية بين الأكواد |
+
+### Added
+- 3 اختبارات في `tests/unit/wa-pairing-515.test.mjs` (المجموع 22).
+
+---
 ## v8.17.3 — 2026-11-20 (توثيق الرقم المُرسل + إرشاد «تحقق من صحة رقمك»)
 
 ### هل تغيّر الرقم؟

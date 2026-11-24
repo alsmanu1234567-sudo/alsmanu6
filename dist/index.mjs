@@ -293170,8 +293170,16 @@ async function _checkClockSkew() {
   } catch { return 0; }
 }
 function makeBaileysSocket(authState, version) {
+  // [STEAM-LEARN] بوت STEAM يلفّ مخزن المفاتيح بـmakeCacheableSignalKeyStore —
+  // يقلل قراءة/كتابة الملفات ويمنع أخطاء «Key used already» أثناء الربط.
+  let _auth = authState;
+  try {
+    if (typeof installedBaileys.makeCacheableSignalKeyStore === "function" && authState?.keys) {
+      _auth = { ...authState, keys: installedBaileys.makeCacheableSignalKeyStore(authState.keys, baileysLogger) };
+    }
+  } catch { _auth = authState; }
   return installedBaileys.makeWASocket({
-    auth: authState,
+    auth: _auth,
     ...(version ? { version } : {}),
     printQRInTerminal: false,
     browser: installedBaileys.Browsers.ubuntu("Chrome"),
@@ -293918,8 +293926,17 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
     sessions.set(sessKey, s);
     _waConnecting.delete(sessKey);
     sock.ev.on("creds.update", saveCreds);
+    // [STEAM-LEARN] كود الربط يُطلب **بعد** حدث الاتصال (connecting أو أول QR) لا بعد
+    // تأخير أعمى — وهذا ما يفعله بوت STEAM الناجح.
+    let _pairReadyResolve = null;
+    const _pairReady = new Promise((res) => { _pairReadyResolve = res; });
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect } = update;
+      try {
+        if ((connection === "connecting" || update?.qr) && !authState?.creds?.registered && _pairReadyResolve) {
+          const r = _pairReadyResolve; _pairReadyResolve = null; r();
+        }
+      } catch { }
       if (update?.qr) { try { const _q = sessions.get(sessKey); if (_q) { _q.sawQr = true; sessions.set(sessKey, _q); } } catch { } }
       // [WA-NO-PINGPONG] حدث من سوكت قديم ⇒ تجاهُله
       if (_sockIsStale(sessKey, sock)) {
@@ -294037,7 +294054,8 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
       }
     });
     if (isFirstTime && !authState.creds.registered) {
-      await _waitSocketOpen(sessKey, sock, 15e3); // [PAIRING-READY-EVENT]
+      // [STEAM-LEARN] ننتظر حدث الاتصال الحقيقي (connecting/QR) بدل التأخير أو readyState
+      await Promise.race([_pairReady, new Promise((r) => setTimeout(r, 20e3))]);
       if (sessions.get(sessKey)?.cancelled) return;
       // [FIX-DUP-CODE] لا تطلب كودين في نفس الوقت لنفس الرقم، ولا كوداً جديداً وكود سارٍ لم يمضِ 45ث
       {
@@ -294045,6 +294063,15 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
         if (_pairingCodeInFlight.has(sessKey)) { try { logger.info({ sessKey }, "[PAIRING] طلب كود قيد التنفيذ — تجاهل الطلب المكرر"); } catch { } return; }
         if (_cur0?.pairingCode && Date.now() - (_cur0.codeAt || 0) < 45e3) { try { logger.info({ sessKey }, "[PAIRING] كود سارٍ موجود — لا نرسل ثانياً"); } catch { } return; }
         _pairingCodeInFlight.add(sessKey);
+      }
+      // [STEAM-LEARN] لا نُغرق المستخدم بأكواد: إن أُصدر كود قبل أقل من 20 ثانية ننتظره
+      {
+        const _c = sessions.get(sessKey);
+        if (_c?.pairingCode && Date.now() - (_c.codeAt || 0) < 20e3) {
+          try { logger.info({ sessKey }, "[STEAM-LEARN] كود حديث أُرسل للتو — لا نطلب آخر"); } catch { }
+          _pairingCodeInFlight.delete(sessKey);
+          return;
+        }
       }
       try {
         const code = await _requestPairingCodeSafe(sock, cleanPhone, 8, 3000);

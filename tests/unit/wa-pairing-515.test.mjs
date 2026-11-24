@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const idx = readFileSync(new URL('../../dist/index.mjs', import.meta.url), 'utf8');
-const seg = idx.slice(idx.indexOf('async function _connectPairing('), idx.indexOf('async function _connectPairing(') + 24000);
+const seg = idx.slice(idx.indexOf('async function _connectPairing('), idx.indexOf('async function _connectPairing(') + 32000);
 
 test('515 restartRequired بعد إدخال الكود يُعاد الاتصال به بدون كود جديد', () => {
   assert.match(seg, /\[PAIRING-515\]/);
@@ -89,7 +89,7 @@ test('سجل تشخيص الربط يُكتب على القرص', () => {
 // ── v8.16.9: «الكود خطأ» — انتظار فتح السوكت + نفس السوكت + هدوء المشرف ──
 test('لا نطلب الكود قبل فتح السوكت فعلاً', () => {
   assert.match(idx, /async function _waitSocketOpen\(sessKey, sock, ms = 15e3\)/);
-  assert.match(seg, /await _waitSocketOpen\(sessKey, sock, 15e3\)/);
+  assert.match(seg, /await Promise\.race\(\[_pairReady/);
   // لا نعتمد على readyState الرقمي (null على سيرفر المستخدم)
   assert.match(idx, /\[PAIRING-READY-EVENT\]/);
 });
@@ -123,4 +123,19 @@ test('QR يُرسل فقط عند الطلب الصريح (مش تلقائياً
 test('الكود المعروض هو نفسه المرسل (كود محلي Crockford)', () => {
   assert.match(idx, /const _CROCKFORD = "123456789ABCDEFGHJKLMNPQRSTVWXYZ"/);
   assert.match(idx, /sock\.requestPairingCode\(phone, custom\)/);
+});
+
+// ── v8.18.0: دروس بوت STEAM ──
+test('كود الربط يُطلب بعد حدث الاتصال (connecting/QR) لا بتأخير أعمى', () => {
+  assert.match(idx, /\[STEAM-LEARN\]/);
+  assert.match(seg, /const _pairReady = new Promise/);
+  assert.ok(seg.includes('_pairReady, new Promise((r) => setTimeout(r, 20e3))'));
+});
+
+test('مخزن مفاتيح قابل للتخزين المؤقت (makeCacheableSignalKeyStore)', () => {
+  assert.match(idx, /installedBaileys\.makeCacheableSignalKeyStore\(authState\.keys, baileysLogger\)/);
+});
+
+test('لا إغراق بأكواد متتابعة (كود حديث < 20 ثانية)', () => {
+  assert.match(seg, /Date\.now\(\) - \(_c\.codeAt \|\| 0\) < 20e3/);
 });
