@@ -20,6 +20,31 @@ let _starting = false;
 let _cfProc = null;
 let _ltSockets = [];
 let _ltStopped = false;
+let _stopped = false;          // [TUNNEL-CLEANUP] بعد الإيقاف لا نعيد التشغيل أبداً
+let _restartTimer = null;
+
+/**
+ * [TUNNEL-CLEANUP] يوقف النفق وكل عملياته الفرعية.
+ * بدونه كان cloudflared يبقى حياً بعد إغلاق اللوحة ويستهلك الرام للأبد
+ * (كل نسخة تفتح اللوحة تضيف عشرات الميغابايت حتى يتوقف البوت).
+ */
+export function stopTunnel() {
+  _stopped = true;
+  _starting = false;
+  if (_restartTimer) { try { clearTimeout(_restartTimer); } catch {} _restartTimer = null; }
+  try { _cfProc?.kill("SIGKILL"); } catch {}
+  try { _tmProc?.kill("SIGKILL"); } catch {}
+  _cfProc = null; _tmProc = null;
+  for (const socket of _ltSockets) { try { socket.destroy(); } catch {} }
+  _ltSockets = [];
+  _url = null;
+  globalThis.__FW_PUBLIC_URL = null;
+}
+try {
+  process.once("exit", () => stopTunnel());
+  process.once("SIGTERM", () => { stopTunnel(); process.exit(0); });
+  process.once("SIGINT", () => { stopTunnel(); process.exit(0); });
+} catch {}
 
 export function tunnelUrl() { return _url; }
 export function tunnelProvider() { return _provider; }
@@ -188,6 +213,7 @@ async function _tryLocaltunnel(port, log) {
 // ─── نقطة الدخول ─────────────────────────────────────────────────────
 export async function startTunnel(port, logger, onUrl, verify = async () => true) {
   const log = (m) => { try { logger ? logger.info(m) : console.log(m); } catch { console.log(m); } };
+  if (_stopped) return null;
   if (_starting || _url) return _url;
   _starting = true;
   try {
@@ -200,9 +226,12 @@ export async function startTunnel(port, logger, onUrl, verify = async () => true
     else if (tmUrl) {
       _setUrl(tmUrl, "tunnelmole", log, onUrl);
       _tmProc?.on("exit", () => {
+        if (_stopped) return;
         _url = null; globalThis.__FW_PUBLIC_URL = null; _starting = false;
         log("[TUNNEL] النفق أُغلق — إعادة تشغيل خلال 5 ثوانٍ...");
-        setTimeout(() => startTunnel(port, logger, onUrl, verify), 5000);
+        if (_restartTimer) clearTimeout(_restartTimer);
+        _restartTimer = setTimeout(() => { if (!_stopped) startTunnel(port, logger, onUrl, verify); }, 5000);
+        if (typeof _restartTimer.unref === "function") _restartTimer.unref();
       });
       return tmUrl;
     }
@@ -215,9 +244,12 @@ export async function startTunnel(port, logger, onUrl, verify = async () => true
       _setUrl(cfUrl, "cloudflare", log, onUrl);
       // مراقبة انهيار النفق وإعادة التشغيل
       _cfProc?.on("exit", () => {
+        if (_stopped) return;
         _url = null; globalThis.__FW_PUBLIC_URL = null; _starting = false;
         log("[TUNNEL] النفق أُغلق — إعادة تشغيل خلال 5 ثوانٍ...");
-        setTimeout(() => startTunnel(port, logger, onUrl, verify), 5000);
+        if (_restartTimer) clearTimeout(_restartTimer);
+        _restartTimer = setTimeout(() => { if (!_stopped) startTunnel(port, logger, onUrl, verify); }, 5000);
+        if (typeof _restartTimer.unref === "function") _restartTimer.unref();
       });
       return cfUrl;
     }

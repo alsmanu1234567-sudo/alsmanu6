@@ -293,6 +293,21 @@ async function main() {
       getChild: () => runner.getChild(),
       logger: { info: (m) => ok(m), warn: (m) => wrn(m) },
       restart: (child) => { try { child.kill("SIGKILL"); } catch { } },
+      // [PANEL-RAM-GUARD] نوقف لوحة السيرفر أولاً (تحرير عملية Node + نفق) قبل أي إعادة تشغيل
+      beforeRestart: async () => {
+        const dir = process.env.BOT_SERVER_CONTROL_DIR;
+        if (!dir) return;
+        try {
+          const { stopServerControl, serverControlStatus } = await import("../services/developer/server-control-launcher.mjs");
+          const status = await serverControlStatus(dir);
+          if (status.running) {
+            wrn("[PANEL-RAM-GUARD] إيقاف لوحة السيرفر لتحرير الذاكرة");
+            await stopServerControl(dir);
+          }
+        } catch (error) {
+          wrn(`[PANEL-RAM-GUARD] تعذر إيقاف اللوحة: ${error?.message || error}`);
+        }
+      },
     });
     globalThis.__memoryGuard = guard;
     ok(`حارس الذاكرة يعمل — حد الذاكرة المكتشف: ${limitMb ? `${limitMb}MB` : "غير معروف (افتراضي 1200MB)"}`);

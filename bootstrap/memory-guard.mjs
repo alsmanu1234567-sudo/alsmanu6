@@ -98,6 +98,7 @@ export function startMemoryGuard({
   getChild = () => null,
   logger = null,
   restart = null,
+  beforeRestart = null,
   intervalMs = 5 * 60 * 1000,
   ratio = 0.85,
   minUptimeMs = 5 * 60 * 1000,
@@ -118,6 +119,28 @@ export function startMemoryGuard({
     const verdict = decideMemoryAction({ rssMb, limitMb, consecutive, uptimeMs, ratio, minUptimeMs });
     last = { rssMb, limitMb, action: verdict.action, uptimeMs };
     if (verdict.action === "restart" && typeof restart === "function") {
+      // [PANEL-RAM-GUARD] قبل قتل البوت: نحرّر الرام من لوحة السيرفر إن كانت مفتوحة
+      // (كل لوحة = عملية Node + نفق) ثم نعيد القياس — لا نُسقط البوت بلا داعٍ.
+      if (typeof beforeRestart === "function") {
+        consecutive = 0;
+        Promise.resolve()
+          .then(() => beforeRestart(verdict))
+          .catch((error) => logger?.warn?.(`[MEMORY-GUARD] تعذر تحرير الذاكرة: ${error?.message || error}`))
+          .then(() => new Promise((r) => setTimeout(r, 5000)))
+          .then(() => {
+            const pid = getChild?.()?.pid;
+            const after = pid ? readRssMb(pid) : 0;
+            const limit = limitMb || 1200;
+            if (after && after / limit < ratio) {
+              logger?.warn?.(`[MEMORY-GUARD] تحرّرت الذاكرة (${after}MB/${limit}MB) — لن نعيد تشغيل البوت`);
+              return;
+            }
+            logger?.warn?.(`[MEMORY-GUARD] ${verdict.reason} — إعادة تشغيل البوت`);
+            startedAt.delete(pid);
+            try { restart(getChild?.()); } catch (error) { logger?.warn?.(`[MEMORY-GUARD] تعذر إعادة التشغيل: ${error?.message || error}`); }
+          });
+        return last;
+      }
       logger?.warn?.(`[MEMORY-GUARD] ${verdict.reason} — إعادة تشغيل البوت`);
       consecutive = 0;
       startedAt.delete(child.pid);
