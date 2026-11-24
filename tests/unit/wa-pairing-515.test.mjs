@@ -29,3 +29,24 @@ test('تنبيه واضح إذا لم يكتمل الربط بعد دقيقتي�
   assert.match(seg, /connect_pairing/);
   assert.match(seg, /\}, 12e4\)/);
 });
+
+// ── v8.16.6: إصدار WhatsApp Web + ساعة السيرفر + جلسات تالفة ──
+test('يُمرَّر أحدث إصدار WhatsApp Web للسوكت (وإلا تفشل المصافحة بصمت)', () => {
+  assert.match(idx, /\[WA-VERSION\]/);
+  assert.match(idx, /installedBaileys\.fetchLatestWaWebVersion \|\| installedBaileys\.fetchLatestBaileysVersion/);
+  assert.match(idx, /function makeBaileysSocket\(authState, version\)/);
+  assert.match(idx, /\.\.\.\(version \? \{ version \} : \{\}\)/);
+  assert.match(idx, /makeBaileysSocket\(authState, _vq\)/);
+});
+
+test('فحص فرق ساعة السيرفر عن واتساب', () => {
+  assert.match(idx, /\[CLOCK-SKEW\]/);
+  assert.match(idx, /Math\.abs\(skew\) > 60/);
+});
+
+test('تنظيف بقايا/جلسات تالفة قبل الربط', () => {
+  assert.match(idx, /\[PAIRING-CLEAN\]/);
+  assert.match(idx, /\[PAIRING-CORRUPT\]/);
+  assert.match(idx, /fs6\.renameSync\(authDir, bak\)/);
+  assert.match(idx, /\[PAIRING-DIAG\] registered=/);
+});

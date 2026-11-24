@@ -293094,9 +293094,44 @@ async function importSessionFile(bot2, chatId, userId, buffer) {
   }
   return { ok: true, phone, written };
 }
-function makeBaileysSocket(authState) {
+// [WA-VERSION] إصدار WhatsApp Web: لو كان قديماً يقبل واتساب كود الربط ثم يفشل
+// إكمال المصافحة بصمت ⇒ يبقى الهاتف على «جاري تسجيل الدخول». نجلب الأحدث ونمرّره.
+let _waVersion = null;
+let _waVersionAt = 0;
+let _skewChecked = false;
+async function _getWaVersion() {
+  if (_waVersion && Date.now() - _waVersionAt < 6 * 3600e3) return _waVersion;
+  try {
+    const fn = installedBaileys.fetchLatestWaWebVersion || installedBaileys.fetchLatestBaileysVersion;
+    if (typeof fn === "function") {
+      const r = await fn();
+      if (Array.isArray(r?.version) && r.version.length === 3) {
+        _waVersion = r.version; _waVersionAt = Date.now();
+        try { logger.info({ version: _waVersion }, "[WA-VERSION] استخدام إصدار WhatsApp Web الأحدث"); } catch { }
+      }
+    }
+  } catch (e) {
+    try { logger.warn({ err: e?.message }, "[WA-VERSION] تعذر جلب أحدث إصدار — سنستخدم الافتراضي"); } catch { }
+  }
+  return _waVersion;
+}
+// [CLOCK-SKEW] فرق ساعة السيرفر عن واتساب يمنع إكمال الربط بصمت
+async function _checkClockSkew() {
+  try {
+    const r = await fetch("https://web.whatsapp.com/", { method: "HEAD" });
+    const h = r.headers.get("date");
+    if (!h) return 0;
+    const skew = Math.round((Date.now() - new Date(h).getTime()) / 1000);
+    if (Math.abs(skew) > 60) {
+      try { logger.error({ skew }, "[CLOCK-SKEW] ساعة السيرفر غير مضبوطة — الربط سيفشل بصمت. اضبط NTP"); } catch { }
+    }
+    return skew;
+  } catch { return 0; }
+}
+function makeBaileysSocket(authState, version) {
   return installedBaileys.makeWASocket({
     auth: authState,
+    ...(version ? { version } : {}),
     printQRInTerminal: false,
     browser: installedBaileys.Browsers.ubuntu("Chrome"),
     generateHighQualityLinkPreview: false,
@@ -293348,7 +293383,8 @@ async function _connectQr(sessKey, chatId, userId) {
     const { useMultiFileAuthState: useMultiFileAuthState2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
     fs6.mkdirSync(authDir, { recursive: true });
     const { state: authState, saveCreds } = await useMultiFileAuthState2(authDir);
-    const sock = makeBaileysSocket(authState);
+    const _vq = await _getWaVersion();
+    const sock = makeBaileysSocket(authState, _vq);
     s.sock = sock;
     sessions.set(sessKey, s);
     _waConnecting.delete(sessKey);
@@ -293730,8 +293766,39 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
   try {
     const { useMultiFileAuthState: useMultiFileAuthState2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
     fs6.mkdirSync(authDir, { recursive: true });
-    const { state: authState, saveCreds } = await useMultiFileAuthState2(authDir);
-    const sock = makeBaileysSocket(authState);
+    let { state: authState, saveCreds } = await useMultiFileAuthState2(authDir);
+    // [PAIRING-CLEAN] بقايا محاولة فاشلة (creds.json ناقص) تمنع إكمال المصافحة
+    // ⇒ عند أول محاولة ربط جديدة نُنظّف المجلد مرة واحدة فقط.
+    // [PAIRING-CORRUPT] creds.json ناقص يقول registered=true مع أن الجلسة لم تُفتح أبداً
+    // ⇒ ربط مستحيل. ننقل المجلد جانباً ونبدأ نظيفاً مرة واحدة.
+    if (isFirstTime && authState?.creds?.registered && !s.wasEverConnected && !s.cleaned) {
+      try {
+        const bak = authDir + ".bak-" + Date.now();
+        fs6.renameSync(authDir, bak);
+        fs6.mkdirSync(authDir, { recursive: true });
+        s.cleaned = true;
+        sessions.set(sessKey, s);
+        try { logger.warn({ userId, sessKey, bak }, "[PAIRING-CORRUPT] جلسة تالفة (registered بلا اتصال) — نُقلت جانباً ونبدأ من جديد"); } catch { }
+        const _fresh0 = await useMultiFileAuthState2(authDir);
+        authState = _fresh0.state;
+      } catch (e) { try { logger.warn({ err: e?.message }, "[PAIRING-CORRUPT] تعذر إعادة التهيئة"); } catch { } }
+    }
+    if (isFirstTime && !authState?.creds?.registered && !s.cleaned) {
+      try {
+        for (const f of fs6.readdirSync(authDir)) {
+          try { fs6.rmSync(path3.join(authDir, f), { recursive: true, force: true }); } catch { }
+        }
+        s.cleaned = true;
+        sessions.set(sessKey, s);
+        try { logger.info({ userId, sessKey }, "[PAIRING-CLEAN] تم تنظيف بقايا جلسة قديمة قبل الربط"); } catch { }
+        const _fresh = await useMultiFileAuthState2(authDir);
+        authState = _fresh.state;
+        try { logger.info({ userId, sessKey }, "[PAIRING-DIAG] registered=" + String(authState?.creds?.registered)); } catch { }
+      } catch { }
+    }
+    const _v = await _getWaVersion();
+    if (!_skewChecked) { _skewChecked = true; _checkClockSkew().catch(() => { }); }
+    const sock = makeBaileysSocket(authState, _v);
     s.sock = sock;
     s.sockAt = Date.now(); // [PAIRING-SINGLE] عمر السوكت لمنع الازدواج
     sessions.set(sessKey, s);
@@ -330855,6 +330922,12 @@ var port = Number(process.env["PORT"] || 5e3);
 async function main() {
   await new Promise((resolve) => {
     app_default.listen(port, () => {
+      // [BUILD] بصمة الإصدار — للتأكد من أن السيرفر يعمل بالنسخة الجديدة فعلاً
+      try {
+        const _pkg = JSON.parse(fs6.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+        logger.info({ build: _pkg.version, node: process.version }, "[BUILD] نسخة البوت");
+        try { process.stderr.write(`[BUILD] v${_pkg.version} · node ${process.version}\n`); } catch { }
+      } catch { }
       logger.info({ port }, "Server listening");
       resolve();
     });
