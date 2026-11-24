@@ -293751,6 +293751,19 @@ async function _connectCodSession(userId, waSock, waJid, cleanPhone, key, isFirs
 // [PAIRING-NO-NEW-CODE] لا نطلب كوداً جديداً إذا كانت الجلسة قد سُجّلت (creds.registered)
 // أو إذا كان الكود الحالي ما زال صالحاً — طلب كود جديد يُلغي الكود الذي يدخله المستخدم
 // ويترك هاتفه عالقاً على «جاري تسجيل الدخول».
+// [PAIR-DIAG-FILE] سجل تشخيصي على القرص لكل محاولة ربط — يُقرأ من لوحة السيرفر
+// بدون الحاجة للوق الطويل:  data/wa-pairing-diag.json
+function _writePairDiag(entry) {
+  try {
+    const f = path3.join(BOT_DATA_DIR || "data", "wa-pairing-diag.json");
+    let arr = [];
+    try { arr = JSON.parse(fs6.readFileSync(f, "utf8")) || []; } catch { arr = []; }
+    arr.push({ at: new Date().toISOString(), ...entry });
+    if (arr.length > 25) arr = arr.slice(-25);
+    fs6.mkdirSync(path3.dirname(f), { recursive: true });
+    fs6.writeFileSync(f, JSON.stringify(arr, null, 1));
+  } catch { }
+}
 function _pairingNeedsNewCode(cur, authState) {
   try { if (authState?.creds?.registered) return false; } catch { }
   if (!cur?.pairingCode) return true;
@@ -293888,7 +293901,26 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
           // حرس [PAIRING-SINGLE] إعادة الاتصال (كان يمنعها فعلياً في 8.16.6).
           try { _teardownSock(sock); } catch { }
           if (sessions.get(sessKey)?.sock === sock) { const _c = sessions.get(sessKey); _c.sock = null; sessions.set(sessKey, _c); }
-          try { logger.info({ userId, sessKey, registered: !!authState?.creds?.registered }, "[PAIRING-515] حالة التسجيل بعد الربط"); } catch { }
+          const _reg = !!authState?.creds?.registered;
+          try { logger.info({ userId, sessKey, registered: _reg }, "[PAIRING-515] حالة التسجيل بعد الربط"); } catch { }
+          _writePairDiag({ sessKey, event: "close515", statusCode: 515, registered: _reg });
+          if (!_reg) {
+            // [PAIRING-FALLBACK-QR] كود لم يُسجّل الجلسة ⇒ لا نُكرّر نفس الحلقة:
+            // بعد محاولتين ننتقل تلقائياً إلى QR (لا يحتاج ويب آب ولا نفقاً).
+            cur.pairFails = (cur.pairFails || 0) + 1;
+            sessions.set(sessKey, cur);
+            try { logger.warn({ userId, sessKey, pairFails: cur.pairFails }, "[PAIRING-FALLBACK-QR] الربط بالكود لم يُسجّل الجلسة"); } catch { }
+            if (cur.pairFails >= 2) {
+              cur.pairFails = 0;
+              try { delete cur.phoneNumber; } catch { }
+              sessions.set(sessKey, cur);
+              try {
+                if (botRef) botRef.sendMessage(Number(chatId), "\u21A9\uFE0F \u0643\u0648\u062F \u0627\u0644\u0631\u0628\u0637 \u0644\u0645 \u064A\u0643\u062A\u0645\u0644 \u0645\u0631\u062A\u064A\u0646 \u2014 \u0646\u0646\u062A\u0642\u0644 \u0625\u0644\u0649 \u0627\u0644\u0631\u0628\u0637 \u0628\u0640QR (\u064A\u0639\u0645\u0644 \u0628\u062F\u0648\u0646 \u0648\u064A\u0628 \u0622\u0628).", { parse_mode: "Markdown" }).catch(() => { });
+              } catch { }
+              setTimeout(() => { _connectQr(sessKey, chatId, userId).catch(() => { }); }, 1500);
+              return;
+            }
+          }
           sessions.set(sessKey, cur);
           try { logger.info({ userId, sessKey }, "[PAIRING-515] واتساب يطلب إعادة الاتصال بعد الربط — اتصال فوري بدون كود جديد"); } catch { }
           setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, false, userId), 2e3);

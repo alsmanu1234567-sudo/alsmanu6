@@ -60,7 +60,7 @@ test('saveCreds يُحدَّث مع الحالة الجديدة بعد التن�
 test('515 يُفكِّك السوكت الميت حتى لا يمنع الحرس إعادة الاتصال', () => {
   assert.match(seg, /\[PAIRING-515\] السوكت ميت فعلاً/);
   assert.match(seg, /_teardownSock\(sock\)/);
-  assert.match(seg, /registered: !!authState\?\.creds\?\.registered/);
+  assert.match(seg, /const _reg = !!authState\?\.creds\?\.registered/);
 });
 
 test('حرس السوكت المكرر لا يمنع إعادة الاتصال بسوكت مغلق', () => {
@@ -71,4 +71,17 @@ test('الجلسة الميتة 401 تُنقل خارج مجلد الجلسات 
   assert.match(idx, /\[SESSION-QUARANTINE\]/);
   assert.match(idx, /_dead_sessions/);
   assert.match(idx, /_quarantineAuth\(sessKey, "401"\)/);
+});
+
+// ── v8.16.8: انتقال تلقائي لـQR + سجل تشخيص على القرص ──
+test('فشل الكود مرتين ⇒ انتقال تلقائي للربط بـQR', () => {
+  assert.match(seg, /\[PAIRING-FALLBACK-QR\]/);
+  assert.match(seg, /cur\.pairFails >= 2/);
+  assert.match(seg, /_connectQr\(sessKey, chatId, userId\)/);
+});
+
+test('سجل تشخيص الربط يُكتب على القرص', () => {
+  assert.match(idx, /function _writePairDiag\(entry\)/);
+  assert.match(idx, /wa-pairing-diag\.json/);
+  assert.match(idx, /event: "close515", statusCode: 515, registered: _reg/);
 });
