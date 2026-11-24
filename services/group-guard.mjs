@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { sendInteractive, listButton, extractInteractiveResponseId } from "./interactive.js";
+import { effectiveGuardWords, normalizePresetKeys } from "./wordlist-presets.mjs";
 
 // [ROBUST-PATHS] لا نعتمد على process.cwd() وحده: تشغيل البوت قد يكون من مجلد مختلف عن مجلد الكود
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -53,6 +54,7 @@ const DEFAULTS = {
   linkGuard: true,
   wordGuard: false,
   words: [],
+  wordPresets: [],
   stickerGuard: false,
   imageGuard: false,
   audioGuard: false,
@@ -434,6 +436,7 @@ export function getGroupConfig(userId, groupJid) {
   cfg.goodbye = { ...DEFAULTS.goodbye, ...(saved.goodbye || {}) };
   cfg.quiet = { ...DEFAULTS.quiet, ...(saved.quiet || {}) };
   cfg.words = Array.isArray(saved.words) ? saved.words : [];
+  cfg.wordPresets = normalizePresetKeys(saved.wordPresets);
   cfg.whitelist = Array.isArray(saved.whitelist) ? saved.whitelist : [];
   cfg.blockedDomains = Array.isArray(saved.blockedDomains) ? saved.blockedDomains : [];
   cfg.allowedDomains = Array.isArray(saved.allowedDomains) ? saved.allowedDomains : [];
@@ -460,7 +463,9 @@ export function updateGroupConfig(userId, groupJid, patch = {}) {
       }
       next[key] = merged;
     } else if (key === "words") {
-      next.words = (Array.isArray(value) ? value : []).map((w) => String(w).trim()).filter(Boolean).slice(0, 100);
+      next.words = (Array.isArray(value) ? value : []).map((w) => String(w).trim()).filter(Boolean).slice(0, 400);
+    } else if (key === "wordPresets") {
+      next.wordPresets = normalizePresetKeys(value);
     } else if (key === "whitelist") {
       next.whitelist = normalizeJidList(value);
     } else if (key === "blockedDomains" || key === "allowedDomains") {
@@ -626,10 +631,18 @@ export function normalizeArabic(text) {
 export function matchWords(text, words) {
   const haystack = normalizeArabic(text);
   if (!haystack) return null;
+  // نسخة «كلمات مستقلة فقط» لتفادي أخطاء مثل «كسر» و«تكنيك» و«بوكس»
+  const spaced = ` ${haystack.replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/gu, " ").trim()} `;
   for (const word of Array.isArray(words) ? words : []) {
-    const needle = normalizeArabic(word);
+    const raw = String(word ?? "");
+    const wholeWord = raw.startsWith("~");
+    const needle = normalizeArabic(wholeWord ? raw.slice(1) : raw);
     if (!needle || needle.length < 2) continue;
-    if (haystack.includes(needle)) return word;
+    if (wholeWord) {
+      if (spaced.includes(` ${needle} `)) return raw;
+      continue;
+    }
+    if (haystack.includes(needle)) return raw;
   }
   return null;
 }
@@ -1121,8 +1134,9 @@ export async function handleModeration({ userId, sock, message, cfg }) {
     return { handled: true, action: linkReason, ...result };
   }
 
-  if (cfg.wordGuard && text && cfg.words.length) {
-    const hit = matchWords(text, cfg.words);
+  if (cfg.wordGuard && text && (cfg.words.length || (cfg.wordPresets || []).length)) {
+    // [WORDS-PRESET] الكلمات المحفوظة + القوائم الجاهزة المختارة (شديدة وغيرها)
+    const hit = matchWords(text, effectiveGuardWords(cfg));
     if (hit) {
       await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
     noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: "word", text: text });

@@ -263,6 +263,29 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     const groupId = guardGroupId(req);
     return webGuardMemberAction(uid, groupId, req.body?.phoneNumber || null, req.body || {});
   }));
+  // [WORDS-PRESET] قوائم كلمات ممنوعة جاهزة (شديدة جداً) تُحمَّل بضغطة
+  app.get('/api/fw/groups/guard/words/presets', guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    const { listPresets, describeGuardWords } = await import('../services/wordlist-presets.mjs');
+    const config = groupGuard.getGroupConfig(uid, groupId);
+    return { groupId, presets: listPresets(), active: config.wordPresets || [], stats: describeGuardWords(config), wordGuard: Boolean(config.wordGuard) };
+  }));
+  app.post('/api/fw/groups/guard/words/preset', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    const { listPresets, describeGuardWords, normalizePresetKeys } = await import('../services/wordlist-presets.mjs');
+    const presetId = String(req.body?.presetId || '').trim();
+    if (!listPresets().some((preset) => preset.id === presetId)) throw new Error('قائمة الكلمات غير معروفة');
+    const enable = req.body?.enable !== false;
+    const config = groupGuard.getGroupConfig(uid, groupId);
+    const current = normalizePresetKeys(config.wordPresets);
+    const next = enable ? [...new Set([...current, presetId])] : current.filter((id) => id !== presetId);
+    const patch = { wordPresets: next };
+    // تشغيل فلتر الكلمات تلقائياً عند تحميل القائمة حتى تعمل فعلاً
+    if (enable && !config.wordGuard) patch.wordGuard = true;
+    groupGuard.updateGroupConfig(uid, groupId, patch);
+    const updated = groupGuard.getGroupConfig(uid, groupId);
+    return { ok: true, active: updated.wordPresets || [], wordGuard: Boolean(updated.wordGuard), stats: describeGuardWords(updated) };
+  }));
   app.post('/api/fw/groups/guard/undo', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);
     const result = groupGuard.undoWarning(uid, groupId, String(req.body?.jid || ""));

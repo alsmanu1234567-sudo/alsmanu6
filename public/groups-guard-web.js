@@ -350,7 +350,8 @@
 
           <div class="gg-card">
             <h3>الكلمات الممنوعة</h3>
-            <div class="mut">كلمة أو عبارة في كل سطر (حتى 50 كلمة). تعمل عند تفعيل «الكلمات الممنوعة».</div>
+            <div class="mut">كلمة أو عبارة في كل سطر. تعمل عند تفعيل «الكلمات الممنوعة».</div>
+            <div class="gg-presets" id="ggWordPresets"><div class="mut" style="font-size:12px">جارٍ تحميل القوائم الجاهزة…</div></div>
             <textarea class="gg-ta" id="ggWords" placeholder="كلمة&#10;عبارة ممنوعة">${esc((config.words || []).join("\n"))}</textarea>
             <div class="gg-actions"><button class="gg-btn" id="ggSaveWords">حفظ الكلمات</button></div>
           </div>
@@ -537,6 +538,12 @@
       .gg-mact:hover{border-color:#bea3ff}
       .gg-mact.danger{border-color:#6a3f52;background:rgba(120,40,60,.28);color:#ffb4c8}
       .gg-member-tools select.gg-in{font-size:12px}
+      .gg-presets{border:1px dashed rgba(255,255,255,.16);border-radius:12px;padding:10px;margin:10px 0}
+      .gg-preset-head{font-size:13px;font-weight:700;margin-bottom:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+      .gg-preset{display:flex;gap:9px;align-items:flex-start;padding:7px 0;cursor:pointer}
+      .gg-preset input{width:17px;height:17px;accent-color:#ff6b81;margin-top:2px}
+      .gg-preset span{display:flex;flex-direction:column;gap:2px}
+      .gg-preset small{font-size:11.5px;opacity:.78;line-height:1.5}
     `;
     document.head.appendChild(style);
   }
@@ -714,6 +721,35 @@
       try { state.config = (await api("/api/fw/groups/guard", { groupId: state.groupId, patch })).config; toast("✅ تم حفظ الأرقام"); }
       catch (error) { toast("❌ " + error.message); }
     });
+
+    // [WORDS-PRESET] قوائم جاهزة: تحميل بضغطة + تشغيل الفلتر تلقائياً
+    const presetsBox = body.querySelector("#ggWordPresets");
+    if (presetsBox) {
+      const paint = (data, message) => {
+        const active = new Set(data.active || []);
+        const stats = data.stats || {};
+        presetsBox.innerHTML = `<div class="gg-preset-head">🚫 قوائم جاهزة من البوت <span class="gg-tag">${Number(stats.total) || 0} كلمة فعّالة</span></div>
+          ${(data.presets || []).map((preset) => `<label class="gg-preset">
+            <input type="checkbox" data-preset="${esc(preset.id)}" ${active.has(preset.id) ? "checked" : ""}>
+            <span><b>${esc(preset.name)}</b><small>${esc(preset.description)} · ${Number(preset.count) || 0} كلمة</small></span>
+          </label>`).join("")}
+          ${message ? `<div class="gg-mut" style="font-size:12px">${esc(message)}</div>` : ""}
+          <div class="gg-mut" style="font-size:11.5px;opacity:.8">بمجرد التحديد يعمل فلتر الكلمات تلقائياً. السطور التي تبدأ بـ <code>~</code> تُطابق كلمة مستقلة فقط (تمنع أخطاء مثل «كسر»).</div>`;
+        presetsBox.querySelectorAll("[data-preset]").forEach((input) => {
+          input.addEventListener("change", async () => {
+            try {
+              const res = await api("/api/fw/groups/guard/words/preset", { groupId: state.groupId, presetId: input.dataset.preset, enable: input.checked });
+              state.config = { ...state.config, wordPresets: res.active, wordGuard: res.wordGuard };
+              paint({ ...data, active: res.active, stats: res.stats, wordGuard: res.wordGuard }, input.checked ? "✅ تم تحميل القائمة وتشغيل الفلتر" : "تم إيقاف هذه القائمة");
+              toast(input.checked ? "✅ تم تحميل قائمة الكلمات" : "تم إيقاف القائمة");
+            } catch (error) { toast("❌ " + error.message); input.checked = !input.checked; }
+          });
+        });
+      };
+      api(`/api/fw/groups/guard/words/presets?groupId=${encodeURIComponent(state.groupId)}`)
+        .then((data) => paint(data, ""))
+        .catch((error) => { presetsBox.innerHTML = `<div class="gg-mut">تعذّر تحميل القوائم: ${esc(error.message)}</div>`; });
+    }
 
     const wordsButton = body.querySelector("#ggSaveWords");
     if (wordsButton) wordsButton.addEventListener("click", async () => {

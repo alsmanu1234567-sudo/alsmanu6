@@ -1692,7 +1692,7 @@ export async function saveWebGroupWordFilterSettings(userId, groupId, phoneNumbe
   const sock = await findSocketForGroup(userId, groupId, phoneNumber);
   if (!sock) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
   if (typeof input.words !== "string") throw new Error("أدخل الكلمات الممنوعة كسطور منفصلة");
-  if (input.words.length > 2_000) throw new Error("قائمة الكلمات تتجاوز 2000 حرف");
+  if (input.words.length > 20_000) throw new Error("قائمة الكلمات تتجاوز 20000 حرف");
 
   const words = [];
   const seen = new Set();
