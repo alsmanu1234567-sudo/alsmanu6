@@ -300021,6 +300021,7 @@ function _ghAuthError(err) {
   return m || "تعذر جلب المستودعات";
 }
 var _ghReposCache = { at: 0, data: null };
+globalThis.__ghClearReposCache = () => { _ghReposCache = { at: 0, data: null }; };
 async function getAllRepos(force) {
   if (!force && _ghReposCache.data && Date.now() - _ghReposCache.at < 6e4) return _ghReposCache.data;
   const token = (() => { try { return globalThis.__ghLoadToken ? globalThis.__ghLoadToken() : GITHUB_TOKEN; } catch { return GITHUB_TOKEN; } })();
@@ -301536,6 +301537,7 @@ var init_github = __esm({
           } catch(e) {}
           GITHUB_TOKEN = rawToken;
           process.env.GITHUB_TOKEN = rawToken;
+          try { globalThis.__ghClearReposCache?.(); } catch { } // توكن جديد = لا نعرض قائمة قديمة
         }
 
         function _ghDeleteToken() {
@@ -301551,6 +301553,7 @@ var init_github = __esm({
           } catch(e) {}
           GITHUB_TOKEN = "";
           process.env.GITHUB_TOKEN = "";
+          try { globalThis.__ghClearReposCache?.(); } catch { }
         }
 
         // إذا التوكن فارغ: اقرأه (مسارات متعددة + env)
