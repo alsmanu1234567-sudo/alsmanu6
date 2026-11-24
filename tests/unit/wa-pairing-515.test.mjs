@@ -50,3 +50,25 @@ test('تنظيف بقايا/جلسات تالفة قبل الربط', () => {
   assert.match(idx, /fs6\.renameSync\(authDir, bak\)/);
   assert.match(idx, /\[PAIRING-DIAG\] registered=/);
 });
+
+// ── v8.16.7: السبب الجذري — creds لم تُحفظ بعد 515 ⇒ QR بدل اكتمال الربط ──
+test('saveCreds يُحدَّث مع الحالة الجديدة بعد التنظيف', () => {
+  assert.match(seg, /saveCreds = _fresh\.saveCreds/);
+  assert.match(seg, /saveCreds = _fresh0\.saveCreds/);
+});
+
+test('515 يُفكِّك السوكت الميت حتى لا يمنع الحرس إعادة الاتصال', () => {
+  assert.match(seg, /\[PAIRING-515\] السوكت ميت فعلاً/);
+  assert.match(seg, /_teardownSock\(sock\)/);
+  assert.match(seg, /registered: !!authState\?\.creds\?\.registered/);
+});
+
+test('حرس السوكت المكرر لا يمنع إعادة الاتصال بسوكت مغلق', () => {
+  assert.match(seg, /s\.sock\?\.ws\?\.readyState === 0 \|\| s\.sock\?\.ws\?\.readyState === 1/);
+});
+
+test('الجلسة الميتة 401 تُنقل خارج مجلد الجلسات (لا حلقة في كل إقلاع)', () => {
+  assert.match(idx, /\[SESSION-QUARANTINE\]/);
+  assert.match(idx, /_dead_sessions/);
+  assert.match(idx, /_quarantineAuth\(sessKey, "401"\)/);
+});

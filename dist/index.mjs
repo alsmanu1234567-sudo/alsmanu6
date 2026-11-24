@@ -292970,6 +292970,19 @@ function setBotRef(bot2) {
 function getAuthDir(userId) {
   return path3.join(WA_SESSIONS_ROOT, userId);
 }
+// [SESSION-QUARANTINE] جلسة أعادت 401/403 (loggedOut) لا تُشفى أبداً، وكانت تُعاد
+// محاولتها في كل إقلاع للأبد (لوق متكرر + استهلاك). ننقلها خارج مجلد الجلسات بدل حذفها.
+function _quarantineAuth(sessKey, reason) {
+  try {
+    const dir = getAuthDir(sessKey);
+    if (!fs6.existsSync(path3.join(dir, "creds.json"))) return;
+    const root = path3.join(WA_SESSIONS_ROOT, "..", "_dead_sessions");
+    fs6.mkdirSync(root, { recursive: true });
+    const dest = path3.join(root, `${String(sessKey).replace(/[^A-Za-z0-9_.-]/g, "_")}-${Date.now()}`);
+    fs6.renameSync(dir, dest);
+    try { logger.warn({ sessKey, reason, dest }, "[SESSION-QUARANTINE] جلسة ميتة نُقلت خارج مجلد الجلسات — لن تُستعاد تلقائياً"); } catch { }
+  } catch (e) { try { logger.warn({ err: e?.message }, "[SESSION-QUARANTINE] فشل النقل"); } catch { } }
+}
 function clearAuthDir(userId) {
   const dir = getAuthDir(userId);
   try {
@@ -293468,6 +293481,9 @@ async function _connectQr(sessKey, chatId, userId) {
         if (statusCode === DR.loggedOut || statusCode === 401) {
           // [FIX_8H_SESSION] لا نحذف ملفات الجلسة فوراً — نحفظها ونُخطر المستخدم
           // عند إعادة الاتصال ستُستخدم الملفات المحفوظة أولاً، فإن فشلت يعاد الربط يدوياً
+          // [SESSION-QUARANTINE] لكن 401 = خروج نهائي: نحفظها جانباً حتى لا يعيد
+          // البوت محاولتها في كل إقلاع إلى ما لا نهاية.
+          _quarantineAuth(sessKey, "401");
           sessions.delete(sessKey);
           workerManager.setWhatsAppConnected(userId, false);
           workerManager.setWorkerStatus(userId, "stopped");
@@ -293750,7 +293766,9 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
   }
   // [PAIRING-SINGLE] سوكت ثانٍ لنفس الرقم أثناء الربط يُفسد مصافحة الجهاز ويترك
   // واتساب على «جاري تسجيل الدخول» للأبد ⇒ لا نُنشئ واحداً وسوكت حيّ/قيد الربط.
-  if (s.sock && s.sockAt && Date.now() - s.sockAt < 120e3 && s.connState !== "close" && s.connState !== "closed") {
+  if (s.sock && s.sockAt && Date.now() - s.sockAt < 120e3 &&
+      (s.sock?.ws?.readyState === 0 || s.sock?.ws?.readyState === 1) &&
+      s.connState !== "close" && s.connState !== "closed") {
     try { logger.warn({ userId, sessKey, connState: s.connState || null }, "[PAIRING-SINGLE] سوكت قائم — لن نُنشئ آخر"); } catch { }
     return;
   }
@@ -293781,6 +293799,7 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
         try { logger.warn({ userId, sessKey, bak }, "[PAIRING-CORRUPT] جلسة تالفة (registered بلا اتصال) — نُقلت جانباً ونبدأ من جديد"); } catch { }
         const _fresh0 = await useMultiFileAuthState2(authDir);
         authState = _fresh0.state;
+        saveCreds = _fresh0.saveCreds; // [PAIRING-SAVECREDS]
       } catch (e) { try { logger.warn({ err: e?.message }, "[PAIRING-CORRUPT] تعذر إعادة التهيئة"); } catch { } }
     }
     if (isFirstTime && !authState?.creds?.registered && !s.cleaned) {
@@ -293793,6 +293812,9 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
         try { logger.info({ userId, sessKey }, "[PAIRING-CLEAN] تم تنظيف بقايا جلسة قديمة قبل الربط"); } catch { }
         const _fresh = await useMultiFileAuthState2(authDir);
         authState = _fresh.state;
+        // [PAIRING-SAVECREDS] كان saveCreds يشير إلى كائن الحالة القديم ⇒ عند اكتمال
+        // الربط تُحفظ creds بلا registered، فيُعاد توليد QR ولا يكتمل الربط أبداً.
+        saveCreds = _fresh.saveCreds;
         try { logger.info({ userId, sessKey }, "[PAIRING-DIAG] registered=" + String(authState?.creds?.registered)); } catch { }
       } catch { }
     }
@@ -293836,6 +293858,7 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
         logger.warn({ userId, sessKey, statusCode, wasEverConnected: cur.wasEverConnected }, "Pairing connection closed");
         if (statusCode === DR.loggedOut || statusCode === 401) {
           // [FIX_8H_SESSION] حفاظ على ملفات الجلسة لإتاحة إعادة الاتصال
+          _quarantineAuth(sessKey, "401");
           sessions.delete(sessKey);
           workerManager.setWhatsAppConnected(userId, false);
           workerManager.setWorkerStatus(userId, "stopped");
@@ -293860,7 +293883,12 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
         // جديد — وإلا يبقى الهاتف على «جاري تسجيل الدخول» والكود المُدخل يُلغى.
         if (statusCode === 515) {
           cur.retries = 0;
-          cur.connState = "connecting";
+          cur.connState = "close";
+          // [PAIRING-515] السوكت ميت فعلاً — نُفكّكه ونُلغي مرجع الجلسة حتى لا يمنع
+          // حرس [PAIRING-SINGLE] إعادة الاتصال (كان يمنعها فعلياً في 8.16.6).
+          try { _teardownSock(sock); } catch { }
+          if (sessions.get(sessKey)?.sock === sock) { const _c = sessions.get(sessKey); _c.sock = null; sessions.set(sessKey, _c); }
+          try { logger.info({ userId, sessKey, registered: !!authState?.creds?.registered }, "[PAIRING-515] حالة التسجيل بعد الربط"); } catch { }
           sessions.set(sessKey, cur);
           try { logger.info({ userId, sessKey }, "[PAIRING-515] واتساب يطلب إعادة الاتصال بعد الربط — اتصال فوري بدون كود جديد"); } catch { }
           setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, false, userId), 2e3);
