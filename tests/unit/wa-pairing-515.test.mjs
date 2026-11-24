@@ -88,13 +88,16 @@ test('سجل تشخيص الربط يُكتب على القرص', () => {
 
 // ── v8.16.9: «الكود خطأ» — انتظار فتح السوكت + نفس السوكت + هدوء المشرف ──
 test('لا نطلب الكود قبل فتح السوكت فعلاً', () => {
-  assert.match(idx, /function _waitSocketOpen\(sock, ms = 20e3\)/);
-  assert.match(seg, /await _waitSocketOpen\(sock, 20e3\)/);
+  assert.match(idx, /async function _waitSocketOpen\(sessKey, sock, ms = 15e3\)/);
+  assert.match(seg, /await _waitSocketOpen\(sessKey, sock, 15e3\)/);
+  // لا نعتمد على readyState الرقمي (null على سيرفر المستخدم)
+  assert.match(idx, /\[PAIRING-READY-EVENT\]/);
 });
 
 test('إعادة طلب الكود على نفس السوكت (لا تفكيك ولا سوكت جديد)', () => {
-  assert.match(idx, /async function _requestPairingCodeSafe\(sock, phone, tries = 3\)/);
-  assert.match(seg, /await _requestPairingCodeSafe\(sock, cleanPhone, 3\)/);
+  assert.match(idx, /async function _requestPairingCodeSafe\(sock, phone, tries = 8, gapMs = 3000\)/);
+  assert.match(seg, /await _requestPairingCodeSafe\(sock, cleanPhone, 8, 3000\)/);
+  assert.match(idx, /\[PAIRING-CODE-TRY\]/);
   assert.match(seg, /\[PAIRING-SAME-SOCKET\]/);
   assert.doesNotMatch(seg, /retrying with fresh socket/);
 });
