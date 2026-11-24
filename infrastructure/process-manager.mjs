@@ -63,6 +63,8 @@ export function buildNodeArgs({ entry, limitMb = 0, reduceMb = 0, baseDir = "" }
   const args = [];
   // خرائط المصدر تُحمَّل في الذاكرة — نفعّلها فقط إن كانت موجودة فعلاً
   if (baseDir && existsSync(entry + ".map")) args.push("--enable-source-maps");
+  // [GC-SWEEP] يسمح للبوت بتفريغ القمامة عند الحاجة (global.gc) بدل انتظار V8
+  args.push("--expose-gc");
   args.push(...heapFlagsForLimit(limitMb, { reduceMb }));
   args.push(entry);
   return args;

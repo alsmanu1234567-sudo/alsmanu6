@@ -293284,6 +293284,26 @@ async function startQrSession(userId, chatId) {
   workerManager.setWorkerStatus(userId, "connecting");
   await _connectQr(sessKey, chatId, userId);
 }
+// ══ [WA-NO-PINGPONG] ══════════════════════════════════════════════════
+// 440 (connectionReplaced) كان يتكرر كل 5 ثوانٍ: كل إعادة اتصال تنشئ سوكتاً
+// جديداً بينما سوكت الإغلاق القديم ما زال حياً ويُطلق أحداثه، فيستبدل كل واحد
+// الآخر إلى ما لا نهاية — ويتضاعف استهلاك الرام (Signal stores + caches).
+// الحل: تفكيك السوكت السابق بالكامل + تجاهل أحداث السوكتات القديمة
+// + فاصل تعارض متزايد لـ440 + منع اتصالين متزامنين لنفس الجلسة.
+const _waConnecting = new Set();
+const _waConnectingAt = new Map();
+function _teardownSock(sock) {
+  if (!sock) return;
+  try { sock.ev?.removeAllListeners?.(); } catch { }
+  try { sock.ws?.terminate?.(); } catch { }
+  try { sock.ws?.close?.(); } catch { }
+  try { sock.end?.(undefined); } catch { }
+}
+function _sockIsStale(sessKey, sock) {
+  const cur = sessions.get(sessKey);
+  return !!(cur?.sock && cur.sock !== sock);
+}
+
 async function _connectQr(sessKey, chatId, userId) {
   userId = userId || _userIdFromSessKey(sessKey); // [MULTI-NUM] المعرّف الحقيق�� لتيليجرام
   const s = sessions.get(sessKey);
@@ -293296,6 +293316,18 @@ async function _connectQr(sessKey, chatId, userId) {
       return;
     }
   }
+  if (_waConnecting.has(sessKey)) {
+    try { logger.warn({ userId, sessKey }, "[WA] اتصال قيد التنفيذ لنفس الجلسة — تم تجاهل الطلب"); } catch { }
+    return;
+  }
+  _waConnecting.add(sessKey);
+  _waConnectingAt.set(sessKey, Date.now());
+  // [WA-NO-PINGPONG] سوكت سابق (CLOSING/ميت) يُفكَّك قبل إنشاء الجديد
+  if (s.sock) {
+    try { logger.warn({ userId, sessKey, readyState: s.sock?.ws?.readyState ?? null }, "[WA] تفكيك السوكت السابق قبل اتصال جديد"); } catch { }
+    _teardownSock(s.sock);
+    s.sock = null;
+  }
   const authDir = getAuthDir(sessKey);
   try {
     const { useMultiFileAuthState: useMultiFileAuthState2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
@@ -293304,9 +293336,15 @@ async function _connectQr(sessKey, chatId, userId) {
     const sock = makeBaileysSocket(authState);
     s.sock = sock;
     sessions.set(sessKey, s);
+    _waConnecting.delete(sessKey);
     sock.ev.on("creds.update", saveCreds);
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
+      // [WA-NO-PINGPONG] حدث من سوكت استُبدل بسوكت أحدث ⇒ تجاهله تماماً
+      if (_sockIsStale(sessKey, sock)) {
+        try { logger.info({ userId, sessKey, connection: connection || null }, "[WA] حدث من سوكت قديم — تم تجاهله"); } catch { }
+        return;
+      }
       try { logger.info({ userId, sessKey, connection: connection || null, statusCode: lastDisconnect?.error?.output?.statusCode ?? null, hasQr: !!qr }, "[WA] connection update"); } catch { }
       _diagPush(_diag.conn, { t: Date.now(), userId, sessKey, connection: connection || null, statusCode: lastDisconnect?.error?.output?.statusCode ?? null, reason: lastDisconnect?.error?.message ? String(lastDisconnect.error.message).slice(0, 160) : null });
       let cur = sessions.get(sessKey);
@@ -293359,6 +293397,7 @@ async function _connectQr(sessKey, chatId, userId) {
       if (connection === "open") {
         cur.wasEverConnected = true;
         cur.retries = 0;
+        cur.conflicts = 0;
         sessions.set(sessKey, cur);
         // [FIX-AUTO-RESTORE-SPAM] تمرير علامة isAutoRestore لمنع إرسال رسالة إعادة الاتصال عند الاستعادة الصامتة
         await _handleConnected(sock, userId, chatId, cur.qrMsgId, !!cur.isAutoRestore, sessKey);
@@ -293392,6 +293431,23 @@ async function _connectQr(sessKey, chatId, userId) {
           }
           return;
         }
+        // [WA-NO-PINGPONG] 440 = استُبدلت الجلسة باتصال آخر. إعادة المحاولة السريعة
+        // تعني استبدالاً مضاداً كل 5 ثوانٍ؛ لذلك فاصل تصاعدي طويل + تنبيه واحد.
+        if (statusCode === 440) {
+          cur.conflicts = (cur.conflicts || 0) + 1;
+          sessions.set(sessKey, cur);
+          if (cur.conflicts === 3 && botRef) {
+            await botRef.sendMessage(
+              chatId,
+              "\u26A0\uFE0F *\u062A\u0639\u0627\u0631\u0636 \u0641\u064A \u0627\u0644\u062C\u0644\u0633\u0629*\n\n\u0627\u0644\u0631\u0642\u0645 \u0645\u0641\u062A\u0648\u062D \u0641\u064A \u0645\u0643\u0627\u0646 \u0622\u062E\u0631 (\u062C\u0647\u0627\u0632 \u0622\u062E\u0631 \u0623\u0648 \u0646\u0633\u062E\u0629 \u0623\u062E\u0631\u0649 \u0645\u0646 \u0627\u0644\u0628\u0648\u062A).\n\u0623\u063A\u0644\u0642 \u0627\u0644\u0646\u0633\u062E\u0629 \u0627\u0644\u0623\u062E\u0631\u0649 \u0623\u0648 \u0627\u0633\u062A\u062E\u062F\u0645 \u00AB\u{1F504} \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644\u00BB \u0645\u0631\u0629 \u0648\u0627\u062D\u062F\u0629.",
+              { parse_mode: "Markdown" },
+            ).catch(() => { });
+          }
+          const delayConflict = Math.min(15000 * cur.conflicts, 120000);
+          try { logger.warn({ userId, sessKey, conflicts: cur.conflicts, delay: delayConflict }, "[WA] تعارض جلسة (440) — إعادة اتصال مؤجلة"); } catch { }
+          setTimeout(() => _connectQr(sessKey, chatId, userId), delayConflict);
+          return;
+        }
         if (cur.retries < 15) {
           cur.retries++;
           sessions.set(sessKey, cur);
@@ -293415,6 +293471,7 @@ async function _connectQr(sessKey, chatId, userId) {
       }
     });
   } catch (err) {
+    _waConnecting.delete(sessKey);
     logger.error({ err }, "Error in _connectQr");
     const cur = sessions.get(sessKey);
     if (!cur || cur.cancelled) return;
@@ -293622,6 +293679,18 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
   userId = userId || _userIdFromSessKey(sessKey); // [MULTI-NUM] المعرّف الحقيقي لتيليجرام
   const s = sessions.get(sessKey);
   if (!s || s.cancelled) return;
+  if (_waConnecting.has(sessKey)) {
+    try { logger.warn({ userId, sessKey }, "[WA] اتصال قيد التنفيذ لنفس الجلسة — تم تجاهل الطلب"); } catch { }
+    return;
+  }
+  _waConnecting.add(sessKey);
+  _waConnectingAt.set(sessKey, Date.now());
+  // [WA-NO-PINGPONG] تفكيك السوكت السابق قبل إنشاء الجديد (منع 440 المتبادل)
+  if (s.sock) {
+    try { logger.warn({ userId, sessKey, readyState: s.sock?.ws?.readyState ?? null }, "[WA] تفكيك السوكت السابق قبل اتصال جديد"); } catch { }
+    _teardownSock(s.sock);
+    s.sock = null;
+  }
   const authDir = getAuthDir(sessKey);
   try {
     const { useMultiFileAuthState: useMultiFileAuthState2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
@@ -293630,9 +293699,15 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
     const sock = makeBaileysSocket(authState);
     s.sock = sock;
     sessions.set(sessKey, s);
+    _waConnecting.delete(sessKey);
     sock.ev.on("creds.update", saveCreds);
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect } = update;
+      // [WA-NO-PINGPONG] حدث من سوكت قديم ⇒ تجاهُله
+      if (_sockIsStale(sessKey, sock)) {
+        try { logger.info({ userId, sessKey, connection: connection || null }, "[WA] حدث من سوكت قديم — تم تجاهله"); } catch { }
+        return;
+      }
       const cur = sessions.get(sessKey);
       if (!cur || cur.cancelled) {
         sock.ws?.close?.();
@@ -293671,6 +293746,15 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
               { parse_mode: "Markdown", reply_markup: _reconnKb2 }
             ).catch(() => {});
           }
+          return;
+        }
+        // [WA-NO-PINGPONG] تعارض 440: فاصل تصاعدي طويل بدل حلقة 5 ثوانٍ
+        if (statusCode === 440) {
+          cur.conflicts = (cur.conflicts || 0) + 1;
+          sessions.set(sessKey, cur);
+          const delayConflict = Math.min(15000 * cur.conflicts, 120000);
+          try { logger.warn({ userId, sessKey, conflicts: cur.conflicts, delay: delayConflict }, "[WA] تعارض جلسة (440) — إعادة اتصال مؤجلة"); } catch { }
+          setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, !cur.pairingCode || (Date.now() - (cur.codeAt || 0) > 45e3), userId), delayConflict);
           return;
         }
         if (cur.retries < 15) {
@@ -293791,6 +293875,7 @@ ${errMsg}
       }
     }
   } catch (err) {
+    _waConnecting.delete(sessKey);
     logger.error({ err }, "Error in _connectPairing");
     const cur = sessions.get(sessKey);
     if (!cur || cur.cancelled) return;
@@ -294174,6 +294259,15 @@ async function _waSupervisorTick() {
     if (_isCancelledKey(key)) { sessions.delete(key); continue; } // [FIX-CANCEL-RESURRECT]
     const ready = st0.sock?.ws?.readyState;
     if (ready === 0 || ready === 1) { _waSup.delete(key); continue; }
+    // [WA-NO-PINGPONG] لا نفتح اتصالاً ثانياً أثناء إغلاق سوكت أو أثناء اتصال جارٍ
+    if (ready === 2) continue;
+    if (_waConnecting.has(key)) {
+      // [WA-NO-PINGPONG] قفل قديم عالق (>60s) يُحرَّر حتى لا تتجمد الجلسة
+      const at = _waConnectingAt.get(key) || 0;
+      if (Date.now() - at < 60_000) continue;
+      _waConnecting.delete(key);
+      _waConnectingAt.delete(key);
+    }
     const rec = _waSup.get(key) || { n: 0, at: 0 };
     const wait = Math.min(15000 * Math.pow(1.6, rec.n), 300000);
     if (now - rec.at < wait) continue;
@@ -294284,10 +294378,33 @@ function _startMemorySweep() {
       total += _trimMap(userSentMsgIdSet, "userSentMsgIdSet");
       if (typeof conversationHistory !== "undefined") total += _trimMap(conversationHistory, "conversationHistory");
       if (inMemoryDB.statusBuf) total += _trimMap(inMemoryDB.statusBuf, "statusBuf");
+      // [GC-SWEEP] تفريغ القمامة فوراً بعد حذف المفاتيح — بدونها تبقى الذاكرة
+      // محجوزة عند V8 (RSS عالٍ) رغم أن البيانات حُذفت.
+      try { if (typeof globalThis.gc === "function") globalThis.gc(); } catch { }
+      try {
+        const mb = Math.round(process.memoryUsage().rss / 1048576);
+        logger.info({ rssMb: mb, removed: total }, "[MEMORY-SWEEP] تنظيف + تفريغ القمامة");
+      } catch { }
       if (total > 0) logger.info({ removed: total }, "[MEMORY-SWEEP] تنظيف تلقائي للذاكرة");
     } catch {}
   }, 10 * 60 * 1000);
   if (typeof timer.unref === "function") timer.unref();
+  // [GC-PRESSURE] كل دقيقة: لو تجاوزت الكومة 72% من سقفها نُفرّغ القمامة فوراً.
+  // بدون ذلك يترك V8 الذاكرة محجوزة حتى يصل للسقف ثم يقتل OOM Killer العملية.
+  const capMb = Number(process.env.BOT_NODE_MAX_OLD_SPACE_MB) || 0;
+  if (capMb > 0 && typeof globalThis.gc === "function") {
+    const capBytes = capMb * 1048576;
+    const t2 = setInterval(() => {
+      try {
+        const mu = process.memoryUsage();
+        if (mu.heapUsed > capBytes * 0.72) {
+          globalThis.gc();
+          try { logger.warn({ heapMb: Math.round(mu.heapUsed / 1048576), capMb }, "[GC-PRESSURE] تفريغ قمامة استباقي"); } catch { }
+        }
+      } catch { }
+    }, 60_000);
+    if (typeof t2.unref === "function") t2.unref();
+  }
 }
 
 function registerMessageHandler(sock, userId) {

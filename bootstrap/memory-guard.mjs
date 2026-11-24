@@ -208,7 +208,10 @@ export function heapFlagsForLimit(limitMb, { reduceMb = 0 } = {}) {
   oldSpace = Math.max(160, Math.min(1536, oldSpace));
   // الشاب الافتراضي 16–64MB لكل مساحة؛ نقلّله لتقليل RSS وقت الذروة
   const semi = Math.max(8, Math.min(16, Math.round(oldSpace / 16)));
-  return [`--max-old-space-size=${oldSpace}`, `--max-semi-space-size=${semi}`];
+  const flags = [`--max-old-space-size=${oldSpace}`, `--max-semi-space-size=${semi}`];
+  // [RAM-SIZE-FIRST] على الحاويات الصغيرة نُفضّل حجم الذاكرة على السرعة
+  if (limit && limit <= 800) flags.push("--optimize-for-size");
+  return flags;
 }
 
 /**

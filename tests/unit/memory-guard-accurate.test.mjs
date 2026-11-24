@@ -17,7 +17,8 @@ import { buildNodeArgs } from "../../infrastructure/process-manager.mjs";
 
 test("سقف الكومة يُحسب من حد الحاوية لا من رام السيرفر", () => {
   const flags = heapFlagsForLimit(589);
-  assert.equal(flags.length, 2);
+  assert.ok(flags.length >= 2);
+  assert.ok(flags.includes("--optimize-for-size"), "الحاويات الصغيرة تُفضّل الحجم");
   const oldSpace = Number(flags[0].split("=")[1]);
   assert.ok(oldSpace >= 240 && oldSpace <= 280, `سقف غير مناسب: ${oldSpace}`);
   assert.match(flags[1], /^--max-semi-space-size=/);
