@@ -124724,6 +124724,7 @@ function aiMenuKeyboard(hasKey, selectedModel) {
       [{ text: "\u{1F4DD} \u0636\u0628\u0637 \u0627\u0644\u0628\u0631\u0648\u0645\u062A", callback_data: "ai_setprompt" }, { text: "\u23F0 \u062C\u062F\u0648\u0644 \u0627\u0644\u0639\u0645\u0644", callback_data: "ai_schedule" }],
       [{ text: "\u{1F4AC} \u0645\u062D\u0627\u062F\u062B\u0629 \u0627\u0644\u0630\u0643\u0627\u0621 \u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064A", callback_data: "ai_contacts" }],
       // [AI-NEW] ميزات جديدة: اختبار حي، إحصائيات، درجة الإبداع، طول الرد، كلما���� ������حظورة، مسح الذاكرة
+      [{ text: "\u{1F916} \u0630\u0643\u0627\u0621 \u0645\u064A\u062A\u0627 (\u0628\u0644\u0627 \u0645\u0641\u062A\u0627\u062D)", callback_data: "ai_metaai" }],
       [{ text: "\u{1F9EA} \u0627\u062E\u062A\u0628\u0627\u0631 \u0627\u0644\u0630\u0643\u0627\u0621", callback_data: "ai_test" }, { text: "\u{1F4CA} \u0625\u062D\u0635\u0627\u0626\u064A\u0627\u062A", callback_data: "ai_stats" }],
       [{ text: "\u{1F321}\uFE0F \u062F\u0631\u062C\u0629 \u0627\u0644\u0625\u0628\u062F\u0627\u0639", callback_data: "ai_set_temp" }, { text: "\u{1F4CF} \u0637\u0648\u0644 \u0627\u0644\u0631\u062F", callback_data: "ai_set_maxtok" }],
       [{ text: "\u{1F6AB} \u0643\u0644\u0645\u0627\u062A \u0645\u062D\u0638\u0648\u0631\u0629", callback_data: "ai_set_blacklist" }, { text: "\u{1F9F9} \u0645\u0633\u062D \u0627\u0644\u0630\u0627\u0643\u0631\u0629", callback_data: "ai_clear_memory" }],
@@ -125575,9 +125576,78 @@ function shouldAiReply(numberId, jid, isGroup, aiEnabled, aiTargets, aiGroups, a
   }
   return true;
 }
+// ══════════════════════════════════════════════════════════════════
+// [META-AI] مزوّد ذكاء اصطناعي بلا مفتاح عبر محادثة Meta AI في واتساب
+// يعمل تلقائياً عند عدم وجود مفتاح NVIDIA، وله قاطع دائرة حتى لا يتعطل الرد
+// إذا كانت الميزة غير متاحة في دولة/حساب المستخدم.
+// ══════════════════════════════════════════════════════════════════
+var _metaAiClients = /* @__PURE__ */ new WeakMap(); // sock → client
+var _metaAiHealth = /* @__PURE__ */ new Map(); // userId → { fails, disabledUntil, lastError }
+var META_AI_DISABLED_MS = 6 * 60 * 60 * 1000;
+function _metaAiState(userId) {
+  const k = String(userId);
+  if (!_metaAiHealth.has(k)) _metaAiHealth.set(k, { fails: 0, disabledUntil: 0, lastError: null, ok: 0 });
+  return _metaAiHealth.get(k);
+}
+function _metaAiSock(userId) {
+  try {
+    const s = inMemoryDB.sessions.get(String(userId));
+    const sock = s?.sock || s;
+    return sock?.ws?.readyState === 1 ? sock : null;
+  } catch { return null; }
+}
+async function _metaAiReply(userId, prompt, senderName, incomingText, conversationKey) {
+  try {
+    const u = getUser(userId) || {};
+    if (u.metaAiEnabled === false) return null;
+    const st = _metaAiState(userId);
+    if (st.disabledUntil && Date.now() < st.disabledUntil) return null;
+    const sock = _metaAiSock(userId);
+    if (!sock) return null;
+    const mod = await import("../services/ai/meta-ai-provider.mjs");
+    let client = _metaAiClients.get(sock);
+    if (!client) { client = mod.createMetaAiClient({ sock, logger }); _metaAiClients.set(sock, client); }
+    const history = conversationHistory.get(conversationKey) || [];
+    const body = mod.buildMetaPrompt({
+      system: prompt || u.aiSystemPrompt || "أنت مساعد ودود يرد بالعربية باختصار.",
+      history,
+      senderName,
+      text: incomingText,
+    });
+    const reply = await client.ask(body);
+    if (!reply) {
+      st.fails = (st.fails || 0) + 1;
+      if (st.fails >= 3) {
+        st.disabledUntil = Date.now() + META_AI_DISABLED_MS;
+        st.lastError = "no-reply";
+        try { logger.warn({ userId }, "[META-AI] تعطيل مؤقت 6 ساعات بعد 3 محاولات بلا رد"); } catch { }
+      }
+      return null;
+    }
+    st.fails = 0; st.ok = (st.ok || 0) + 1; st.disabledUntil = 0; st.lastError = null;
+    const updated = [
+      ...history,
+      { role: "user", content: `${senderName}: ${incomingText}` },
+      { role: "assistant", content: reply },
+    ];
+    conversationHistory.set(conversationKey, updated.slice(-20));
+    try {
+      const _s = u.aiStats || { requests: 0, tokens: 0 };
+      saveUser(userId, { aiStats: { requests: (_s.requests || 0) + 1, tokens: _s.tokens || 0, metaAi: (_s.metaAi || 0) + 1, lastAt: Date.now() } });
+    } catch { }
+    return reply;
+  } catch (err) {
+    try { logger.warn({ err: String(err?.message || err).slice(0, 160), userId }, "[META-AI] خطأ"); } catch { }
+    return null;
+  }
+}
 async function getAiReply(userId, prompt, senderName, incomingText, conversationKey) {
   const apiKey = getNvidiaKey(userId);
-  if (!apiKey) return null;
+  if (!apiKey) {
+    // [META-AI] لا مفتاح؟ جرّب ذكاء ميتا المدمج في واتساب
+    const metaReply = await _metaAiReply(userId, prompt, senderName, incomingText, conversationKey);
+    return metaReply || null;
+  }
   const model = getUserSelectedModel(userId);
   // [AI-NEW] إعدادات المستخدم: درجة الإبداع، أقصى طول للرد، الكل��ا�� المحظورة
   const _u = getUser(userId) || {};
@@ -294293,6 +294363,8 @@ function registerMessageHandler(sock, userId) {
       const sock = sock2;
       const jid = msg.key.remoteJid || "";
       if (!jid) return; // [DISPATCH-FIX]
+      // [META-AI] ردود محادثة Meta AI تُقرأ فقط عبر مزوّد الذكاء — لا تُعالج كرسالة عادية
+      if (/^13135550002@/.test(jid)) return;
       if (jid === "status@broadcast") {
         if (!msg.key.fromMe) {
           if (!inMemoryDB.statusBuf) inMemoryDB.statusBuf = new Map();
@@ -325181,7 +325253,10 @@ init_database();
 init_state();
 init_keyboards();
 async function handleGroupsCallback(bot2, chatId, userId, data) {
-  _groupsMod.setDeps({ getUser, setState, cancelKeyboard, inMemoryDB });
+  _groupsMod.setDeps({ getUser, setState, cancelKeyboard, inMemoryDB,
+    // [META-AI] بديل مجاني لمفتاح NVIDIA في النشر التلقائي (مقتطف بالذكاء)
+    metaAiReply: async (uid, systemPrompt, text) => _metaAiReply(uid, systemPrompt, "المستخدم", text, `autopost_${uid}`),
+  });
   return _groupsMod.handleGroupsCallback(bot2, chatId, userId, data);
 }
 // src/bot/handlers/callbacks.ts

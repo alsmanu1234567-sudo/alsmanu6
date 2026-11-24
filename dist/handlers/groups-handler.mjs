@@ -411,8 +411,21 @@ async function preparePostArticle(userId, article, item) {
   }
   if (item.excerptMode !== 'ai') return articleExcerpt(article.content, item.excerptLength);
   const user = _deps?.getUser?.(String(userId)) || {};
+  const key = user.nvidiaKey || process.env.NVIDIA_API_KEY || null;
+  if (!key) {
+    // [META-AI] بلا مفتاح: استخدم ذكاء ميتا المدمج في واتساب (إن كان مفعّلاً ورقم متصل)
+    if (user.metaAiEnabled !== false && typeof _deps?.metaAiReply === 'function') {
+      const systemPrompt = item.aiPrompt
+        ? String(item.aiPrompt)
+        : 'لخّص المقال التالي بالعربية في مقتطف جذاب ومختصر من 120 إلى 200 كلمة، بلا مقدمات ولا روابط.';
+      const text = `العنوان: ${article.title}\n\n${String(article.content || '').slice(0, 6000)}`;
+      const meta = await _deps.metaAiReply(String(userId), systemPrompt, text);
+      if (meta) return String(meta).trim();
+    }
+    throw new Error('لا يوجد مفتاح NVIDIA، وذكاء ميتا لم يرد. أضف مفتاحاً أو فعّل ذكاء ميتا من قسم الذكاء الاصطناعي.');
+  }
   return prepareArticleWithAi({
-    key: user.nvidiaKey || process.env.NVIDIA_API_KEY || null,
+    key,
     model: user.nvidiaModel || 'meta/llama-3.1-8b-instruct',
     title: article.title, content: article.content, prompt: item.aiPrompt || '',
   });
@@ -752,7 +765,10 @@ export async function saveWebGroupAutoPost(userId, groupId, phoneNumber, input =
   if (!["length", "ai", "full"].includes(excerptMode)) throw new Error("طريقة إعداد المقتطف غير صالحة");
   const aiPrompt = String(input.aiPrompt || "").trim();
   if (aiPrompt.length > 2000) throw new Error("البرومبت يتجاوز 2000 حرف");
-  if (excerptMode === "ai" && !(user.nvidiaKey || process.env.NVIDIA_API_KEY)) throw new Error("أضف مفتاح NVIDIA في قسم الذكاء الاصطناعي أولاً");
+  if (excerptMode === "ai" && !(user.nvidiaKey || process.env.NVIDIA_API_KEY)
+      && !(user.metaAiEnabled !== false && typeof _deps?.metaAiReply === 'function')) {
+    throw new Error("أضف مفتاح NVIDIA في قسم الذكاء الاصطناعي أولاً، أو فعّل ذكاء ميتا (بلا مفتاح)");
+  }
   const excerptLength = input.excerptLength == null || input.excerptLength === "" ? 500 : Number(input.excerptLength);
   if (!Number.isInteger(excerptLength) || excerptLength < 50 || excerptLength > 12000) throw new Error("حدد طول المقتطف بين 50 و12000 حرف");
   const items = autoPostItems(user);

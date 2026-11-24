@@ -290,6 +290,9 @@ async function main() {
   try {
     const limitMb = readMemoryLimitMb();
     const guard = startMemoryGuard({
+      // [RAM-512] على حاويات صغيرة (512MB) لا نعيد التشغيل عند 85% حتى لا تدخل
+      // العملية في حلقة إعادة تشغيل؛ نرفع العتبة إلى 92% ونترك التنظيف يعمل أولاً.
+      ratio: limitMb > 0 && limitMb <= 768 ? 0.92 : 0.85,
       getChild: () => runner.getChild(),
       logger: { info: (m) => ok(m), warn: (m) => wrn(m) },
       restart: (child) => { try { child.kill("SIGKILL"); } catch { } },

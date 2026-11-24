@@ -50,9 +50,73 @@ async function showVerifiedModels(bot, chatId, userId, page, getUser, ai) {
   const label=verified?'النماذج التي ردّت أثناء آخر فحص':'نماذج NVIDIA المعلّمة Free Endpoint — لم تُختبر بعد';
   await bot.sendMessage(chatId, `🧠 ${label}: ${models.length} — صفحة ${page+1}/${pages}\nقد يتغير التوفر والتكلفة. اضغط اكتشاف النماذج لاختبار الاستجابة.`, {reply_markup:{inline_keyboard:rows}});
 }
+// ══ [META-AI] لوحة «ذكاء ميتا» — مزوّد بلا مفتاح عبر محادثة Meta AI في واتساب ══
+function _metaAiSockOf(userId) {
+  try {
+    const raw = _deps.inMemoryDB?.sessions?.get?.(String(userId));
+    const sock = raw?.sock || raw;
+    return sock?.ws?.readyState === 1 ? sock : null;
+  } catch { return null; }
+}
+async function showMetaAiPanel(bot2, chatId, userId) {
+  const { getUser, aiMenuKeyboard } = _deps;
+  const u = getUser(userId) || {};
+  const enabled = u.metaAiEnabled !== false;
+  const sock = _metaAiSockOf(userId);
+  const stats = u.aiStats || {};
+  const lines = [
+    "🤖 *ذكاء ميتا — بلا مفتاح*",
+    "",
+    "البوت يرسل سؤال العميل إلى محادثة *Meta AI* المدمجة في واتساب (‎+1 313 555 0002‎) ويعيد لك ردّها.",
+    "تُستخدم تلقائياً عندما لا يوجد مفتاح NVIDIA، وتعمل في الردود التلقائية وأي قسم يستخدم الذكاء.",
+    "",
+    `الحالة: ${enabled ? "✅ مفعّل" : "⛔ متوقف"}`,
+    `رقم واتساب متصل: ${sock ? "✅" : "❌ (لا يمكن الإرسال الآن)"}`,
+    `ردود ميتا الناجحة: ${stats.metaAi || 0}`,
+    "",
+    "⚠️ التوفّر يعتمد على الدولة ونوع الحساب (حساب شخصي لا Business).",
+    "إن لم تصل ردود 3 مرات، يتوقف تلقائياً 6 ساعات ثم يعود.",
+  ];
+  const rows = [
+    [{ text: enabled ? "⛔ إيقاف ذكاء ميتا" : "✅ تفعيل ذكاء ميتا", callback_data: "ai_metaai_toggle" }],
+    [{ text: "🧪 اختبار الآن", callback_data: "ai_metaai_test" }],
+    [{ text: "🔙 رجوع", callback_data: "menu_ai" }],
+  ];
+  await bot2.sendMessage(chatId, lines.join("\n"), { parse_mode: "Markdown", reply_markup: { inline_keyboard: rows } });
+}
+
 export async function handleAiCallback2(bot2, chatId, userId, data) {
   const { getUser, saveUser, setState, cancelKeyboard, aiMenuKeyboard } = _deps;
   const user = getUser(userId);
+  if (data === "ai_metaai") { await showMetaAiPanel(bot2, chatId, userId); return true; }
+  if (data === "ai_metaai_toggle") {
+    const enabled = getUser(userId)?.metaAiEnabled !== false;
+    saveUser(userId, { metaAiEnabled: !enabled });
+    await bot2.sendMessage(chatId, !enabled ? "✅ تم تفعيل ذكاء ميتا." : "⛔ تم إيقاف ذكاء ميتا.");
+    await showMetaAiPanel(bot2, chatId, userId);
+    return true;
+  }
+  if (data === "ai_metaai_test") {
+    const sock = _metaAiSockOf(userId);
+    if (!sock) { await bot2.sendMessage(chatId, "❌ لا يوجد رقم واتساب متصل الآن. اربط رقماً أولاً."); return true; }
+    await bot2.sendMessage(chatId, "🧪 أرسلنا سؤالاً تجريبياً إلى Meta AI… قد يستغرق حتى دقيقة.");
+    try {
+      const mod = await import("../services/ai/meta-ai-provider.mjs");
+      const client = mod.createMetaAiClient({ sock, timeoutMs: 90000 });
+      const reply = await client.ask("اكتب جملة قصيرة بالعربية تقول: تم اختبار الاتصال بنجاح.");
+      if (!reply) {
+        await bot2.sendMessage(chatId, "❌ لم يصل رد من Meta AI خلال 90 ثانية.\nالأسباب الشائعة: الميزة غير متاحة في دولة الرقم، أو الحساب Business، أو أن رقمك لم تظهر له محادثة Meta AI بعد (افتحها مرة من التطبيق: ابحث عن Meta AI وابدأ محادثة).");
+        return true;
+      }
+      const u2 = getUser(userId) || {};
+      const s2 = u2.aiStats || {};
+      saveUser(userId, { aiStats: { ...s2, metaAi: (s2.metaAi || 0) + 1, lastAt: Date.now() } });
+      await bot2.sendMessage(chatId, "✅ *ردّ Meta AI:*\n" + String(reply).slice(0, 1500), { parse_mode: "Markdown" });
+    } catch (e) {
+      await bot2.sendMessage(chatId, "❌ فشل الاختبار: " + String(e?.message || e).slice(0, 200));
+    }
+    return true;
+  }
   if (data === 'ai_discover_models') {
     const ai = await _ai();
     const key = ai.getNvidiaKey(userId);
