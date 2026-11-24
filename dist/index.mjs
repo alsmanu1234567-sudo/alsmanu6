@@ -293080,11 +293080,17 @@ function _userIdFromSessKey(sessKey) {
 // فيستمر البوت بإرسال QR ويصبح زر الإلغاء بلا أثر.
 // ══════════════════════════════════════════════════════════════════
 var _cancelledSessKeys = /* @__PURE__ */ new Map(); // sessKey → ts
+var _CANCEL_TOMBSTONE_TTL = 6e4; // الشاهدة تعيش دقيقة فقط: تمنع الإحياء الفوري ولا تحجب محاولة جديدة
 function _markCancelled(key) {
   _cancelledSessKeys.set(String(key), Date.now());
   if (_cancelledSessKeys.size > 300) { const k0 = _cancelledSessKeys.keys().next().value; _cancelledSessKeys.delete(k0); }
 }
-function _isCancelledKey(key) { return _cancelledSessKeys.has(String(key)); }
+function _isCancelledKey(key) {
+  const ts = _cancelledSessKeys.get(String(key));
+  if (!ts) return false;
+  if (Date.now() - ts > _CANCEL_TOMBSTONE_TTL) { _cancelledSessKeys.delete(String(key)); return false; }
+  return true;
+}
 function _clearCancelledKey(key) { _cancelledSessKeys.delete(String(key)); }
 // ── [MULTI-NUM] سجل سوكتات كل رقم + الرقم النشط (مصدر الحقيقة الوحيد) ──
 var _numberSocks = /* @__PURE__ */ new Map();      // userId → Map(phone → sock)
@@ -293210,7 +293216,6 @@ async function _connectQr(sessKey, chatId, userId) {
   userId = userId || _userIdFromSessKey(sessKey); // [MULTI-NUM] المعرّف الحقيق�� لتيليجرام
   const s = sessions.get(sessKey);
   if (!s || s.cancelled) return;
-  if (_isCancelledKey(sessKey)) { try { s.sock?.ws?.close?.(); } catch { } return; }
   // [WA-SINGLE-FLIGHT] اتصالان لنفس الجلسة يُفسدان تشفير Signal (Key used already) ويُغلق واتساب الاتصال بـ428
   {
     const _st = s.sock?.ws?.readyState;
@@ -293364,6 +293369,7 @@ async function startPairingSession(userId, chatId, phoneNumber) {
   const prevPending = _pendingConnect.get(String(userId));
   if (prevPending && prevPending !== sessKey) await cancelSession(prevPending);
   await cancelSession(sessKey);
+  _clearCancelledKey(sessKey); // [FIX-NO-CODE] cancelSession يسجّل شاهدة — نمسحها لأن هذه محاولة جديدة مقصودة
   clearAuthDir(sessKey);
   const session = {
     state: "pairing_pending",
@@ -293378,6 +293384,11 @@ async function startPairingSession(userId, chatId, phoneNumber) {
   sessions.set(sessKey, session);
   _pendingConnect.set(String(userId), sessKey);
   workerManager.setWorkerStatus(userId, "connecting");
+  // [FIX-NO-CODE] تأكيد فوري للمستخدم + سجل واضح: كان أي فشل صامت هنا يعني «لا شيء يصل»
+  try { logger.info({ userId, sessKey, phone: `+${cleanPhone}` }, "[PAIRING] بدء طلب كود الربط"); } catch { }
+  if (botRef) {
+    await botRef.sendMessage(chatId, `\u23F3 \u062C\u0627\u0631\u064D \u0637\u0644\u0628 \u0643\u0648\u062F \u0627\u0644\u0631\u0628\u0637 \u0644\u0644\u0631\u0642\u0645 +${cleanPhone}...\n\u064A\u0638\u0647\u0631 \u0627\u0644\u0643\u0648\u062F \u0647\u0646\u0627 \u062E\u0644\u0627\u0644 \u062B\u0648\u0627\u0646\u064D. \u0625\u0646 \u0644\u0645 \u064A\u0638\u0647\u0631 \u062E\u0644\u0627\u0644 \u062F\u0642\u064A\u0642\u0629\u060C \u0623\u0639\u062F \u0627\u0644\u0645\u062D\u0627\u0648\u0644\u0629 \u0648\u0623\u0631\u0633\u0644 \u0627\u0644\u0631\u0642\u0645 \u0645\u062C\u062F\u062F\u0627\u064B.`, {}).catch(() => { });
+  }
   await _connectPairing(sessKey, chatId, cleanPhone, true, userId);
 }
 
@@ -293538,7 +293549,6 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
   userId = userId || _userIdFromSessKey(sessKey); // [MULTI-NUM] المعرّف الحقيقي لتيليجرام
   const s = sessions.get(sessKey);
   if (!s || s.cancelled) return;
-  if (_isCancelledKey(sessKey)) return; // [FIX-CANCEL-RESURRECT]
   const authDir = getAuthDir(sessKey);
   try {
     const { useMultiFileAuthState: useMultiFileAuthState2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
@@ -293622,6 +293632,7 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
           cur.pairingCode = formatted;
           cur.codeAt = Date.now(); // [FIX-CODE-LOOP] عمر الكود لتفادي حلقة طلب أكواد
           sessions.set(sessKey, cur);
+          try { logger.info({ userId, sessKey }, "[PAIRING] تم تسليم كود الربط"); } catch { }
         }
         if (botRef) {
           await botRef.sendMessage(
@@ -293651,11 +293662,13 @@ ${formatted}
           );
         }
       } catch (pairingErr) {
-        logger.error({ pairingErr }, "requestPairingCode failed");
+        logger.error({ pairingErr, userId, sessKey }, "requestPairingCode failed");
         const cur = sessions.get(sessKey);
         if (!cur || cur.cancelled) return;
         const errMsg = pairingErr.message || "";
-        const isTimeoutErr = errMsg.includes("timed out") || errMsg.includes("408") || errMsg.includes("timeout");
+        // [FIX-NO-CODE] أي فشل مؤقت (408/428/500/Connection Closed) يُعاد معه الطلب بسرعة بدل الاستسلام
+        const isTimeoutErr = errMsg.includes("timed out") || errMsg.includes("408") || errMsg.includes("timeout")
+          || errMsg.includes("428") || errMsg.includes("500") || /closed|not open|Connection/i.test(errMsg);
         if (isTimeoutErr && cur.retries < 3) {
           cur.retries++;
           cur.cancelled = false;
@@ -293911,6 +293924,7 @@ async function reconnectSession(userId, chatId) {
       cancelled: false,
       isAutoRestore: sessKeys.length > 1 // عند تعدد الأرقام لا نُغرق المستخدم برسائل
     };
+    _clearCancelledKey(sessKey); // محاولة إعادة اتصال مقصودة
     sessions.set(sessKey, session);
     workerManager.setWorkerStatus(uid, "connecting");
     await _connectQr(sessKey, chatId, uid);
