@@ -293026,6 +293026,8 @@ function makeBaileysSocket(authState) {
 }
 async function sendQrToTelegram(chatId, qrRaw, session, userId) {
   if (!botRef) return;
+  if (!session || session.cancelled) return; // [FIX-QR-FLOOD] لا صور QR لجلسة ملغاة
+  if (_isCancelledKey(userId)) return;
   try {
     const qrImageBuffer = await import_qrcode.default.toBuffer(qrRaw, {
       type: "png",
@@ -293072,6 +293074,18 @@ function _userIdFromSessKey(sessKey) {
   const m = String(sessKey).match(/^(\d+)/);
   return m ? m[1] : String(sessKey);
 }
+// ══════════════════════════════════════════════════════════════════
+// [FIX-CANCEL-RESURRECT] شواهد إلغاء (tombstones) — كانت الجلسة الملغاة
+// تُحيا من جديد عند وصول حدث connection.update متأخر من السوكت المُغلَق،
+// فيستمر البوت بإرسال QR ويصبح زر الإلغاء بلا أثر.
+// ══════════════════════════════════════════════════════════════════
+var _cancelledSessKeys = /* @__PURE__ */ new Map(); // sessKey → ts
+function _markCancelled(key) {
+  _cancelledSessKeys.set(String(key), Date.now());
+  if (_cancelledSessKeys.size > 300) { const k0 = _cancelledSessKeys.keys().next().value; _cancelledSessKeys.delete(k0); }
+}
+function _isCancelledKey(key) { return _cancelledSessKeys.has(String(key)); }
+function _clearCancelledKey(key) { _cancelledSessKeys.delete(String(key)); }
 // ── [MULTI-NUM] سجل سوكتات كل رقم + الرقم النشط (مصدر الحقيقة الوحيد) ──
 var _numberSocks = /* @__PURE__ */ new Map();      // userId → Map(phone → sock)
 var _activeNumberPhone = /* @__PURE__ */ new Map(); // userId → phone (+E164)
@@ -293176,6 +293190,8 @@ async function startQrSession(userId, chatId) {
   const prevPending = _pendingConnect.get(String(userId));
   if (prevPending) await cancelSession(prevPending); // ألغِ فقط عملية رب�� سابقة لم تكتمل
   const sessKey = _sessKeyForNewQr(userId);
+  _clearCancelledKey(sessKey);
+  _clearCancelledKey(userId);
   const session = {
     state: "qr_pending",
     chatId,
@@ -293194,6 +293210,7 @@ async function _connectQr(sessKey, chatId, userId) {
   userId = userId || _userIdFromSessKey(sessKey); // [MULTI-NUM] المعرّف الحقيق�� لتيليجرام
   const s = sessions.get(sessKey);
   if (!s || s.cancelled) return;
+  if (_isCancelledKey(sessKey)) { try { s.sock?.ws?.close?.(); } catch { } return; }
   // [WA-SINGLE-FLIGHT] اتصالان لنفس الجلسة يُفسدان تشفير Signal (Key used already) ويُغلق واتساب الاتصال بـ428
   {
     const _st = s.sock?.ws?.readyState;
@@ -293218,11 +293235,48 @@ async function _connectQr(sessKey, chatId, userId) {
       let cur = sessions.get(sessKey);
       if (cur?.cancelled) { sock.ws?.close?.(); return; }
       if (!cur) {
+        // [FIX-CANCEL-RESURRECT] جلسة ملغاة/محذوفة لا تُحيا (كان هذا سبب تدفّق QR بعد الإلغاء)
+        if (_isCancelledKey(sessKey)) { try { sock.ws?.close?.(); } catch { } return; }
         cur = { state: "reconnecting", chatId: chatId || null, userId, sessKey, retries: 1, wasEverConnected: true, cancelled: false, sock };
         sessions.set(sessKey, cur);
         try { logger.warn({ userId, sessKey }, "[WA] خانة جلسة مفقودة عند حدث الاتصال — أُعيد بناؤها"); } catch { }
       }
       if (qr) {
+        // [FIX-PAIRING-NO-QR] جلسة «ربط برقم الهاتف» لا ترسل QR أبداً
+        if (cur.phoneNumber || cur.state === "pairing_pending") {
+          // كود حديث (أقل من 45 ثانية) → تجاهل الـQR تماماً وانتظر إدخال الكود
+          const _codeAge = cur.codeAt ? (Date.now() - cur.codeAt) : Infinity;
+          if (cur.pairingCode && _codeAge < 45e3) {
+            try { logger.info({ userId, sessKey, ageMs: _codeAge }, "[WA] تجاهل QR: كود ربط حديث سارٍ"); } catch { }
+            return;
+          }
+          cur.codeReq = (cur.codeReq || 0) + 1;
+          sessions.set(sessKey, cur);
+          try { sock.ws?.close?.(); } catch { }
+          const _ph = String(cur.phoneNumber || "").replace(/\D/g, "");
+          if (cur.codeReq > 5) {
+            // [FIX-CODE-LOOP] توقف بدل حلقة طلب أكواد لا نهائية
+            cur.cancelled = true; sessions.delete(sessKey); _markCancelled(sessKey);
+            try { if (_pendingConnect.get(String(userId)) === sessKey) _pendingConnect.delete(String(userId)); } catch { }
+            if (botRef) await botRef.sendMessage(chatId, "\u26D4 \u062A\u0648\u0642\u0641\u062A \u0645\u062D\u0627\u0648\u0644\u0629 \u0627\u0644\u0631\u0628\u0637 \u0628\u0627\u0644\u0643\u0648\u062F \u0628\u0639\u062F 5 \u0645\u062D\u0627\u0648\u0644\u0627\u062A.\n\u062A\u0623\u0643\u062F \u0645\u0646 \u0627\u0644\u0631\u0642\u0645 \u0648\u0643\u0648\u062F \u0627\u0644\u062F\u0648\u0644\u0629\u060C \u0623\u0648 \u0627\u0633\u062A\u062E\u062F\u0645 \u0627\u0644\u0631\u0628\u0637 \u0628\u0627\u0644QR.", { reply_markup: { inline_keyboard: [[{ text: "\u{1F522} \u0631\u0628\u0637 \u0628\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062A\u0641", callback_data: "connect_pairing" }], [{ text: "\u{1F4F7} \u0631\u0628\u0637 \u0628\u0627\u0644QR", callback_data: "connect_qr" }]] } }).catch(() => { });
+            return;
+          }
+          try { logger.warn({ userId, sessKey, n: cur.codeReq }, "[WA] QR في جلسة ربط بالرقم — أُعيد طلب كود جديد"); } catch { }
+          if (_ph) setTimeout(() => { _connectPairing(sessKey, chatId, _ph, true, userId).catch(() => { }); }, 1500);
+          return;
+        }
+        cur.qrCount = (cur.qrCount || 0) + 1;
+        sessions.set(sessKey, cur);
+        if (cur.qrCount > 4) {
+          // [FIX-QR-FLOOD] سقف 4 صور QR ثم إغلاق وإرشاد المستخدم لكود الرقم
+          cur.cancelled = true;
+          sessions.delete(sessKey);
+          _markCancelled(sessKey);
+          try { if (_pendingConnect.get(String(userId)) === sessKey) _pendingConnect.delete(String(userId)); } catch { }
+          try { sock.ws?.close?.(); } catch { }
+          if (botRef) await botRef.sendMessage(chatId, "\u26D4 \u062A\u0648\u0642\u0641\u062A \u0645\u062D\u0627\u0648\u0644\u0629 \u0627\u0644\u0631\u0628\u0637 \u0628\u0627\u0644QR \u0628\u0639\u062F 4 \u0645\u0631\u0627\u062A.\n\u0627\u0633\u062A\u062E\u062F\u0645 \u0631\u0628\u0637 \u0628\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062A\u0641 \u0644\u0644\u062D\u0635\u0648\u0644 \u0639\u0644\u0649 \u0643\u0648\u062F \u0628\u062F\u0644 \u0627\u0644QR.", { reply_markup: { inline_keyboard: [[{ text: "\u{1F522} \u0631\u0628\u0637 \u0628\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062A\u0641", callback_data: "connect_pairing" }], [{ text: "\u{1F4F7} \u0631\u0628\u0637 \u0628\u0627\u0644QR", callback_data: "connect_qr" }]] } }).catch(() => { });
+          return;
+        }
         await sendQrToTelegram(chatId, qr, cur, sessKey);
       }
       if (connection === "open") {
@@ -293306,6 +293360,7 @@ async function startPairingSession(userId, chatId, phoneNumber) {
   // [MULTI-NUM] مفتاح حتمي لهذا الرقم بالذات — إلغاء/مسح خانة هذا الرقم فقط،
   // وجلسات الأرقام الأخرى لا تُمسّ إطلاقاً (الرقم القديم يظل شغالاً)
   const sessKey = `${userId}_${cleanPhone}`;
+  _clearCancelledKey(sessKey);
   const prevPending = _pendingConnect.get(String(userId));
   if (prevPending && prevPending !== sessKey) await cancelSession(prevPending);
   await cancelSession(sessKey);
@@ -293483,6 +293538,7 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
   userId = userId || _userIdFromSessKey(sessKey); // [MULTI-NUM] المعرّف الحقيقي لتيليجرام
   const s = sessions.get(sessKey);
   if (!s || s.cancelled) return;
+  if (_isCancelledKey(sessKey)) return; // [FIX-CANCEL-RESURRECT]
   const authDir = getAuthDir(sessKey);
   try {
     const { useMultiFileAuthState: useMultiFileAuthState2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
@@ -293542,7 +293598,8 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
             ? Math.min(cur.retries * 1e3 + 1e3, 8e3)
             : Math.min(cur.retries * 5e3, 6e4);
           logger.info({ userId, sessKey, retries: cur.retries, statusCode, delay: delay2 }, "Reconnecting pairing session");
-          setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, false, userId), delay2);
+          // [FIX-PAIRING-RETRY] إن لم يُسلَّم كود بعد → اطلب كوداً جديداً بدل اتصال بلا كود (يولّد QR)
+          setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, !cur.pairingCode || (Date.now() - (cur.codeAt || 0) > 45e3), userId), delay2);
         } else {
           if (botRef) await botRef.sendMessage(
             chatId,
@@ -293563,6 +293620,7 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
         const cur = sessions.get(sessKey);
         if (cur) {
           cur.pairingCode = formatted;
+          cur.codeAt = Date.now(); // [FIX-CODE-LOOP] عمر الكود لتفادي حلقة طلب أكواد
           sessions.set(sessKey, cur);
         }
         if (botRef) {
@@ -293644,7 +293702,7 @@ ${errMsg}
     if (cur.retries < 4) {
       cur.retries++;
       sessions.set(sessKey, cur);
-      setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, false, userId), 5e3);
+      setTimeout(() => _connectPairing(sessKey, chatId, cleanPhone, !cur.pairingCode || (Date.now() - (cur.codeAt || 0) > 45e3), userId), 5e3);
     } else {
       sessions.delete(sessKey);
       clearAuthDir(sessKey);
@@ -293903,6 +293961,7 @@ async function cancelSession(sessKeyOrUserId) {
   // — لا يلمس أبداً سوكتات الأرقام الأخرى للمستخدم نفسه
   const key = String(sessKeyOrUserId);
   const userId = _userIdFromSessKey(key);
+  _markCancelled(key); // [FIX-CANCEL-RESURRECT] شاهدة: لا تُحيا هذه الجلسة بعد الإلغاء
   // [MULTI-NUM] عند تمرير userId نقي: ألغِ أيضاً عملية الربط الجارية (مفتاحها sessKey)
   if (key === userId) {
     const pend = _pendingConnect.get(userId);
@@ -294016,6 +294075,7 @@ async function _waSupervisorTick() {
   const now = Date.now();
   for (const [key, st0] of [...sessions.entries()]) {
     if (!st0 || st0.cancelled) continue;
+    if (_isCancelledKey(key)) { sessions.delete(key); continue; } // [FIX-CANCEL-RESURRECT]
     const ready = st0.sock?.ws?.readyState;
     if (ready === 0 || ready === 1) { _waSup.delete(key); continue; }
     const rec = _waSup.get(key) || { n: 0, at: 0 };
@@ -294024,7 +294084,12 @@ async function _waSupervisorTick() {
     rec.n++; rec.at = now; _waSup.set(key, rec);
     try { logger.warn({ sessKey: key, attempts: rec.n, readyState: ready ?? null }, "[WA-SUPERVISOR] إعادة اتصال تلقائية"); } catch { }
     try { st0.sock?.ws?.terminate?.(); } catch { }
-    try { await _connectQr(key, st0.chatId || null, st0.userId || _userIdFromSessKey(key)); } catch (e) { try { logger.warn({ err: String(e?.message || e).slice(0, 160) }, "[WA-SUPERVISOR] فشل المحاولة"); } catch { } }
+    // [FIX-SUPERVISOR-PAIRING] الجلسة التي بدأت «ربط برقم» تُعاد بطلب كود لا بـQR
+    const _supPhone = String(st0.phoneNumber || "").replace(/\D/g, "");
+    try {
+      if (_supPhone) await _connectPairing(key, st0.chatId || null, _supPhone, !st0.pairingCode, st0.userId || _userIdFromSessKey(key));
+      else await _connectQr(key, st0.chatId || null, st0.userId || _userIdFromSessKey(key));
+    } catch (e) { try { logger.warn({ err: String(e?.message || e).slice(0, 160) }, "[WA-SUPERVISOR] فشل المحاولة"); } catch { } }
   }
 }
 function _startWaSupervisor() {
@@ -323864,6 +323929,15 @@ async function handleLinkingCallback(bot2, chatId, userId, data) {
     const _pend = _pendingConnect.get(String(userId));
     if (_pend) { await cancelSession(_pend); _pendingConnect.delete(String(userId)); }
     else await cancelSession(userId); // توافق قديم: جلسة قديمة بمفتاح userId
+    // [FIX-CANCEL-ALL] الإلغاء كان يترك محاولات ربط أخرى (QR/كود) عالقة تعمل وتُرسل QR
+    try {
+      for (const [_k2, _v2] of [...sessions.entries()]) {
+        const _ks = String(_k2);
+        if (_ks === String(userId) || !_ks.startsWith(String(userId) + "_")) continue;
+        if (_v2?.state === "qr_pending" || _v2?.state === "pairing_pending") await cancelSession(_k2);
+      }
+      _pendingConnect.delete(String(userId));
+    } catch { }
     clearState(userId);
     const freshUser = getUser(userId);
     await bot2.sendMessage(chatId, "\u2705 \u062A\u0645 \u0625\u0644\u063A\u0627\u0621 \u0639\u0645\u0644\u064A\u0629 \u0627\u0644\u0631\u0628\u0637", {
