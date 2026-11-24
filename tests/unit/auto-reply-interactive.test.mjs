@@ -43,10 +43,11 @@ test('actual dispatcher handles button click in the same chat and respects targe
   const start=src.indexOf('      async function handleAutoReplyInteraction(');
   const end=src.indexOf('      // تتبع جميع الرسائل الصادرة',start);
   assert.ok(start>0 && end>start);
-  const create=new Function('getUserReplies','matchesReplyTarget','resolveInteractiveAnswer','sock','jid','msg','isGroup','userId',src.slice(start,end)+'\nreturn handleAutoReplyInteraction;');
+  const {resolveInteractiveAction}=await import('../../services/auto-reply-interactive.mjs');
+  const create=new Function('getUserReplies','matchesReplyTarget','resolveInteractiveAction','sendInteractiveAutoReply','sock','jid','msg','isGroup','userId',src.slice(start,end)+'\nreturn handleAutoReplyInteraction;');
   const reply={id:'r123',isActive:true,target:'all',scope:'both',replyType:'button_quick',replyContent:JSON.stringify({text:'اختيار',entries:[{label:'نعم',value:'تم بنجاح'}]})};
   const sent=[];const sock={sendMessage:async(...args)=>sent.push(args)};const jid='123@s.whatsapp.net';
-  const run=create(()=>[reply],matchesReplyTarget,resolveInteractiveAnswer,sock,jid,{key:{fromMe:false,remoteJid:jid}},false,'u');
+  const run=create(()=>[reply],matchesReplyTarget,resolveInteractiveAction,async()=>{throw Error('no step expected')},sock,jid,{key:{fromMe:false,remoteJid:jid}},false,'u');
   assert.equal(await run('arbtn:r123:0'),true);
   assert.equal(sent[0][0],jid);assert.equal(sent[0][1].text,'تم بنجاح');
   reply.target='self';await run('arbtn:r123:0');assert.equal(sent.length,1);

@@ -41,6 +41,7 @@ import {
   publishWebGroupAutoPostNow,
   webGuardTestWelcome,
   webGuardDirectory,
+  webGuardMemberAction,
   webGuardReAdd,
   webGuardKick,
   webGuardKickOffenders,
@@ -257,6 +258,11 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
       limit: req.query?.limit || 400,
     });
   }));
+  // [MEMBERS-ACTIONS] ترقية/تنزيل مشرف، إزالة عضو، إضافة عضو — من داخل قائمة الأعضاء
+  app.post('/api/fw/groups/guard/members/action', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    return webGuardMemberAction(uid, groupId, req.body?.phoneNumber || null, req.body || {});
+  }));
   app.post('/api/fw/groups/guard/undo', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);
     const result = groupGuard.undoWarning(uid, groupId, String(req.body?.jid || ""));
@@ -413,6 +419,10 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     res.setHeader('Cache-Control', 'private, max-age=120');
     res.end(image.buffer);
   }));
+  // [FACILITATIONS-L3] قوالب جاهزة + عمليات جماعية على الردود
+  app.get('/api/replies/templates', guard(async () => reply().templates()));
+  app.post('/api/replies/template', parseJson, guard(async (uid, req) => reply().applyTemplate(req.body?.id)));
+  app.post('/api/replies/bulk', parseJson, guard(async (uid, req) => reply().bulk(uid, req.body || {})));
   app.get('/api/replies/typing',guard(async uid=>reply().typing(uid)));
   app.post('/api/replies/typing',parseJson,guard(async(uid,req)=>reply().saveTyping(uid,req.body)));
   app.post('/api/replies/delay', parseJson, guard(async (uid, req) => reply().delay(uid, req.body?.id, req.body?.enabled)));

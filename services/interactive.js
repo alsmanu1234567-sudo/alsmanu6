@@ -105,6 +105,26 @@ export function urlButton(displayText, url) {
   };
 }
 
+export function copyButton(displayText, code) {
+  const label = shortText(displayText, 25, "Copy button label");
+  const copyCode = String(code ?? "").trim();
+  if (!copyCode || copyCode.length > 1024) throw new Error("Copy code must be between 1 and 1024 characters");
+  return {
+    name: "cta_copy",
+    buttonParamsJson: JSON.stringify({ display_text: label, copy_code: copyCode }),
+  };
+}
+
+export function callButton(displayText, phoneNumber) {
+  const label = shortText(displayText, 25, "Call button label");
+  const digits = String(phoneNumber ?? "").replace(/\D/gu, "");
+  if (digits.length < 7 || digits.length > 15) throw new Error("Call button needs a full international phone number");
+  return {
+    name: "cta_call",
+    buttonParamsJson: JSON.stringify({ display_text: label, phone_number: `+${digits}` }),
+  };
+}
+
 async function prepareImage(sock, chatId, image) {
   if (!image) return null;
   const { prepareWAMessageMedia } = await import("@whiskeysockets/baileys");

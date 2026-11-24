@@ -5,6 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { validateInteractiveConfig } from '../services/auto-reply-interactive.mjs';
 import { normalizeImageRef } from '../services/reply-media.mjs';
+import { listTemplates, applyTemplate as applyReplyTemplate } from '../services/reply-templates.mjs';
 
 const TYPES = new Set(['text','ai','reaction','rotating','morphing','xo','xo_ultra','xo_multi','ludo','button_quick','button_list','button_url','carousel','image','video','audio','document','sticker']);
 const MEDIA = new Set(['image','video','audio','document','sticker']);
@@ -50,6 +51,8 @@ export function validateWebReply(uid, input, existing = {}) {
   const targetNumbers=(Array.isArray(input.targetNumbers)?input.targetNumbers:String(input.targetNumbers||'').split(/[\s,،]+/)).map(x=>String(x).replace(/\D/g,'')).filter(Boolean);
   if (targetNumbers.length>100 || targetNumbers.some(n=>n.length<7||n.length>15) || (['specific','multiple'].includes(target)&&!targetNumbers.length) || (target==='specific' && targetNumbers.length!==1)) throw Error('أدخل أرقاماً دولية صالحة للهدف');
   const scope=String(input.scope||'both'); if(!['both','private','groups'].includes(scope)) throw Error('النطاق غير صالح');
+  // [FOLDERS] تصنيف الردود داخل مجلدات لتسهيل الوصول
+  const folder=STR(input.folder ?? existing.folder ?? '',40,'اسم المجلد');
   let replyContent=STR(input.replyContent,50000,'محتوى الرد');
   let rotatingMessages=[], morphEdits=[];
   if(replyType==='ai' && !replyContent) replyContent='__ai_default__';
@@ -76,7 +79,7 @@ export function validateWebReply(uid, input, existing = {}) {
   const imageRef = normalizeReplyImage(uid, replyType, input, existing);
   const base = {...existing};
   if (imageRef === '' || (imageRef === undefined && !IMAGE_REPLY_TYPES.has(replyType))) delete base.imageRef;
-  return {...base,trigger,triggerType,caseSensitive:input.caseSensitive===true,replyType,replyContent,target,targetNumbers,scope,
+  return {...base,trigger,triggerType,caseSensitive:input.caseSensitive===true,replyType,replyContent,target,targetNumbers,scope,folder,
     ...(imageRef ? {imageRef} : {}),
     isActive: input.isActive !== false, dailyLimit:integer(input.dailyLimit,'الحد اليومي'),perUserLimit:integer(input.perUserLimit,'حد الشخص'),
     scheduleFrom:scheduleFrom||null,scheduleTo:scheduleTo||null,langFilter:langFilter||null,rotatingMessages,morphEdits,
@@ -99,6 +102,64 @@ export function createAutoReplyWebService({getUserReplies,inMemoryDB,persistRepl
     import(uid,data){uid=String(uid);if(!Array.isArray(data)||!data.length||data.length>500)throw Error('أدخل مصفوفة تضم من 1 إلى 500 رد'); const previous=getUserReplies(uid); const items=data.map(x=>({...validateWebReply(uid,x,previous.find(r=>r.replyType===x.replyType && r.replyContent===x.replyContent)||{}),id:randomUUID(),createdAt:new Date().toISOString()}));write(uid,[...getUserReplies(uid),...items]);return {count:items.length};},
     numbers(uid){return getUserNumbers(String(uid)).map(n=>({id:n.id,number:n.number,label:n.label,randomDelayEnabled:!!n.randomDelayEnabled}));},
     delay(uid,id,on){if(typeof on!=='boolean')throw Error('الحالة غير صالحة');const n=getUserNumbers(String(uid)).find(n=>String(n.id)===String(id));if(!n)throw Error('الرقم غير موجود');if(!updateNumber(String(uid),n.id,{randomDelayEnabled:on}))throw Error('تعذر حفظ الإعداد');return {ok:true};},
+    templates() { return { templates: listTemplates() }; },
+    applyTemplate(id) { return applyReplyTemplate(id); },
+    // [BULK] عمليات جماعية: تفعيل/تعطيل، حذف، تكرار، نقل مجلد، إضافة زر لكل المحدد
+    bulk(uid, input = {}) {
+      uid = String(uid);
+      const ids = new Set((Array.isArray(input.ids) ? input.ids : []).map(String));
+      if (!ids.size) throw Error('اختر رداً واحداً على الأقل');
+      if (ids.size > 200) throw Error('الحد 200 رد في المرة الواحدة');
+      const action = String(input.action || '').trim();
+      const items = getUserReplies(uid);
+      const selected = items.filter(r => ids.has(String(r.id)));
+      if (!selected.length) throw Error('لم يُعثر على ردود محددة');
+      const info = { action, count: 0, skipped: 0 };
+      if (action === 'enable' || action === 'disable') {
+        const on = action === 'enable';
+        write(uid, items.map(r => ids.has(String(r.id)) ? { ...r, isActive: on } : r));
+        info.count = selected.length;
+        return info;
+      }
+      if (action === 'delete') {
+        write(uid, items.filter(r => !ids.has(String(r.id))));
+        info.count = selected.length;
+        return info;
+      }
+      if (action === 'duplicate') {
+        if (items.length + selected.length > 1000) throw Error('الحد 1000 رد؛ احذف ردوداً أولاً');
+        const copies = selected.map(r => ({ ...structuredClone(r), id: randomUUID(), trigger: `${r.trigger} (نسخة)`.slice(0, 300), isActive: false, createdAt: new Date().toISOString() }));
+        write(uid, [...items, ...copies]);
+        info.count = copies.length;
+        return info;
+      }
+      if (action === 'folder') {
+        const folder = STR(input.folder, 40, 'اسم المجلد');
+        write(uid, items.map(r => ids.has(String(r.id)) ? { ...r, folder } : r));
+        info.count = selected.length;
+        return info;
+      }
+      if (action === 'addButton') {
+        const kindMap = { button_quick: 'quick', button_url: 'url', button_list: 'list' };
+        const entry = { label: STR(input.label, 24, 'عنوان الزر'), value: STR(input.value, 1000, 'قيمة الزر'), type: String(input.type || '') || undefined };
+        if (!entry.value) entry.value = entry.label;
+        const updated = items.map(r => {
+          const kind = kindMap[r.replyType];
+          if (!ids.has(String(r.id)) || !kind) { if (ids.has(String(r.id))) info.skipped += 1; return r; }
+          let cfg;
+          try { cfg = JSON.parse(r.replyContent || '{}'); } catch { info.skipped += 1; return r; }
+          const entries = Array.isArray(cfg.entries) ? [...cfg.entries] : [];
+          if (!entries.length) { info.skipped += 1; return r; }
+          if (entries.length >= 10 || entries.some(x => x.label === entry.label)) { info.skipped += 1; return r; }
+          entries.push({ ...entry });
+          info.count += 1;
+          return { ...r, replyContent: JSON.stringify({ ...cfg, entries }) };
+        });
+        write(uid, updated);
+        return info;
+      }
+      throw Error('عملية جماعية غير معروفة');
+    },
     async upload(uid,{name,data,type,mime}) {uid=String(uid);if(!MEDIA.has(type))throw Error('نوع الملف غير مدعوم');const encoded=String(data||'');if(!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)||encoded.length>5_600_000)throw Error('الملف غير صالح أو أكبر من 4 ميغابايت');const buffer=Buffer.from(encoded,'base64');if(!buffer.length||buffer.length>4*1024*1024)throw Error('الملف غير صالح أو أكبر من 4 ميغابايت');const mt=String(mime||''); if (['image','video','audio'].includes(type) && !mt.startsWith(type+'/')) throw Error('نوع الملف لا يطابق نوع الرد'); if(type==='sticker' && !(buffer.length>=12 && buffer.toString('ascii',0,4)==='RIFF' && buffer.toString('ascii',8,12)==='WEBP')) throw Error('الملصق يجب أن يكون ملف WebP صالحاً'); const cleanName=path.basename(String(name||'file')).replace(/[^a-zA-Z0-9._-]/g,'_').slice(-120)||'file';const ext=path.extname(cleanName).slice(0,12).replace(/[^.a-zA-Z0-9]/g,'');const dir=mediaRoot(uid);await mkdir(dir,{recursive:true});const file=path.join(dir,randomUUID()+ext);await writeFile(file,buffer,{flag:'wx'});return {replyContent:'local:'+file,_audioMime:STR(mime,120,'نوع الملف'),_fileName:cleanName};}
   };
 }

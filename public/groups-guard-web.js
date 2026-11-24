@@ -532,30 +532,123 @@
       .gg-member-totals{font-size:12px;opacity:.75;margin-bottom:8px}
       .gg-member-hide{width:100%;margin-top:10px}
       .gg-badge-admin{font-size:10px;padding:1px 6px;border-radius:8px;background:rgba(255,200,0,.18);color:#ffd75e}
+      .gg-member-acts{display:flex;gap:5px;flex:0 0 auto}
+      .gg-mact{border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);color:inherit;border-radius:8px;padding:5px 7px;font-size:11px;cursor:pointer;white-space:nowrap}
+      .gg-mact:hover{border-color:#bea3ff}
+      .gg-mact.danger{border-color:#6a3f52;background:rgba(120,40,60,.28);color:#ffb4c8}
+      .gg-member-tools select.gg-in{font-size:12px}
     `;
     document.head.appendChild(style);
+  }
+  let membersSort = "messages";
+  function sortMembers(list) {
+    const rows = [...list];
+    if (membersSort === "name") rows.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ar"));
+    else if (membersSort === "phone") rows.sort((a, b) => String(a.phone || "").localeCompare(String(b.phone || "")));
+    else rows.sort((a, b) => (Number(b.messages) || 0) - (Number(a.messages) || 0));
+    return rows;
   }
   function membersHtml(data) {
     const members = data.members || [];
     const totals = data.totals || {};
     if (!members.length) return `<div class="gg-empty">لا يوجد أعضاء للعرض.</div>`;
     return `<div class="gg-member-totals">${totals.members || members.length} عضواً · ${totals.admins || 0} مشرفاً · إجمالي الرسائل ${totals.messages || 0}${totals.withoutPhone ? ` · ${totals.withoutPhone} بلا رقم معروف` : ""}</div>
-      <div class="gg-member-tools"><input class="gg-in gg-search" id="ggMemberSearch" placeholder="ابحث بالاسم أو الرقم…"></div>
-      <div id="ggMemberList">${members.map((m) => memberRowHtml(m)).join("")}</div>
+      <div class="gg-member-tools">
+        <input class="gg-in gg-search" id="ggMemberSearch" placeholder="ابحث بالاسم أو الرقم…">
+        <select class="gg-in" id="ggMemberSort" style="max-width:130px">
+          <option value="messages" ${membersSort === "messages" ? "selected" : ""}>الأكثر رسائل</option>
+          <option value="name" ${membersSort === "name" ? "selected" : ""}>بالاسم</option>
+          <option value="phone" ${membersSort === "phone" ? "selected" : ""}>بالرقم</option>
+        </select>
+        <button class="gg-btn alt" type="button" id="ggMembersCsv" title="تصدير القائمة">⬇ CSV</button>
+      </div>
+      <div class="gg-member-tools">
+        <input class="gg-in" id="ggMemberAddPhone" placeholder="إضافة عضو: الرقم بالدولة بدون +" inputmode="numeric" dir="ltr">
+        <button class="gg-btn alt" type="button" id="ggMemberAdd">＋ إضافة</button>
+      </div>
+      <div id="ggMemberList">${sortMembers(members).map((m) => memberRowHtml(m)).join("")}</div>
       <button class="gg-btn alt gg-member-hide" id="ggMembersHide" type="button">🙈 إخفاء القائمة</button>`;
   }
   function memberRowHtml(m) {
     const name = String(m.name || "").trim();
     const shown = name || "بدون اسم محفوظ";
     const avatar = (name || String(m.phone || "")).slice(0, 2) || "؟";
-    return `<div class="gg-member">
+    const actions = [
+      m.isAdmin
+        ? `<button class="gg-mact" data-mact="demote" data-jid="${esc(m.jid)}" title="تنزيل من الإشراف">⬇ مشرف</button>`
+        : `<button class="gg-mact" data-mact="promote" data-jid="${esc(m.jid)}" title="ترقية إلى مشرف">⬆ مشرف</button>`,
+      m.isSelf ? "" : `<button class="gg-mact danger" data-mact="remove" data-jid="${esc(m.jid)}" title="إزالة من المجموعة">✕</button>`,
+    ].join("");
+    return `<div class="gg-member" data-row="${esc(m.jid)}">
       <div class="gg-member-av">${esc(avatar)}</div>
       <div class="gg-member-main">
         <b>${esc(shown)}${m.isSelf ? " (أنت)" : ""}${m.isAdmin ? ' <span class="gg-badge-admin">مشرف</span>' : ""}</b>
         <small>${esc(m.phoneDisplay || (m.phone ? "+" + m.phone : "رقم غير متاح"))}</small>
       </div>
       <div class="gg-member-count"><b>${Number(m.messages) || 0}</b><small>رسالة</small></div>
+      <div class="gg-member-acts">${actions}</div>
     </div>`;
+  }
+  function csvOfMembers(data) {
+    const rows = [["الاسم", "الرقم", "عدد الرسائل", "الدور"]];
+    for (const m of data.members || []) {
+      rows.push([m.name || "", m.phone ? "+" + m.phone : "", String(Number(m.messages) || 0), m.isAdmin ? "مشرف" : "عضو"]);
+    }
+    const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+    return "\ufeff" + csv;
+  }
+  function wireMembersPanel(panel, reload) {
+    const paintList = () => {
+      const term = (panel.querySelector("#ggMemberSearch")?.value || "").trim().toLowerCase();
+      const list = panel.querySelector("#ggMemberList");
+      if (!list || !membersCache) return;
+      const rows = sortMembers(membersCache.members || []).filter((m) => !term || String(m.name || "").toLowerCase().includes(term) || String(m.phone || "").includes(term));
+      list.innerHTML = rows.length ? rows.map((m) => memberRowHtml(m)).join("") : `<div class="gg-empty">لا نتائج مطابقة.</div>`;
+      wireActions();
+    };
+    const memberAction = async (action, jid) => {
+      const labels = { promote: "ترقية هذا العضو إلى مشرف؟", demote: "تنزيل هذا المشرف إلى عضو؟", remove: "إزالة هذا العضو من المجموعة؟" };
+      if (!confirm(labels[action])) return;
+      try {
+        await api("/api/fw/groups/guard/members/action", { groupId: state.groupId, action, jid });
+        toast("✅ تم تنفيذ الإجراء");
+        await reload();
+      } catch (error) { toast("❌ " + error.message); }
+    };
+    const wireActions = () => {
+      panel.querySelectorAll("[data-mact]").forEach((btn) => {
+        btn.onclick = () => void memberAction(btn.dataset.mact, btn.dataset.jid);
+      });
+    };
+    const search = panel.querySelector("#ggMemberSearch");
+    if (search) search.oninput = paintList;
+    const sortSel = panel.querySelector("#ggMemberSort");
+    if (sortSel) sortSel.onchange = () => { membersSort = sortSel.value; paintList(); };
+    const csvBtn = panel.querySelector("#ggMembersCsv");
+    if (csvBtn) csvBtn.onclick = () => {
+      if (!membersCache) return;
+      const url = URL.createObjectURL(new Blob([csvOfMembers(membersCache)], { type: "text/csv;charset=utf-8" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = `اعضاء-${(membersCache.subject || "المجموعة").slice(0, 20)}.csv`; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast("✅ تم تصدير CSV");
+    };
+    const addBtn = panel.querySelector("#ggMemberAdd");
+    if (addBtn) addBtn.onclick = async () => {
+      const phone = (panel.querySelector("#ggMemberAddPhone")?.value || "").replace(/\D/g, "");
+      if (phone.length < 7) return toast("❌ اكتب الرقم بالدولة كاملاً");
+      addBtn.disabled = true;
+      try {
+        await api("/api/fw/groups/guard/members/action", { groupId: state.groupId, action: "add", phone });
+        toast("✅ تمت إضافة العضو");
+        await reload();
+      } catch (error) { toast("❌ " + error.message); }
+      finally { addBtn.disabled = false; }
+    };
+    const hide = panel.querySelector("#ggMembersHide");
+    if (hide) hide.onclick = () => { panel.hidden = true; const tg = document.querySelector("#ggMembersToggle"); if (tg) tg.setAttribute("aria-expanded", "false"); membersOpen = false; };
+    wireActions();
+    return paintList;
   }
   function wireMembers(body) {
     const toggle = body.querySelector("#ggMembersToggle");
@@ -575,22 +668,18 @@
       toggle.setAttribute("aria-expanded", "true");
       if (countTag) countTag.textContent = "جارٍ التحميل…";
       try {
+        const reload = async () => {
+          membersCache = await api(`/api/fw/groups/guard/members?groupId=${encodeURIComponent(state.groupId)}`);
+          panel.innerHTML = membersHtml(membersCache);
+          wireMembersPanel(panel, reload);
+          if (countTag) countTag.textContent = `${(membersCache.totals || {}).members || membersCache.members.length} عضواً`;
+        };
         if (!membersCache) {
           membersCache = await api(`/api/fw/groups/guard/members?groupId=${encodeURIComponent(state.groupId)}`);
         }
         panel.innerHTML = membersHtml(membersCache);
         if (countTag) countTag.textContent = `${(membersCache.totals || {}).members || membersCache.members.length} عضواً`;
-        const hide = panel.querySelector("#ggMembersHide");
-        if (hide) hide.addEventListener("click", () => close());
-        const search = panel.querySelector("#ggMemberSearch");
-        if (search) search.addEventListener("input", () => {
-          const term = search.value.trim().toLowerCase();
-          const list = panel.querySelector("#ggMemberList");
-          if (!list) return;
-          const rows = (membersCache.members || []).filter((m) =>
-            !term || String(m.name || "").toLowerCase().includes(term) || String(m.phone || "").includes(term));
-          list.innerHTML = rows.length ? rows.map((m) => memberRowHtml(m)).join("") : `<div class="gg-empty">لا نتائج مطابقة.</div>`;
-        });
+        wireMembersPanel(panel, reload);
       } catch (error) {
         panel.innerHTML = `<div class="gg-empty">❌ ${esc(error.message)}</div>
           <button class="gg-btn alt gg-member-hide" id="ggMembersHide" type="button">🙈 إخفاء</button>`;

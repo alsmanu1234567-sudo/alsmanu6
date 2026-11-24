@@ -20,3 +20,41 @@
 .ar-img-del{border:1px solid #6a3f52;background:#2a1830;color:#ffb4c8;border-radius:11px;padding:8px 10px;cursor:pointer;font-size:12px}
 .ar-img-preview{margin-top:8px}
 .ar-img-preview img{max-width:100%;max-height:170px;border-radius:12px;border:1px solid #4a3f66;display:block}
+
+/* [FACILITATIONS-L3] قوالب + معاينة + خطوات + فلاتر + عمليات جماعية */
+.ar-templates{margin:4px 0 12px}
+.ar-tpl-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px}
+.ar-tpl{display:flex;flex-direction:column;gap:3px;text-align:right;border:1px solid #4a3f66;background:#1d1932;border-radius:13px;padding:10px;cursor:pointer;color:#efe9ff;font:inherit}
+.ar-tpl:hover{border-color:#bea3ff;background:#241f3d}
+.ar-tpl b{font-size:13px}
+.ar-tpl small{font-size:11px;color:#b5a9cf;line-height:1.5}
+.ar-btn-row select.br-type,.ar-btn-row select.br-next{flex:0 0 96px;font-size:12px}
+.ar-btn-row{flex-wrap:wrap}
+.ar-step{border:1px dashed #574a78;border-radius:13px;padding:10px;margin:10px 0;background:#1b1730}
+.ar-step h3{display:flex;align-items:center;gap:8px;font-size:13px}
+.ar-step .st-title{flex:1;border:1px solid #51476c;border-radius:9px;background:#141127;color:#f8f5ff;padding:6px 9px;font:inherit;font-size:13px}
+.ar-step .st-text{width:100%;border:1px solid #51476c;border-radius:10px;background:#141127;color:#f8f5ff;padding:9px;font:inherit;font-size:13px}
+.ar-preview{margin:12px 0 0}
+.pv-wrap{background:#0d1418;border-radius:14px;padding:12px;border:1px solid #2b3a3f}
+.pv-label{font-size:11px;color:#9db4bb;margin-bottom:8px}
+.pv-bubble{background:#14503f;border-radius:14px;padding:9px;max-width:100%;color:#f2fff9}
+.pv-img{width:100%;border-radius:10px;margin-bottom:7px;display:block;max-height:150px;object-fit:cover}
+.pv-text{font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.pv-muted{color:#8fb8a8;font-size:12px}
+.pv-btns{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+.pv-btn{background:#1f6f58;border-radius:9px;padding:7px 10px;font-size:12.5px;display:flex;justify-content:space-between;align-items:center}
+.pv-btn small{font-size:10px;opacity:.75}
+.pv-foot{font-size:10.5px;color:#9db4bb;margin-top:7px;text-align:center}
+.pv-cards{display:flex;gap:8px;overflow-x:auto;padding:8px 0}
+.pv-card{min-width:150px;background:#1b5c4b;border-radius:11px;padding:8px;display:flex;flex-direction:column;gap:5px}
+.pv-card b{font-size:12.5px}
+.pv-card span{font-size:11px;opacity:.85}
+.ar-filters{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.ar-filters select{border:1px solid var(--line);background:var(--card2);color:var(--txt);border-radius:11px;padding:8px 10px;font:inherit;font-size:12.5px}
+.ar-bulkbar{display:none;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;background:#241f3d;border:1px solid #574a78;border-radius:13px;padding:9px 12px;margin-bottom:10px;font-size:12.5px}
+.ar-bulkbar.show{display:flex}
+.ar-bulkbar div{display:flex;gap:6px;flex-wrap:wrap}
+.ar-bulkbar button{border:1px solid #574a78;background:#1b1730;color:#efe9ff;border-radius:9px;padding:6px 10px;cursor:pointer;font:inherit;font-size:12px}
+.ar-bulkbar button.danger{border-color:#6a3f52;background:#2a1830;color:#ffb4c8}
+.ar-pick-wrap{display:flex;align-items:center;margin-inline-end:8px}
+.ar-pick-wrap input{width:18px;height:18px;accent-color:#bba5ff}

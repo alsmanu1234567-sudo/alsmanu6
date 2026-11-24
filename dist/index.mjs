@@ -22,7 +22,7 @@ import {deleteSentMessages} from '../services/fast-message-delete.mjs';
 import {getMessageCutoff as replyCutoff,isMessageAfterCutoff as replyIsFresh,isMessageProcessingPaused,getProcessingDiagnostics,clearMessageCutoff} from '../engine/message-cutoff.mjs';
 import {evaluateIncoming} from '../services/messages-settings.mjs';
 import {webappUrlFor} from './webapp-auth.mjs';
-import { sendInteractiveAutoReply, resolveInteractiveAnswer, formatInteractiveFallback } from '../services/auto-reply-interactive.mjs';
+import { sendInteractiveAutoReply, resolveInteractiveAnswer, resolveInteractiveAction, formatInteractiveFallback } from '../services/auto-reply-interactive.mjs';
 import { setMessageCutoff, advanceMessageCutoff, setMessageProcessingPaused } from "../engine/message-cutoff.mjs";
 import { isGeneratedAutoReply, protectAutoReplySocket, matchesReplyTarget } from '../services/auto-reply-routing.mjs';
 import { attachGroupGuard, exportGuardSettings, importGuardSettings, listGuardUserIds } from '../services/group-guard.mjs';
@@ -294428,12 +294428,28 @@ function registerMessageHandler(sock, userId) {
           await handleAutoReplyXoInteraction(sock, jid, msg.key?.participant || msg.key?.participantAlt || jid, interactionId, userId);
           return true;
         }
+        // [MULTI-STEP] ضغطة زر داخل خطوة: arstep:<ruleId>:<stepKey>:<index>
+        const stepMatch = interactionId?.match(/^arstep:([^:]+):([A-Za-z0-9_-]{1,32}):(\d+)$/);
+        if (stepMatch) {
+          const stepRule = getUserReplies(userId).find(r => String(r.id) === stepMatch[1]);
+          if (!stepRule?.isActive || !matchesReplyTarget(stepRule, msg) || (stepRule.scope === 'private' && isGroup) || (stepRule.scope === 'groups' && !isGroup)) return true;
+          const stepAction = resolveInteractiveAction(stepRule, Number(stepMatch[3]), stepMatch[2]);
+          if (stepAction?.nextStep) await sendInteractiveAutoReply(sock, jid, stepRule, { stepKey: stepAction.nextStep });
+          else if (stepAction?.answer) await sock.sendMessage(jid, { text: stepAction.answer });
+          return true;
+        }
         const match = interactionId?.match(/^arbtn:([^:]+):(\d+)$/);
         if (!match) return false;
         const rule = getUserReplies(userId).find(r => String(r.id) === match[1]);
         if (!rule?.isActive || !matchesReplyTarget(rule, msg) || (rule.scope === 'private' && isGroup) || (rule.scope === 'groups' && !isGroup)) return true;
-        const answer = rule.replyType === 'carousel' ? carouselAnswer(rule, Number(match[2])) : resolveInteractiveAnswer(rule, Number(match[2]));
-        if (answer) await sock.sendMessage(jid, {text: answer});
+        if (rule.replyType === 'carousel') {
+          const answer = carouselAnswer(rule, Number(match[2]));
+          if (answer) await sock.sendMessage(jid, {text: answer});
+          return true;
+        }
+        const action = resolveInteractiveAction(rule, Number(match[2]));
+        if (action?.nextStep) await sendInteractiveAutoReply(sock, jid, rule, { stepKey: action.nextStep });
+        else if (action?.answer) await sock.sendMessage(jid, {text: action.answer});
         return true;
       }
       // تتبع جميع الرسائل الصادرة تلقائياً (بما ��يها ردود البوت)

@@ -1578,6 +1578,55 @@ export async function webGuardDirectory(userId, groupId, phoneNumber = null, opt
   };
 }
 
+/** [MEMBERS-ACTIONS] إدارة عضو من داخل قائمة الأعضاء: ترقية/تنزيل مشرف، إزالة، إضافة. */
+export async function webGuardMemberAction(userId, groupId, phoneNumber = null, input = {}) {
+  const id = String(groupId || "").trim();
+  if (!id.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+  const action = String(input.action || "").trim();
+  if (!["promote", "demote", "remove", "add"].includes(action)) throw new Error("إجراء غير معروف");
+  const sock = await findSocketForGroup(String(userId), id, phoneNumber);
+  if (!sock) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
+  if (typeof sock.groupParticipantsUpdate !== "function") throw new Error("جلسة واتساب لا تدعم إدارة الأعضاء");
+  const metadata = await sock.groupMetadata(id).catch(() => null);
+  if (!metadata?.participants) throw new Error("تعذّر تحميل أعضاء المجموعة");
+
+  const selfDigits = phoneDigitsFromAddress(sock.user?.id) || phoneDigitsFromAddress(sock.user?.pn);
+  const selfEntry = (metadata.participants || []).find((p) => {
+    const digits = phoneDigitsFromAddress(p.id) || phoneDigitsFromAddress(p.pn) || phoneDigitsFromAddress(p.phoneNumber);
+    return digits && selfDigits && digits === selfDigits;
+  });
+  const isAdmin = selfEntry && ["admin", "superadmin"].includes(String(selfEntry.admin || "").toLowerCase());
+  if (!isAdmin) throw new Error("البوت ليس مشرفاً في هذه المجموعة — رقِّه مشرفاً أولاً");
+
+  let jid = String(input.jid || "").trim();
+  if (action === "add") {
+    const digits = String(input.phone || "").replace(/\D/g, "");
+    if (digits.length < 7 || digits.length > 15) throw new Error("اكتب رقم العضو بالدولة كاملاً");
+    jid = `${digits}@s.whatsapp.net`;
+  } else {
+    if (!jid) throw new Error("اختر عضواً أولاً");
+    const exists = (metadata.participants || []).some((p) => [p.id, p.jid, p.lid, p.pn].filter(Boolean).map((x) => String(x).replace(/:\d+(?=@)/, "")).includes(jid.replace(/:\d+(?=@)/, "")));
+    if (!exists) throw new Error("هذا العضو ليس في المجموعة");
+    if (action !== "promote" && action === "remove") {
+      const digits = phoneDigitsFromAddress(jid);
+      const role = String((metadata.participants || []).find((p) => String(p.id || "").replace(/:\d+(?=@)/, "") === jid.replace(/:\d+(?=@)/, ""))?.admin || "").toLowerCase();
+      if (role === "superadmin") throw new Error("لا يمكن إزالة مالك المجموعة");
+      if (digits && selfDigits && digits === selfDigits) throw new Error("لا يمكن للبوت إزالة نفسه");
+    }
+  }
+
+  const result = await sock.groupParticipantsUpdate(id, [jid], action);
+  const row = Array.isArray(result) ? result[0] : null;
+  const status = String(row?.status || "").toLowerCase();
+  const failed = /40[13]|403|409/.test(status) || (row?.status && !["200", "ok"].includes(status) && status !== "");
+  if (failed) {
+    const reason = "403" === status ? "واتساب رفض العملية (صلاحيات أو إعدادات الخصوصية)" : "تعذّر تنفيذ الإجراء";
+    throw new Error(reason);
+  }
+  const labels = { promote: "تمت الترقية إلى مشرف", demote: "تم تنزيل المشرف إلى عضو", remove: "تمت إزالة العضو", add: "تمت إضافة العضو" };
+  return { ok: true, action, jid, message: labels[action] };
+}
+
 /** [GUARD] إرسال ترحيب تجريبي للمجموعة للتأكد أن نظام الترحيب يعمل */
 export async function webGuardTestWelcome(userId, groupId, phoneNumber = null, sampleJids = []) {
   const id = String(groupId || "").trim();
