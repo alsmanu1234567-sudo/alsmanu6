@@ -293079,6 +293079,7 @@ function _userIdFromSessKey(sessKey) {
 // تُحيا من جديد عند وصول حدث connection.update متأخر من السوكت المُغلَق،
 // فيستمر البوت بإرسال QR ويصبح زر الإلغاء بلا أثر.
 // ══════════════════════════════════════════════════════════════════
+var _pairingCodeInFlight = /* @__PURE__ */ new Set(); // [FIX-DUP-CODE] منع طلب كودين لنفس الرقم
 var _cancelledSessKeys = /* @__PURE__ */ new Map(); // sessKey → ts
 var _CANCEL_TOMBSTONE_TTL = 6e4; // الشاهدة تعيش دقيقة فقط: تمنع الإحياء الفوري ولا تحجب محاولة جديدة
 function _markCancelled(key) {
@@ -293205,7 +293206,8 @@ async function startQrSession(userId, chatId) {
     sessKey,
     retries: 0,
     wasEverConnected: false,
-    cancelled: false
+    cancelled: false,
+    startedAt: Date.now()
   };
   sessions.set(sessKey, session);
   _pendingConnect.set(String(userId), sessKey);
@@ -293379,7 +293381,8 @@ async function startPairingSession(userId, chatId, phoneNumber) {
     sessKey,
     retries: 0,
     wasEverConnected: false,
-    cancelled: false
+    cancelled: false,
+    startedAt: Date.now()
   };
   sessions.set(sessKey, session);
   _pendingConnect.set(String(userId), sessKey);
@@ -293624,6 +293627,13 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
     if (isFirstTime && !authState.creds.registered) {
       await new Promise((r) => setTimeout(r, 5e3));
       if (sessions.get(sessKey)?.cancelled) return;
+      // [FIX-DUP-CODE] لا تطلب كودين في نفس الوقت لنفس الرقم، ولا كوداً جديداً وكود سارٍ لم يمضِ 45ث
+      {
+        const _cur0 = sessions.get(sessKey);
+        if (_pairingCodeInFlight.has(sessKey)) { try { logger.info({ sessKey }, "[PAIRING] طلب كود قيد التنفيذ — تجاهل الطلب المكرر"); } catch { } return; }
+        if (_cur0?.pairingCode && Date.now() - (_cur0.codeAt || 0) < 45e3) { try { logger.info({ sessKey }, "[PAIRING] كود سارٍ موجود — لا نرسل ثانياً"); } catch { } return; }
+        _pairingCodeInFlight.add(sessKey);
+      }
       try {
         const code = await sock.requestPairingCode(cleanPhone);
         const formatted = String(code).replace(/[^A-Za-z0-9]/g, "").toUpperCase();
@@ -293632,6 +293642,7 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
           cur.pairingCode = formatted;
           cur.codeAt = Date.now(); // [FIX-CODE-LOOP] عمر الكود لتفادي حلقة طلب أكواد
           sessions.set(sessKey, cur);
+          _pairingCodeInFlight.delete(sessKey);
           try { logger.info({ userId, sessKey }, "[PAIRING] تم تسليم كود الربط"); } catch { }
         }
         if (botRef) {
@@ -293662,6 +293673,7 @@ ${formatted}
           );
         }
       } catch (pairingErr) {
+        _pairingCodeInFlight.delete(sessKey);
         logger.error({ pairingErr, userId, sessKey }, "requestPairingCode failed");
         const cur = sessions.get(sessKey);
         if (!cur || cur.cancelled) return;
@@ -294127,6 +294139,59 @@ process.on("unhandledRejection", (err) => {
 // الآن: أقدم المفاتيح تُحذف تلقائياً عند تجاوز السقف — بلا تدخل يدوي.
 // ══════════════════════════════════════════════════════════════════
 let _memSweepStarted = false;
+// ══════════════════════════════════════════════════════════════════
+// [RAM-HYGIENE] السبب الأول لتضخّم الرام: مجلدات جلسات ربط لم تكتمل
+// كان البوت يستعيدها كلها عند الإقلاع فيفتح سوكت (30–90MB) لكل واحد.
+// ══════════════════════════════════════════════════════════════════
+let _hygieneStarted = false;
+var _hygieneStats = { prunedAt: 0, prunedDirs: 0, freedSlots: 0 };
+async function _pruneJunkSessionDirs(reason, dryRun) {
+  try {
+    const mod = await import("../services/session-hygiene.mjs");
+    const res = mod.pruneUnregisteredSessions(WA_SESSIONS_ROOT, { minAgeMs: 10 * 60 * 1000, dryRun: !!dryRun });
+    _hygieneStats.prunedAt = Date.now();
+    _hygieneStats.prunedDirs = res.removed.length;
+    if (res.removed.length) {
+      try { logger.warn({ reason, removed: res.removed.length, sample: res.removed.slice(0, 10), scanned: res.scanned, dryRun: !!dryRun }, "[RAM-HYGIENE] مجلدات جلسات غير مكتملة"); } catch { }
+    }
+    return res;
+  } catch (e) { try { logger.warn({ err: String(e?.message || e).slice(0, 160) }, "[RAM-HYGIENE] فشل التنظيف"); } catch { } return null; }
+}
+function _sweepDeadSessionSlots() {
+  try {
+    const noop = { freed: [] };
+    let mod = null;
+    // استخدمنا نسخة داخلية مكافئة لتفادي await هنا
+    const now = Date.now();
+    const freed = [];
+    for (const [k, v] of [...sessions.entries()]) {
+      if (!v || v.cancelled || v.wasEverConnected) continue;
+      const ready = v.sock?.ws?.readyState;
+      if (ready === 0 || ready === 1) continue;
+      if (!v.startedAt) { v.startedAt = now; sessions.set(k, v); continue; }
+      if (now - v.startedAt < 20 * 60 * 1000) continue;
+      v.cancelled = true;
+      try { v.sock?.ev?.removeAllListeners?.(); } catch { }
+      try { v.sock?.ws?.terminate?.(); } catch { }
+      sessions.delete(k);
+      _markCancelled(k);
+      if (_pendingConnect.get(String(v.userId)) === k) _pendingConnect.delete(String(v.userId));
+      freed.push(String(k));
+    }
+    _hygieneStats.freedSlots = freed.length;
+    if (freed.length) { try { logger.info({ freed: freed.length, sample: freed.slice(0, 6) }, "[RAM-HYGIENE] تحرير خانات جلسات ميتة"); } catch { } }
+    return noop && freed;
+  } catch { return []; }
+}
+function _startSessionHygiene() {
+  if (_hygieneStarted) return;
+  _hygieneStarted = true;
+  const tick = () => { try { _sweepDeadSessionSlots(); } catch { } _pruneJunkSessionDirs("periodic").catch(() => { }); };
+  const t = setInterval(tick, 30 * 60 * 1000);
+  if (typeof t.unref === "function") t.unref();
+  try { logger.info({ root: WA_SESSIONS_ROOT }, "[RAM-HYGIENE] نظافة الجلسات بدأت (كل 30 دقيقة)"); } catch { }
+  setTimeout(tick, 3 * 60 * 1000).unref?.();
+}
 function _startMemorySweep() {
   if (_memSweepStarted) return;
   _memSweepStarted = true;
@@ -325601,7 +325666,10 @@ async function startBot() {
   import('./forward.mjs').then(({ initForward }) => initForward(bot)).catch(() => {});
   // [NEW-FEATURE-SITEGEN] تزويد أداة المواقع المؤقتة بمرجع البوت لإعادة توجيه بيانات النماذج للمحادثة
   import('./site-generator.mjs').then(({ setSiteGeneratorBot }) => setSiteGeneratorBot(bot)).catch(() => {});
-  setTimeout(() => {
+  setTimeout(async () => {
+    // [RAM-HYGIENE] احذف مجلدات الربط غير المكتملة قبل الاستعادة — وإلا فُتح سوكت لكل واحدة
+    try { await _pruneJunkSessionDirs("boot"); } catch { }
+    try { _startSessionHygiene(); } catch { }
     restoreAllSessions().catch((err) => logger.error({ err }, "Session restore failed"));
   }, 5e3);
   await bot.setMyCommands(BOT_COMMANDS).catch(() => {
@@ -330278,6 +330346,10 @@ try {
           activeReplies: replies.filter((r) => r.isActive).length,
           uptimeMinutes: Math.floor(process.uptime() / 60),
           memoryMB: Math.round(process.memoryUsage().rss / 1048576),
+          heapMB: Math.round(process.memoryUsage().heapUsed / 1048576),
+          sessionSlots: (() => { try { return sessions.size; } catch { return 0; } })(),
+          liveSockets: (() => { try { return [...sessions.values()].filter((v) => v?.sock?.ws?.readyState === 1).length; } catch { return 0; } })(),
+          unregisteredDirs: (() => { try { return _hygieneStats.prunedDirs; } catch { return 0; } })(),
           node: process.version,
         };
       } catch (e) { return { error: String(e?.message || e) }; }

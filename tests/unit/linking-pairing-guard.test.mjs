@@ -82,6 +82,12 @@ test("إعادة الاتصال تمسح الشاهدة (لا يُحجب reconne
   assert.match(src, /_clearCancelledKey\(sessKey\); \/\/ محاولة إعادة اتصال مقصودة/);
 });
 
+test("منع إرسال كود ربط مرتين", () => {
+  assert.match(src, /var _pairingCodeInFlight/);
+  assert.match(src, /if \(_pairingCodeInFlight\.has\(sessKey\)\)/);
+  assert.match(src, /كود سارٍ موجود — لا نرسل ثانياً/);
+});
+
 test("لا صور QR لجلسة ملغاة", () => {
   assert.match(src, /if \(!session \|\| session\.cancelled\) return; \/\/ \[FIX-QR-FLOOD\]/);
 });
