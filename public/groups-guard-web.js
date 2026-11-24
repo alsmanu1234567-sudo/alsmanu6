@@ -1044,7 +1044,8 @@
               <h3>تصدير الجلسة</h3>
               <div class="mut">ملف ZIP يحتوي مفاتيح الجلسة. اعتبره كلمة مرور: من يملكه يستطيع استخدام الرقم.</div>
               <select class="gg-sel" id="ssKey"><option value="">جارٍ قراءة الجلسات…</option></select>
-              <div class="gg-actions"><button class="gg-btn ok" id="ssExport">⬇️ تنزيل ملف الجلسة</button></div>
+              <div class="gg-actions"><button class="gg-btn ok" id="ssExport">⬇️ تنزيل ملف الجلسة</button><button class="gg-btn" id="ssSendTg">📤 إرسال إلى تيليجرام</button></div>
+              <div class="gg-note" id="ssExportNote">إن لم يبدأ التنزيل (متصفح داخل التطبيق يمنعه) استخدم زر «إرسال إلى تيليجرام».</div>
             </div>
             <div class="gg-card">
               <h3>استيراد جلسة</h3>
@@ -1079,7 +1080,28 @@
         document.body.appendChild(link);
         link.click();
         link.remove();
+        const note = container.querySelector("#ssExportNote");
+        if (note) note.textContent = "بدأ التنزيل… إن لم يظهر الملف فاستخدم زر «إرسال إلى تيليجرام».";
         toast("⬇️ بدأ تنزيل ملف الجلسة");
+      });
+
+      // [SESSION-TELEGRAM] إرسال الجلسة كملف إلى محادثة البوت في تيليجرام
+      container.querySelector("#ssSendTg").addEventListener("click", async (event) => {
+        const note = container.querySelector("#ssExportNote");
+        const key = select.value;
+        if (!key) { if (note) note.textContent = "لا توجد جلسة محفوظة لإرسالها."; return; }
+        const button = event.currentTarget;
+        button.disabled = true;
+        if (note) note.textContent = "جارٍ تجهيز الملف وإرساله إلى تيليجرام…";
+        try {
+          const data = await api("/api/session/send-telegram", { key });
+          if (note) note.textContent = `✅ أُرسل ملف الجلسة إلى تيليجرام (${data.files} ملف). افتح محادثة البوت لتراه.`;
+          toast("✅ أُرسل الملف إلى تيليجرام");
+        } catch (error) {
+          if (note) note.textContent = "❌ " + error.message;
+        } finally {
+          button.disabled = false;
+        }
       });
 
       container.querySelector("#ssImport").addEventListener("click", async () => {

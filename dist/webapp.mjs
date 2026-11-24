@@ -344,7 +344,19 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   }));
 
   // ═══ [SESSION-PORT] تصدير واستيراد جلسة واتساب كملف مضغوط ═══
-  const sessionRoot = () => process.env.WA_SESSIONS_ROOT || join(process.cwd(), "wa-sessions");
+  // [SESSION-PORT] مسار جلسات واتساب: كان يعتمد على process.cwd() فقط، ولو كان مجلد
+  // التشغيل مختلفاً عن مجلد البوت تظهر «لا توجد جلسة» رغم وجودها. نجرّب عدة مسارات.
+  const sessionRoot = () => {
+    const explicit = process.env.WA_SESSIONS_ROOT || process.env.BOT_WA_SESSIONS_DIR;
+    if (explicit) return explicit;
+    const candidates = [
+      join(process.cwd(), "wa-sessions"),
+      process.env.BOT_BASE_DIR ? join(process.env.BOT_BASE_DIR, "wa-sessions") : "",
+      "/home/container/alsmanu6/wa-sessions",
+    ].filter(Boolean);
+    for (const dir of candidates) { try { if (existsSync(dir)) return dir; } catch { } }
+    return candidates[0] || "wa-sessions";
+  };
   const sessionDirsFor = (uid) => {
     try {
       return readdirSync(sessionRoot()).filter((name) => {
@@ -384,6 +396,11 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     res.setHeader("Content-Disposition", `attachment; filename="wa-session-${key}.zip"`);
     res.setHeader("Cache-Control", "no-store");
     res.end(zip);
+  }));
+  // [SESSION-TELEGRAM] إرسال ملف الجلسة إلى محادثة تيليجرام (بدل تنزيل قد يُحجب في المتصفح)
+  app.post('/api/session/send-telegram', parseJson, guard(async (uid, req) => {
+    if (typeof sessionBridge?.sendExport !== "function") throw new Error("الإرسال إلى تيليجرام غير متاح في هذه النسخة");
+    return await sessionBridge.sendExport(uid, req.body?.key || "");
   }));
   app.post('/api/session/import', parseJson, guard(async (uid, req) => {
     const raw = String(req.body?.zipBase64 || "").replace(/^data:[^;]*;base64,/, "");

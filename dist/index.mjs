@@ -330550,7 +330550,48 @@ try {
   init_my_msgs();
   init_ai_manager();
   const aiWebService = createAiWebService({getUser,saveUser,getUserNumbers,updateNumber,ai:ai_manager_exports,clearMemory:uid=>{let count=0;for(const key of [...conversationHistory.keys()]) if(key.startsWith(`${uid}_`) || [ `rule_${uid}`, `test_${uid}`, `webtest_${uid}` ].includes(key)){conversationHistory.delete(key);count++;}return count;}});
-  registerWebApp(app, { sessionBridge: { reconnect: (uid) => reconnectSession(uid, null) }, devDiag: createDevDiagService(),
+  // [SESSION-PORT] مشاركة مسار جلسات واتساب مع تطبيق الويب — كان يقرأ process.cwd()
+  // فيرى مجلداً فارغاً ولا يجد أي جلسة للتصدير.
+  try { process.env.WA_SESSIONS_ROOT = BOT_WA_SESSIONS_DIR; process.env.BOT_WA_SESSIONS_DIR = BOT_WA_SESSIONS_DIR; } catch { }
+  registerWebApp(app, { sessionBridge: {
+      reconnect: (uid) => reconnectSession(uid, null),
+      // [SESSION-TELEGRAM] إرسال ملف الجلسة إلى محادثة تيليجرام مباشرة
+      sendExport: async (uid, key) => {
+        const { createZip } = await import("../services/zip-lite.mjs");
+        const dirs = _sessionKeysFor(uid);
+        if (!dirs.length) throw Error("لا توجد جلسة محفوظة لهذا الحساب بعد — اربط رقماً أولاً");
+        const wanted = String(key || "");
+        const sessionKey = dirs.includes(wanted) ? wanted : dirs[0];
+        const base = path3.join(WA_SESSIONS_ROOT, sessionKey);
+        const files = [];
+        let total = 0;
+        const walk = (dir, prefix) => {
+          for (const entry of fs6.readdirSync(dir, { withFileTypes: true })) {
+            if (total > 64 * 1024 * 1024) return;
+            const full = path3.join(dir, entry.name);
+            const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+            if (entry.isDirectory()) { walk(full, rel); continue; }
+            try {
+              const size = fs6.statSync(full).size;
+              if (size > 20 * 1024 * 1024) continue;
+              files.push({ name: rel, data: fs6.readFileSync(full) });
+              total += size;
+            } catch { }
+          }
+        };
+        walk(base, "");
+        if (!files.some((f) => f.name === "creds.json" || f.name.endsWith("/creds.json"))) {
+          throw Error("الجلسة غير مكتملة (creds.json مفقود) — أعد ربط الرقم");
+        }
+        if (!botRef) throw Error("تيليجرام غير متصل الآن؛ أعد المحاولة بعد لحظات");
+        const zip = createZip(files);
+        const chatId = (() => { try { return getUser(uid)?.telegramChatId || uid; } catch { return uid; } })();
+        await botRef.sendDocument(chatId, zip,
+          { caption: `📦 *ملف جلسة واتساب*\n\nالرقم: \`${sessionKey.includes("_") ? sessionKey.split("_").pop() : sessionKey}\`\nالملفات: ${files.length}\n\n⚠️ يحتوي مفاتيح رقمك — لا تشاركه.\nلاستعادته: أرسل الملف للبوت هنا في أي وقت.`, parse_mode: "Markdown" },
+          { filename: `wa-session-${sessionKey}.zip`, contentType: "application/zip" });
+        return { ok: true, key: sessionKey, files: files.length, bytes: total };
+      },
+    }, devDiag: createDevDiagService(),
     // [GENERAL] صحة النظام: عدد الجلسات المتصلة والأرقام وحالة الذاكرة
     health: (uid) => {
       try {
