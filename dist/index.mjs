@@ -330807,7 +330807,35 @@ async function main() {
   // [TUNNEL] إنشاء رابط عام تلقائياً للاستضافات بدون رابط — يعمل في الخلفية
   // لا يعطّل إقلاع البوت أبداً حتى لو فشل
   import("./tunnel.mjs")
-    .then((t) => t.startTunnel(port, logger))
+    .then((t) => {
+      // [TUNNEL-STABLE] كل تشغيل/إعادة إنشاء للنفق يعطي نطاقاً جديداً، والرابط القديم
+      // يصبح ميتاً («No matching tunnelmole domain»). نُبلّغ صاحب البوت بالرابط
+      // الجديد في تيليجرام تلقائياً حتى لا يفتح رابطاً ميتاً محفوظاً.
+      try {
+        t.setTunnelUrlHook((url, provider) => {
+          const text = `\u{1F310} *\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u064A\u0628 \u0622\u0628 \u0627\u0644\u062D\u0627\u0644\u064A*\n\n${url}\n\n` +
+            `\u26A0\uFE0F \u0647\u0630\u0627 \u0627\u0644\u0631\u0627\u0628\u0637 \u064A\u062A\u063A\u064A\u0631 \u0645\u0639 \u0643\u0644 \u062A\u0634\u063A\u064A\u0644 \u2014 \u0627\u0633\u062A\u062E\u062F\u0645 \u0622\u062E\u0631 \u0631\u0633\u0627\u0644\u0629 \u062F\u0627\u0626\u0645\u0627\u064B (${provider}).`;
+          const targets = new Set();
+          try { if (DEVELOPER_ID) targets.add(String(DEVELOPER_ID)); } catch { }
+          try { for (const u of getAllUsers() || []) { const c = String(u?.telegramChatId || u?.id || ""); if (c) targets.add(c); } } catch { }
+          if (!targets.size) return;
+          // botRef قد لا يكون جاهزاً بعد (النفق يبدأ قبل البوت) ⇒ نعيد المحاولة
+          let tries = 0;
+          const push = () => {
+            tries += 1;
+            if (!botRef) {
+              if (tries <= 24) setTimeout(push, 5_000).unref?.();
+              return;
+            }
+            for (const chatId of targets) {
+              botRef.sendMessage(chatId, text, { parse_mode: "Markdown", disable_web_page_preview: true }).catch(() => { });
+            }
+          };
+          push();
+        });
+      } catch { }
+      return t.startTunnel(port, logger);
+    })
     .catch((e) => logger.warn({ err: e?.message }, "[TUNNEL] init failed"));
   await startBot();
 }

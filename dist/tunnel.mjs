@@ -21,6 +21,10 @@ let _cfProc = null;
 let _ltSockets = [];
 let _ltStopped = false;
 
+// [TUNNEL-STABLE] هوك يُبلَّغ عند تغيّر الرابط العام (بعد إعادة إنشاء النفق)
+let _urlHook = null;
+let _lastNotified = null;
+export function setTunnelUrlHook(fn) { _urlHook = typeof fn === "function" ? fn : null; }
 export function tunnelUrl() { return _url; }
 export function tunnelProvider() { return _provider; }
 export function tunnelPassword() { return _password; }
@@ -28,10 +32,18 @@ export function tunnelPassword() { return _password; }
 function _setUrl(url, provider, log, onUrl) {
   _url = url;
   _provider = provider;
+  _lastProvider = provider;
   globalThis.__FW_PUBLIC_URL = url;
   globalThis.__FW_TUNNEL_PROVIDER = provider;
   log(`[TUNNEL] الرابط العام جاهز (${provider}): ${url}`);
   try { onUrl && onUrl(url); } catch {}
+  // [TUNNEL-STABLE] الرابط القديم مات (كل تشغيل يعطي نطاقاً جديداً) ⇒ نُبلّغ بالجديد
+  try {
+    if (_urlHook && url !== _lastNotified) {
+      _lastNotified = url;
+      Promise.resolve().then(() => _urlHook(url, provider)).catch(() => { });
+    }
+  } catch {}
 }
 
 // ─── المزود الأول: Cloudflare Tunnel ────────────────────────────────
@@ -206,8 +218,48 @@ async function _tryLocaltunnel(port, log) {
   }
 }
 
+// [TUNNEL-STABLE] مراقبة صحة الرابط العام: النفق قد يموت بصمت (خصوصاً khi يعمل
+// كمكتبة) فيبقى الرابط معروضاً بينما هو غير مسجّل عند المزود، فيرى المستخدم
+// «No matching tunnelmole domain». لذلك نفحص كل 3 دقائق ونعيد الإنشاء عند الفشل.
+let _healthTimer = null;
+let _healthFails = 0;
+let _lastProvider = null;
+export function tunnelHealth() { return { url: _url, provider: _lastProvider, fails: _healthFails }; }
+
+async function _probeTunnel(url) {
+  const target = String(url).replace(/\/+$/, "") + "/healthz";
+  try {
+    const res = await fetch(target, { method: "GET", signal: AbortSignal.timeout(12_000), redirect: "follow" });
+    return res.status > 0 && res.status < 500;
+  } catch {
+    return false;
+  }
+}
+
+function _startTunnelWatch(getArgs) {
+  if (_healthTimer) return;
+  _healthTimer = setInterval(async () => {
+    const { port, logger, onUrl } = getArgs() || {};
+    const url = _url;
+    if (!url || !port) return;
+    if (await _probeTunnel(url)) { _healthFails = 0; return; }
+    _healthFails += 1;
+    try { logger?.warn?.(`[TUNNEL] الرابط العام لا يستجيب (${_healthFails}/2): ${url}`); } catch { }
+    if (_healthFails < 2) return;
+    _healthFails = 0;
+    try { logger?.warn?.("[TUNNEL] إعادة إنشاء النفق برابط جديد (الرابط السابق ميت)"); } catch { }
+    try { _tmProc?.kill?.(); } catch { }
+    try { _cfProc?.kill?.(); } catch { }
+    _tmProc = null; _cfProc = null;
+    _url = null; _lastProvider = null; globalThis.__FW_PUBLIC_URL = null; _starting = false;
+    try { await startTunnel(port, logger, onUrl); } catch { }
+  }, 3 * 60 * 1000);
+  if (typeof _healthTimer.unref === "function") _healthTimer.unref();
+}
+
 // ─── نقطة الدخول ─────────────────────────────────────────────────────
 export async function startTunnel(port, logger, onUrl) {
+  _startTunnelWatch(() => ({ port, logger, onUrl }));
   const log = (m) => { try { logger ? logger.info(m) : console.log(m); } catch { console.log(m); } };
   if (_starting || _url) return _url;
   _starting = true;
