@@ -43,6 +43,9 @@ export function createDeveloperWeb({developerId,github,ai,texts,stats,sites,admi
    app.get('/api/developer/backup/github/list',auth,guarded(async req=>backup.githubList(developerId,{repo:req.query?.repo,dir:req.query?.dir,branch:req.query?.branch})));
    app.post('/api/developer/backup/github/push',auth,guarded(async req=>backup.githubPush(developerId,{repo:req.body?.repo,path:req.body?.path,branch:req.body?.branch,areas:req.body?.areas,message:req.body?.message})));
    app.post('/api/developer/backup/github/pull',auth,guarded(async req=>backup.githubPull(developerId,{repo:req.body?.repo,path:req.body?.path,branch:req.body?.branch,mode:req.body?.mode,areas:req.body?.areas,restore:req.body?.restore!==false})));
+   app.get('/api/developer/backup/schedule',auth,guarded(async()=>backup.schedule()));
+   app.post('/api/developer/backup/schedule',auth,guarded(async req=>backup.saveSchedule(developerId,req.body||{})));
+   app.post('/api/developer/backup/schedule/run',auth,guarded(async()=>backup.runScheduleNow(developerId)));
    app.get('/api/developer/backup/github/repos',auth,guarded(async()=>backup.repos().map(r=>({name:r.full_name,private:r.private,defaultBranch:r.default_branch}))));
   }
   app.get('/api/developer/repos',auth,guarded(async()=>{if(!github.hasToken())throw Error('أضف توكن GitHub في البوت أولاً');return (await github.repos()).map(r=>({name:r.full_name,private:r.private,defaultBranch:r.default_branch,url:r.html_url}))}));

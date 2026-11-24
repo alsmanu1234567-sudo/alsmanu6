@@ -125,3 +125,50 @@ test('واجهة مركز المطوّر فيها صفحة نسخ الإعداد
   assert.match(js, /go-backup/, 'رابط من صفحة GitHub إلى النسخ');
   assert.match(js, /لا تُرفع أبداً/, 'تنبيه الخصوصية ظاهر للمستخدم');
 });
+
+test('جدولة النسخ التلقائي: حفظ/قراءة/تشغيل الآن عبر المسارات', async () => {
+  const { backup } = harness();
+  const { call } = mount(backup);
+  const before = await call('GET', '/api/developer/backup/schedule');
+  assert.equal(before.code, 200);
+  assert.equal(before.data.enabled, false);
+  assert.ok(Array.isArray(before.data.kinds) && before.data.kinds.length === 3);
+
+  const saved = await call('POST', '/api/developer/backup/schedule', {
+    enabled: true, repo: 'owner/repo', kind: 'daily', hour: 4, keep: 3, dir: 'backups', areas: ['ai'],
+  });
+  assert.equal(saved.code, 200);
+  assert.equal(saved.data.enabled, true);
+  assert.equal(saved.data.hour, 4);
+  assert.match(saved.data.description, /يومي/);
+  assert.ok(saved.data.nextRunAt > Date.now() - 1000, 'يحسب الموعد القادم');
+
+  const after = await call('GET', '/api/developer/backup/schedule');
+  assert.equal(after.data.repo, 'owner/repo');
+  assert.equal(after.data.keep, 3);
+
+  const ran = await call('POST', '/api/developer/backup/schedule/run', {});
+  assert.equal(ran.code, 200);
+  assert.match(String(ran.data.path), /^backups\/settings-/);
+
+  // إيقاف
+  const off = await call('POST', '/api/developer/backup/schedule', { enabled: false, repo: 'owner/repo' });
+  assert.equal(off.data.enabled, false);
+  assert.equal(off.data.nextRunAt, 0);
+});
+
+test('الجدولة ترفض التفعيل بلا مستودع', async () => {
+  const { backup } = harness();
+  const { call } = mount(backup);
+  const bad = await call('POST', '/api/developer/backup/schedule', { enabled: true, repo: '' });
+  assert.equal(bad.code, 400);
+  assert.match(String(bad.data.error), /اختر المستودع/);
+});
+
+test('الواجهة تحتوي لوحة الجدولة', async () => {
+  const { readFileSync } = await import('node:fs');
+  const js = readFileSync(new URL('../../public/developer-console.js', import.meta.url), 'utf8');
+  assert.match(js, /backup\/schedule/);
+  assert.match(js, /sc-enabled/);
+  assert.match(js, /تشغيل نسخة الآن/);
+});

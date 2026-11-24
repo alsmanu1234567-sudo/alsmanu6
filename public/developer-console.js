@@ -77,9 +77,9 @@
  async function backupPage(){
   if(!backupState.loaded){
    view.innerHTML='<section class="card">جارٍ تحميل بيانات النسخ…</section>';
-   try{const o=await api('backup/overview');backupState.overview=o;backupState.loaded=true}catch(e){view.innerHTML=`<div class="card">${esc(e.message)}</div>`;return}
+   try{const o=await api('backup/overview');backupState.overview=o;backupState.schedule=await api('backup/schedule');backupState.loaded=true}catch(e){view.innerHTML=`<div class="card">${esc(e.message)}</div>`;return}
   }
-  const o=backupState.overview||{},c=o.counts||{};
+  const o=backupState.overview||{},c=o.counts||{},S=backupState.schedule||{};
   view.innerHTML=`<section class="card"><h2>🗄 نسخ إعدادات المستخدمين</h2>
    <p class="note">تُرفع الإعدادات فقط: الردود، قسم الرسائل، الذكاء الاصطناعي، قسم رسائلي، وحماية/إعدادات المجموعات.
    <b>لا تُرفع أبداً</b>: الجلسات وربط واتساب، أرقام الهواتف، مفاتيح API، قوائم الأعضاء، التحذيرات وسجلات الرسائل.</p>
@@ -101,6 +101,21 @@
    <div class="row"><button class="primary" id="bk-push">⬆ رفع إلى GitHub</button><button class="secondary" id="bk-pull">⬇ جلب من GitHub واستعادة</button><button class="secondary" id="bk-list">📁 عرض النسخ المحفوظة</button></div>
    <div class="list" id="bk-files"></div>
   </section>
+  <section class="card"><h3>⏱ النسخ التلقائي المجدول <small style="opacity:.7">(المستوى 2)</small></h3>
+   <div class="note">يعمل داخل البوت بلا حاجة لفتح هذه الصفحة. يحتفظ بآخر عدد تحدده من النسخ ويحذف الأقدم تلقائياً.</div>
+   <div class="row" style="margin:8px 0"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="sc-enabled" ${S.enabled?'checked':''}> <b>تفعيل النسخ التلقائي</b></label>
+    <span class="note">الحالة: <b>${esc(S.description||'متوقف')}</b>${S.nextRunAt?' · القادم: '+esc(new Date(S.nextRunAt).toLocaleString('ar')):''}${S.lastStatus?' · آخر نتيجة: '+esc(S.lastStatus):''}${S.lastError?' · <span style="color:#ff8a94">'+esc(S.lastError)+'</span>':''}</span></div>
+   <div class="row"><div class="grow"><label>المستودع</label><select id="sc-repo"><option value="">اختر المستودع</option>${(backupState.repos||[]).map(r=>`<option value="${esc(r.name)}" data-branch="${esc(r.defaultBranch||'')}" ${S.repo===r.name?'selected':''}>${esc(r.name)} ${r.private?'🔒':''}</option>`).join('')}</select></div>
+    <div class="grow"><label>الفرع</label><input id="sc-branch" value="${esc(S.branch||'')}" dir="ltr" placeholder="الافتراضي"></div></div>
+   <div class="row"><div class="grow"><label>التكرار</label><select id="sc-kind">${(S.kinds||[]).map(k=>`<option value="${esc(k.kind)}" ${S.kind===k.kind?'selected':''}>${esc(k.label)}</option>`).join('')}</select></div>
+    <div class="grow"><label>الساعة</label><select id="sc-hour">${Array.from({length:24},(_,h)=>`<option value="${h}" ${Number(S.hour)===h?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}</select></div>
+    <div class="grow"><label>اليوم (للأسبوعي)</label><select id="sc-weekday">${['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'].map((d,i)=>`<option value="${i}" ${Number(S.weekday)===i?'selected':''}>${d}</option>`).join('')}</select></div>
+    <div class="grow"><label>عدد النسخ المحفوظة</label><input id="sc-keep" type="number" min="1" max="60" value="${esc(S.keep??7)}" dir="ltr"></div></div>
+   <div class="row"><div class="grow"><label>مجلد النسخ في المستودع</label><input id="sc-dir" value="${esc(S.dir||'backups')}" dir="ltr"></div></div>
+   <div class="row"><div class="grow"><label>الأقسام المضمّنة في التلقائي</label><div class="row" id="sc-areas" style="gap:10px">${Object.entries(AREA_LABELS).map(([id,label])=>`<label style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-scarea="${id}" ${(S.areas||[]).includes(id)?'checked':''}> ${esc(label)}</label>`).join('')}</div></div></div>
+   <div class="row"><button class="primary" id="sc-save">💾 حفظ الجدولة</button><button class="secondary" id="sc-run">▶ تشغيل نسخة الآن</button></div>
+   <div class="note">إذا فشل الرفع (شبكة/توكن) يُسجَّل السبب هنا ويُعاد في الموعد التالي تلقائياً.</div>
+  </section>
   <section class="card hide" id="bk-result-card"><h3>النتيجة</h3><pre class="result" id="bk-result"></pre></section>`;
   const selectedAreas=()=>[...document.querySelectorAll('#bk-areas input[data-area]')].filter(x=>x.checked).map(x=>x.dataset.area);
   const showResult=t=>{const card=el('bk-result-card');card.classList.remove('hide');el('bk-result').textContent=typeof t==='string'?t:JSON.stringify(t,null,1)};
@@ -115,6 +130,11 @@
   const needRepo=()=>{const r=v('bk-repo');if(!r)throw Error('اختر المستودع أولاً');return r};
   el('bk-push').onclick=e=>action(e.currentTarget,async()=>{const areas=selectedAreas();if(!areas.length)throw Error('اختر قسماً واحداً على الأقل');if(!confirm('رفع نسخة الإعدادات إلى GitHub؟'))return;showResult('جارٍ الرفع…');const r=await api('backup/github/push',{repo:needRepo(),path:v('bk-path'),branch:v('bk-branch'),areas});showResult(r)});
   el('bk-pull').onclick=e=>action(e.currentTarget,async()=>{if(!confirm('جلب النسخة من GitHub واستعادتها الآن؟'))return;showResult('جارٍ الجلب…');const r=await api('backup/github/pull',{repo:needRepo(),path:v('bk-path'),branch:v('bk-branch'),mode:v('bk-mode')});showResult(r)});
+  const scAreas=()=>[...document.querySelectorAll('#sc-areas input[data-scarea]')].filter(x=>x.checked).map(x=>x.dataset.scarea);
+  el('sc-save').onclick=e=>action(e.currentTarget,async()=>{
+   const payload={enabled:el('sc-enabled').checked,repo:v('sc-repo'),branch:v('sc-branch'),kind:v('sc-kind'),hour:Number(v('sc-hour')),weekday:Number(v('sc-weekday')),keep:Number(v('sc-keep')),dir:v('sc-dir'),areas:scAreas()};
+   const saved=await api('backup/schedule',payload);backupState.schedule=saved;backupState.loaded=false;showResult({محفوظ:true,الحالة:saved.description,القادم:saved.nextRunAt?new Date(saved.nextRunAt).toLocaleString('ar'):'—'});await backupPage()});
+  el('sc-run').onclick=e=>action(e.currentTarget,async()=>{if(!v('sc-repo'))throw Error('اختر المستودع واحفظ الجدولة أولاً');if(!confirm('تشغيل نسخة احتياطية الآن ورفعها إلى GitHub؟'))return;showResult('جارٍ الرفع…');const r=await api('backup/schedule/run',{});backupState.loaded=false;showResult(r);await backupPage()});
   el('bk-list').onclick=e=>action(e.currentTarget,async()=>{const r=await api('backup/github/list?repo='+encodeURIComponent(needRepo())+'&branch='+encodeURIComponent(v('bk-branch'))+'&dir='+encodeURIComponent('backups'));const box=el('bk-files');box.innerHTML=(r.files&&r.files.length)?r.files.map(f=>`<div class="item"><div>${esc(f.name)}</div><div class="note">${(f.size/1024).toFixed(1)}KB</div><button class="secondary" data-pick="${esc(f.path)}">اختيار</button></div>`).join(''):'<div class="note">لا توجد نسخ محفوظة بعد.</div>';box.querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>{el('bk-path').value=b.dataset.pick;showResult('تم اختيار: '+b.dataset.pick)})});
  }
 

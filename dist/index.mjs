@@ -330107,6 +330107,13 @@ try {
   });
   developerConsole=createDeveloperWeb({developerId:DEVELOPER_ID,diagnostics,backup:backupService,replyDiag:createDevDiagService(),admin:adminService,sites:createSiteGenWebService({developerId:DEVELOPER_ID}),github:{hasToken:()=>{init_github();return !!GITHUB_TOKEN},repos:()=>{init_github();return getAllRepos()},fetch:(...args)=>{init_github();return ghFetch(...args)}},ai:{key:getNvidiaKey,model:getUserSelectedModel},texts:{list:getTextKeys,get:getText,set:setText,reset:resetText},stats:()=>({users:inMemoryDB.users.size,workers:workerManager.getStats(),uptime:Math.floor(process.uptime()),memoryMB:Math.round(process.memoryUsage().rss/1048576)})});
   developerConsole.register(app);
+  // [SETTINGS-BACKUP][LEVEL-2] النسخ التلقائي المجدول يعمل داخل البوت (لا يحتاج لوحة مفتوحة)
+  try {
+    const { startBackupScheduler } = await import("../services/developer/backup-scheduler.mjs");
+    globalThis.__backupScheduler = startBackupScheduler({ backup: backupService, logger });
+  } catch (error) {
+    logger.warn({ error }, "[SETTINGS-BACKUP] تعذر تشغيل المجدول");
+  }
 } catch (e) {logger.warn({e}, "[DEVELOPER WEB] mount failed");}
 try {
   const { createSiteGenWebService } = await import("./sitegen-web.mjs");

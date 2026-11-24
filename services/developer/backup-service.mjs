@@ -5,7 +5,11 @@ import {
   AREAS, ALL_AREAS, buildSnapshot, restoreSnapshot, validateSnapshot, countSnapshot,
   backupFileName, MAX_SNAPSHOT_BYTES,
 } from "./settings-backup.mjs";
-import { pushBackup, pullBackup, listBackups, validRepo, DEFAULT_BACKUP_DIR } from "./github-backup.mjs";
+import { pushBackup, pullBackup, listBackups, deleteBackup, validRepo, DEFAULT_BACKUP_DIR } from "./github-backup.mjs";
+import {
+  readSchedule, writeSchedule, computeNextRun, describeSchedule, runScheduledBackup, pruneOldBackups,
+  SCHEDULE_KINDS, DEFAULT_KEEP, normalizeSchedule,
+} from "./backup-scheduler.mjs";
 
 export function createBackupService({
   getAllUsers = () => [],
@@ -73,6 +77,48 @@ export function createBackupService({
         onlyExistingUsers: onlyExistingUsers !== false,
       });
       return { ...report, mode, areas };
+    },
+
+
+    /** حذف نسخة قديمة */
+    async githubDelete(_uid, { repo, path, branch, sha } = {}) {
+      return deleteBackup({ github, repo, path, branch, sha });
+    },
+
+    /** يحذف النسخ القديمة ويبقي `keep` */
+    prune(_uid, { repo, dir, branch, keep } = {}) {
+      return pruneOldBackups({ backup: this, repo, dir, branch, keep: keep || DEFAULT_KEEP });
+    },
+
+    // ─── [LEVEL-2] الجدولة ──────────────────────────────────────────
+    schedule() {
+      const state = readSchedule();
+      return {
+        ...state,
+        description: describeSchedule(state),
+        kinds: Object.entries(SCHEDULE_KINDS).map(([kind, label]) => ({ kind, label })),
+        nextRunText: state.nextRunAt ? new Date(state.nextRunAt).toISOString() : "",
+      };
+    },
+
+    saveSchedule(_uid, patch = {}) {
+      const allowed = ["enabled", "repo", "branch", "dir", "kind", "hour", "weekday", "keep", "areas"];
+      const clean = {};
+      for (const key of allowed) if (patch[key] !== undefined) clean[key] = patch[key];
+      const current = readSchedule();
+      const next = normalizeSchedule({ ...current, ...clean }, ALL_AREAS.map((a) => a));
+      const nextRunAt = next.enabled ? computeNextRun(next, new Date()) : 0;
+      const saved = writeSchedule({ ...next, nextRunAt });
+      return { ...saved, description: describeSchedule(saved) };
+    },
+
+    async runScheduleNow(_uid) {
+      const state = readSchedule();
+      if (!state.repo) throw Error("اختر المستودع أولاً في إعدادات النسخ التلقائي");
+      const result = await runScheduledBackup({ backup: this, schedule: state });
+      const nextRunAt = state.enabled ? computeNextRun(state, new Date()) : 0;
+      writeSchedule({ ...state, lastRunAt: Date.now(), lastStatus: "نجحت", lastError: "", lastPath: result.path, lastBytes: result.bytes, runs: (Number(state.runs) || 0) + 1, nextRunAt });
+      return result;
     },
 
     repos() {
