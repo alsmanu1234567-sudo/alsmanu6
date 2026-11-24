@@ -300010,17 +300010,71 @@ async function ghFetch(path7, opts = {}) {
   if (!res.ok) throw new Error(json["message"] || `GitHub API error ${res.status}`);
   return json;
 }
-async function getAllRepos() {
-  let page = 1;
-  const all = [];
-  while (true) {
-    const repos = await ghFetch(`/user/repos?per_page=100&sort=updated&page=${page}`);
-    if (!repos || repos.length === 0) break;
-    all.push(...repos);
-    if (repos.length < 100) break;
-    page++;
+// [GH-REPOS-ROBUST] قائمة المستودعات: مسارات بديلة + كاش + رسائل خطأ عربية واضحة.
+function _ghAuthError(err) {
+  const m = String(err && err.message ? err.message : err || "");
+  if (/Bad credentials|401/i.test(m)) return "التوكن غير صالح أو منتهٍ. أنشئ توكن جديد وأدخله من: GitHub → تغيير التوكن.";
+  if (/rate limit/i.test(m)) return "تم تجاوز حد طلبات GitHub مؤقتاً. انتظر عدة دقائق ثم أعد المحاولة.";
+  if (/Resource not accessible|scope|permission/i.test(m)) return "صلاحيات التوكن لا تسمح بقراءة المستودعات. فعّل Metadata = Read واختر المستودعات (Repository access).";
+  if (/403/i.test(m)) return "GitHub رفض الطلب (403). غالباً صلاحيات التوكن ناقصة أو حد الطلبات.";
+  if (/404|Not Found/i.test(m)) return "GitHub لم يجد الحساب أو المستودعات. تأكد أن التوكن يخص الحساب الصحيح.";
+  return m || "تعذر جلب المستودعات";
+}
+var _ghReposCache = { at: 0, data: null };
+async function getAllRepos(force) {
+  if (!force && _ghReposCache.data && Date.now() - _ghReposCache.at < 6e4) return _ghReposCache.data;
+  const token = (() => { try { return globalThis.__ghLoadToken ? globalThis.__ghLoadToken() : GITHUB_TOKEN; } catch { return GITHUB_TOKEN; } })();
+  if (!token) throw Error("لم يُعثر على توكن GitHub. أدخله من: GitHub → تغيير التوكن.");
+  const map = new Map();
+  let lastErr = null;
+  const pull = async (path) => {
+    try {
+      const list = await ghFetch(path);
+      if (Array.isArray(list)) for (const r of list) if (r && r.full_name && !map.has(r.full_name)) map.set(r.full_name, r);
+      return Array.isArray(list) ? list.length : 0;
+    } catch (e) { lastErr = e; return -1; }
+  };
+  for (let page = 1; page <= 5; page++) {
+    const n = await pull(`/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member&page=${page}`);
+    if (n <= 0 || n < 100) break;
   }
-  return all;
+  if (map.size === 0) await pull("/installation/repositories?per_page=100");
+  if (map.size === 0) {
+    try {
+      const me = await ghFetch("/user");
+      if (me && me.login) await pull(`/users/${me.login}/repos?per_page=100&sort=updated&type=all`);
+    } catch (e) { lastErr = lastErr || e; }
+  }
+  if (map.size === 0) {
+    if (lastErr) throw Error(_ghAuthError(lastErr));
+    throw Error("التوكن صالح لكنه لا يرى أي مستودع. عدّل Repository access في التوكن أو أنشئ مستودعاً.");
+  }
+  const data = [...map.values()].sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  _ghReposCache = { at: Date.now(), data };
+  return data;
+}
+// [GH-STATUS] تشخيص قسم GitHub (لماذا القائمة فارغة؟)
+async function ghStatus() {
+  const token = (() => { try { return globalThis.__ghLoadToken ? globalThis.__ghLoadToken() : GITHUB_TOKEN; } catch { return GITHUB_TOKEN; } })();
+  let cfgPath = "";
+  try { cfgPath = globalThis.__ghCfgPath ? globalThis.__ghCfgPath() : ""; } catch { }
+  const fsMod = require("fs");
+  const out = {
+    hasToken: !!token,
+    tokenKind: !token ? "none" : (String(token).startsWith("github_pat_") ? "fine-grained" : String(token).startsWith("ghp_") ? "classic" : "unknown"),
+    configPath: cfgPath,
+    configExists: (() => { try { return !!cfgPath && fsMod.existsSync(cfgPath); } catch { return false; } })(),
+    login: null, repoCount: 0, privateCount: 0, error: null,
+  };
+  if (!token) { out.error = "لا يوجد توكن محفوظ في البوت"; return out; }
+  try {
+    const me = await ghFetch("/user");
+    out.login = me && me.login ? me.login : null;
+    const repos = await getAllRepos(true);
+    out.repoCount = repos.length;
+    out.privateCount = repos.filter((r) => r.private).length;
+  } catch (e) { out.error = _ghAuthError(e); }
+  return out;
 }
 async function deleteAllFilesInRepo(fullName, progressMsgId, bot2, chatId) {
   // استخدام git trees API للحصول على جميع الملفات بطلب واحد
@@ -301429,14 +301483,45 @@ var init_github = __esm({
           return Buffer.concat([d.update(enc), d.final()]).toString("utf8");
         }
 
-        function _ghCfgPath() {
-          // ابحث عن config.json في مجلد العمل أو مجل�� الملف
-          const cwd  = _path2.join(BOT_ROOT, "config.json");
-          const here = _path2.join(_path2.dirname(process.argv[1] || ""), "config.json");
-          if (_fs2.existsSync(cwd))  return cwd;
-          if (_fs2.existsSync(here)) return here;
-          return cwd; // افتراضي
+        // [GH-CFGPATH] كان يعتمد على BOT_ROOT فقط؛ لو اختلف مجلد التشغيل (bootstrap)
+        // يفشل العثور على config.json → لا توكن → «لا توجد مستودعات». الآن مسارات متعددة.
+        function _ghCfgCandidates() {
+          const out = [];
+          const push = (dir) => {
+            if (!dir || typeof dir !== "string") return;
+            try { const f = _path2.join(dir, "config.json"); if (!out.includes(f)) out.push(f); } catch { }
+          };
+          push(BOT_ROOT);
+          push(process.env.BOT_BASE_DIR);
+          push(process.env.BOT_ROOT);
+          push(process.cwd());
+          try { push(_path2.resolve(_path2.dirname(process.argv[1] || ""), "..")); } catch { }
+          try { push(_path2.resolve(_path2.dirname(process.argv[1] || ""))); } catch { }
+          push("/home/container/alsmanu6");
+          push(_path2.join(process.cwd(), "bot-data"));
+          return out;
         }
+        function _ghCfgPath() {
+          const list = _ghCfgCandidates();
+          for (const f of list) { try { if (_fs2.existsSync(f)) return f; } catch { } }
+          return list[0] || "config.json";
+        }
+        function _ghLoadToken() {
+          if (GITHUB_TOKEN) return GITHUB_TOKEN;
+          try {
+            if (process.env.GITHUB_TOKEN) { GITHUB_TOKEN = process.env.GITHUB_TOKEN; return GITHUB_TOKEN; }
+            const cfgPath = _ghCfgPath();
+            if (_fs2.existsSync(cfgPath)) {
+              const cfg = JSON.parse(_fs2.readFileSync(cfgPath, "utf8"));
+              if (cfg.GITHUB_TOKEN_ENC) GITHUB_TOKEN = _ghDecodeToken(cfg.GITHUB_TOKEN_ENC);
+              else if (cfg.GITHUB_TOKEN) GITHUB_TOKEN = String(cfg.GITHUB_TOKEN);
+            }
+          } catch { }
+          if (GITHUB_TOKEN) process.env.GITHUB_TOKEN = GITHUB_TOKEN;
+          return GITHUB_TOKEN;
+        }
+        globalThis.__ghLoadToken = _ghLoadToken;
+        globalThis.__ghCfgPath = _ghCfgPath;
 
         function _ghSaveToken(rawToken) {
           try {
@@ -301468,19 +301553,8 @@ var init_github = __esm({
           process.env.GITHUB_TOKEN = "";
         }
 
-        // إذا التوكن فارغ: اقرأ من config.json مباشرة
-        if (!GITHUB_TOKEN) {
-          try {
-            const cfgPath = _ghCfgPath();
-            if (_fs2.existsSync(cfgPath)) {
-              const cfg = JSON.parse(_fs2.readFileSync(cfgPath, "utf8"));
-              if (cfg.GITHUB_TOKEN_ENC) {
-                GITHUB_TOKEN = _ghDecodeToken(cfg.GITHUB_TOKEN_ENC);
-                process.env.GITHUB_TOKEN = GITHUB_TOKEN;
-              }
-            }
-          } catch(e2) {}
-        }
+        // إذا التوكن فارغ: اقرأه (مسارات متعددة + env)
+        if (!GITHUB_TOKEN) { try { _ghLoadToken(); } catch(e2) {} }
 
         // اجعل الدوال متاحة خارج closure عبر closures متداخلة
         globalThis.__ghSaveToken   = _ghSaveToken;
@@ -330383,9 +330457,9 @@ try {
     guardExport: exportGuardSettings,
     guardImport: importGuardSettings,
     guardUsers: listGuardUserIds,
-    github: { hasToken: () => { init_github(); return !!GITHUB_TOKEN; }, repos: () => { init_github(); return getAllRepos(); }, fetch: (...args) => { init_github(); return ghFetch(...args); } },
+    github: { hasToken: () => { init_github(); return !!GITHUB_TOKEN; }, repos: (force) => { init_github(); return getAllRepos(force); }, status: () => { init_github(); return ghStatus(); }, fetch: (...args) => { init_github(); return ghFetch(...args); } },
   });
-  developerConsole=createDeveloperWeb({developerId:DEVELOPER_ID,diagnostics,backup:backupService,replyDiag:createDevDiagService(),admin:adminService,sites:createSiteGenWebService({developerId:DEVELOPER_ID}),github:{hasToken:()=>{init_github();return !!GITHUB_TOKEN},repos:()=>{init_github();return getAllRepos()},fetch:(...args)=>{init_github();return ghFetch(...args)}},ai:{key:getNvidiaKey,model:getUserSelectedModel},texts:{list:getTextKeys,get:getText,set:setText,reset:resetText},stats:()=>({users:inMemoryDB.users.size,workers:workerManager.getStats(),uptime:Math.floor(process.uptime()),memoryMB:Math.round(process.memoryUsage().rss/1048576)})});
+  developerConsole=createDeveloperWeb({developerId:DEVELOPER_ID,diagnostics,backup:backupService,replyDiag:createDevDiagService(),admin:adminService,sites:createSiteGenWebService({developerId:DEVELOPER_ID}),github:{hasToken:()=>{init_github();return !!GITHUB_TOKEN},repos:(force)=>{init_github();return getAllRepos(force)},status:()=>{init_github();return ghStatus()},fetch:(...args)=>{init_github();return ghFetch(...args)}},ai:{key:getNvidiaKey,model:getUserSelectedModel},texts:{list:getTextKeys,get:getText,set:setText,reset:resetText},stats:()=>({users:inMemoryDB.users.size,workers:workerManager.getStats(),uptime:Math.floor(process.uptime()),memoryMB:Math.round(process.memoryUsage().rss/1048576)})});
   developerConsole.register(app);
   // [SETTINGS-BACKUP][LEVEL-2] النسخ التلقائي المجدول يعمل داخل البوت (لا يحتاج لوحة مفتوحة)
   try {

@@ -121,9 +121,15 @@ export function createBackupService({
       return result;
     },
 
-    repos() {
+    repos(force) {
       if (!github?.hasToken?.()) throw Error("أضف توكن GitHub في البوت أولاً");
-      return github.repos();
+      return force ? github.repos(true) : github.repos();
+    },
+
+    /** تشخيص قسم GitHub (توكن/صلاحيات/عدد المستودعات) */
+    status() {
+      if (typeof github?.status === "function") return github.status();
+      return { hasToken: !!github?.hasToken?.(), error: github?.hasToken?.() ? null : "لا يوجد توكن" };
     },
 
     /** رفع نسخة إلى المستودع المختار */
