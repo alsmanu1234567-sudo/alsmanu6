@@ -391,8 +391,8 @@ test('send paths attach images to text and interactive replies', () => {
   const index = readFileSync(new URL('../../dist/index.mjs', import.meta.url), 'utf8');
   assert.match(index, /_readReplyImage/);
   assert.match(index, /image: _replyImage\.buffer, caption: responseText/);
-  assert.match(index, /sendInteractiveAutoReply\(sock, jid, reply, \{ image: _btnImage \}\)/);
+  assert.match(index, /sendInteractiveAutoReply\(sock, jid, reply, \{ image: _btnImage, footer: _gsFooter \}\)/);
   assert.match(index, /_recordGroupMemberMessage/);
   const interactive = readFileSync(new URL('../../services/auto-reply-interactive.mjs', import.meta.url), 'utf8');
-  assert.match(interactive, /sendInteractiveAutoReply\(sock, chatId, rule, \{ image = null, stepKey = null \} = \{\}\)/);
+  assert.match(interactive, /sendInteractiveAutoReply\(sock, chatId, rule, \{ image = null, stepKey = null, footer = '' \} = \{\}\)/);
 });

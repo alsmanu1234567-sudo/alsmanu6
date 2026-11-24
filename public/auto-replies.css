@@ -58,3 +58,23 @@
 .ar-bulkbar button.danger{border-color:#6a3f52;background:#2a1830;color:#ffb4c8}
 .ar-pick-wrap{display:flex;align-items:center;margin-inline-end:8px}
 .ar-pick-wrap input{width:18px;height:18px;accent-color:#bba5ff}
+
+/* [GENERAL] إعدادات عامة: إيقاف طارئ + بحث شامل + صحة النظام */
+.ar-pause{border-radius:12px;padding:10px 12px;font-size:13px;background:#1d1932;border:1px solid #4a3f66;margin:6px 0 10px}
+.ar-pause.on{background:#3a1f2a;border-color:#7a3f52;color:#ffd0db}
+.ar-chips{display:flex;gap:7px;flex-wrap:wrap}
+.ar-chip{border:1px solid #574a78;background:#221d38;color:#efe9ff;border-radius:11px;padding:8px 12px;font:inherit;font-size:12.5px;cursor:pointer}
+.ar-chip:hover{border-color:#bea3ff}
+.ar-chip.alt{border-color:#2f6f57;background:#16332a;color:#b8f0d6}
+.ar-gsearch{width:100%;border:1px solid #51476c;border-radius:12px;background:#19162d;color:#f8f5ff;padding:11px 12px;font:inherit;font-size:14px;margin:6px 0 10px}
+.ar-gresults{max-height:320px;overflow:auto}
+.ar-sgroup{margin-bottom:10px}
+.ar-slabel{font-size:11.5px;color:#b5a9cf;margin:6px 0;display:flex;gap:6px;align-items:center}
+.ar-slabel span{background:#2a2440;border-radius:8px;padding:1px 7px;font-size:10.5px}
+.ar-result{border:1px solid #3d3457;background:#1b1730;border-radius:11px;padding:8px 10px;margin-bottom:6px;display:flex;flex-direction:column;gap:2px}
+.ar-result b{font-size:13px}
+.ar-result small{font-size:11.5px;color:#a89dc4;line-height:1.5}
+.ar-health{display:flex;flex-direction:column;gap:1px}
+.ar-hrow{display:flex;justify-content:space-between;gap:10px;padding:7px 2px;border-bottom:1px solid rgba(255,255,255,.06);font-size:12.5px;color:#cfc6e4}
+.ar-hrow:last-child{border-bottom:0}
+.ar-hrow b{color:#fff}

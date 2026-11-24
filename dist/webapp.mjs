@@ -74,7 +74,7 @@ function guard(handler) {
 }
 
 // ─── التسجيل في تطبيق Express ──────────────────────────────────────
-export function registerWebApp(app, { replyService, aiService, myMsgsService, siteGenService, messagesService, memberService, statusService, devDiag, sessionBridge } = {}) {
+export function registerWebApp(app, { replyService, aiService, myMsgsService, siteGenService, messagesService, memberService, statusService, devDiag, sessionBridge, health } = {}) {
   // JSON body parsing خاص بمسارات الويب آب فقط (لا يؤثر على بقية البوت)
   const parseJson = (req, res, next) => {
     if (req.headers["content-type"]?.includes("application/json") && !req.body) {
@@ -262,6 +262,52 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/fw/groups/guard/members/action', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);
     return webGuardMemberAction(uid, groupId, req.body?.phoneNumber || null, req.body || {});
+  }));
+  // ═══ [GENERAL] إعدادات عامة تسري على كل البوت + صحة النظام + بحث شامل ═══
+  app.get('/api/fw/general', guard(async (uid) => {
+    const { getGeneralSettings, describeGeneralSettings, globalReplyCount, GENERAL_PRESET_MINUTES } = await import('../services/general-settings.mjs');
+    const settings = getGeneralSettings(uid);
+    let healthData = null;
+    try { healthData = typeof health === 'function' ? health(uid) : null; } catch (e) { healthData = { error: String(e?.message || e) }; }
+    return {
+      settings,
+      pause: describeGeneralSettings(uid),
+      usedToday: globalReplyCount(uid),
+      presetMinutes: [...GENERAL_PRESET_MINUTES],
+      health: healthData,
+      replyStats: (() => { try { const list = reply().list(uid).replies || []; return { total: list.length, active: list.filter(r => r.isActive).length }; } catch { return { total: 0, active: 0 }; } })(),
+    };
+  }));
+  app.post('/api/fw/general', parseJson, guard(async (uid, req) => {
+    const { saveGeneralSettings, describeGeneralSettings } = await import('../services/general-settings.mjs');
+    const settings = saveGeneralSettings(uid, req.body || {});
+    return { ok: true, settings, pause: describeGeneralSettings(uid) };
+  }));
+  app.post('/api/fw/general/pause', parseJson, guard(async (uid, req) => {
+    const { pauseAutoReplies, resumeAutoReplies, describeGeneralSettings } = await import('../services/general-settings.mjs');
+    const minutes = Number(req.body?.minutes ?? 0);
+    if (minutes > 0) pauseAutoReplies(uid, minutes, req.body?.reason || 'إيقاف مؤقت من اللوحة');
+    else resumeAutoReplies(uid);
+    return { ok: true, pause: describeGeneralSettings(uid) };
+  }));
+  // بحث شامل: ردود + حماية مجموعات + قوالب جاهزة + إعدادات عامة
+  app.get('/api/fw/search', guard(async (uid, req) => {
+    const { searchAll, describeSearchIndex } = await import('../services/general-search.mjs');
+    const { listPresets } = await import('../services/wordlist-presets.mjs');
+    const { getGeneralSettings } = await import('../services/general-settings.mjs');
+    let replies = [];
+    try { replies = reply().list(uid).replies || []; } catch { replies = []; }
+    let guardData = {};
+    try { guardData = groupGuard.exportGuardSettings(uid) || {}; } catch { guardData = {}; }
+    const presets = listPresets();
+    const general = getGeneralSettings(uid);
+    const extra = [
+      { kind: 'general', title: 'التذييل الافتراضي', subtitle: general.defaultFooter || '(فارغ)', tags: 'اعدادات عامة footer تذييل' },
+      { kind: 'general', title: 'الحد اليومي العام', subtitle: String(general.dailyGlobalLimit || 'بلا حد'), tags: 'اعدادات عامة حد يومي limit' },
+      { kind: 'general', title: 'صورة الافتراضية للردود', subtitle: general.defaultImageRef ? 'محددة' : '(بلا صورة)', tags: 'اعدادات عامة صورة image' },
+    ];
+    const result = searchAll(req.query?.q || '', { replies, guard: guardData, presets, extra });
+    return { ...result, index: describeSearchIndex({ replies, guard: guardData, presets }) };
   }));
   // [WORDS-PRESET] قوائم كلمات ممنوعة جاهزة (شديدة جداً) تُحمَّل بضغطة
   app.get('/api/fw/groups/guard/words/presets', guard(async (uid, req) => {

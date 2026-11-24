@@ -17,6 +17,7 @@ process.env.BOT_BASE_DIR = BOT_ROOT;
 import {sendCarouselAutoReply,carouselAnswer,carouselFallback} from '../services/auto-reply-carousel.mjs';
 import {readImageRef as _readReplyImage} from '../services/reply-media.mjs';
 import {recordMemberMessage as _recordGroupMemberMessage} from '../services/group-activity.mjs';
+import {getGeneralSettings as _generalSettings, isAutoReplyPaused as _isAutoReplyPaused, noteGlobalReply as _noteGlobalReply} from '../services/general-settings.mjs';
 import {waitForTyping,typingSettings,startTyping} from '../services/reply-typing.mjs';
 import {deleteSentMessages} from '../services/fast-message-delete.mjs';
 import {getMessageCutoff as replyCutoff,isMessageAfterCutoff as replyIsFresh,isMessageProcessingPaused,getProcessingDiagnostics,clearMessageCutoff} from '../engine/message-cutoff.mjs';
@@ -294203,6 +294204,18 @@ function registerMessageHandler(sock, userId) {
         const rawPhone = (baseSock.user?.id || "").split(":")[0].split("@")[0].replace(/[^0-9]/g, "");
         const _findNumBySock = (arr) => arr.find(n => (n.number || "").replace(/[^0-9]/g, "") === rawPhone) || arr.find(n => n.status === "active");
       const replies = getUserReplies(userId);
+      // [GENERAL-SETTINGS] إيقاف طارئ مؤقت + حد يومي عام يسري على كل الردود
+      let _gs = null;
+      try {
+        if (_isAutoReplyPaused(userId)) return;
+        _gs = _generalSettings(userId);
+      } catch { _gs = null; }
+      if (_gs?.dailyGlobalLimit > 0) {
+        const _gKey = `greply_${userId}_${(/* @__PURE__ */ new Date()).toDateString()}`;
+        if ((Number(inMemoryDB[_gKey]) || 0) >= _gs.dailyGlobalLimit) return;
+      }
+      const _gsFooter = String(_gs?.defaultFooter || '').slice(0, 60);
+      const _gsImageRef = String(_gs?.defaultImageRef || '');
       for (const reply of replies) {
         if (!reply.isActive || !matchesReplyTarget(reply, msg)) continue;
         if (reply.scope === "private" && isGroup) continue;
@@ -294274,15 +294287,17 @@ function registerMessageHandler(sock, userId) {
         if(reply.replyType !== "ai" && typingConfig.enabled && !await waitForTyping(baseSock,jid,typingConfig,{valid:()=>replyCutoff(userId)===typingGeneration && replyIsFresh(userId,msg)}))return;
         if (dailyLimit > 0) inMemoryDB[replyDailyKey] = dailyCount + 1;
         incrementReplyStat(userId, reply.id);
+        try { _noteGlobalReply(userId); const _gKey2 = `greply_${userId}_${(/* @__PURE__ */ new Date()).toDateString()}`; inMemoryDB[_gKey2] = (Number(inMemoryDB[_gKey2]) || 0) + 1; } catch { }
         if (reply.replyType === 'carousel') {
-          try { const _car = await sendCarouselAutoReply(sock, jid, reply, { userId }); logger.info({ strategy: _car?.strategy, cards: _car?.cards }, 'Carousel auto-reply sent'); }
+          try { const _car = await sendCarouselAutoReply(sock, jid, reply, { userId, footer: _gsFooter }); logger.info({ strategy: _car?.strategy, cards: _car?.cards }, 'Carousel auto-reply sent'); }
           catch(err) { logger.error({err}, 'Carousel auto-reply failed'); try { await sock.sendMessage(jid, {text:carouselFallback(reply)}); } catch(fallbackErr) { logger.error({err:fallbackErr}, 'Carousel fallback failed'); } }
           break;
         }
         if (['button_quick', 'button_url', 'button_list'].includes(reply.replyType)) {
           let _btnImage = null;
-          if (reply.imageRef) { try { _btnImage = (await _readReplyImage(userId, reply.imageRef))?.buffer || null; } catch (e) { logger.warn({ e }, 'Interactive reply image skipped'); } }
-          try { await sendInteractiveAutoReply(sock, jid, reply, { image: _btnImage }); }
+          const _btnRef = reply.imageRef || _gsImageRef;
+          if (_btnRef) { try { _btnImage = (await _readReplyImage(userId, _btnRef))?.buffer || null; } catch (e) { logger.warn({ e }, 'Interactive reply image skipped'); } }
+          try { await sendInteractiveAutoReply(sock, jid, reply, { image: _btnImage, footer: _gsFooter }); }
           catch (err) { logger.error({err}, 'Interactive auto-reply failed'); try { await sock.sendMessage(jid, {text:formatInteractiveFallback(reply)}); } catch (fallbackErr) { logger.error({err:fallbackErr}, 'Interactive fallback failed'); } }
           break;
         }
@@ -294401,8 +294416,9 @@ function registerMessageHandler(sock, userId) {
         try {
           // [REPLY-IMAGE] صورة اختيارية مع أي رد نصي
           let _replyImage = null;
-          if (reply.imageRef) {
-            try { _replyImage = await _readReplyImage(userId, reply.imageRef); } catch (e) { logger.warn({ e }, 'Reply image skipped'); }
+          const _textRef = reply.imageRef || _gsImageRef;
+          if (_textRef) {
+            try { _replyImage = await _readReplyImage(userId, _textRef); } catch (e) { logger.warn({ e }, 'Reply image skipped'); }
           }
           if (_replyImage?.buffer?.length) {
             await sock.sendMessage(jid, { image: _replyImage.buffer, caption: responseText, mimetype: _replyImage.mimetype });
@@ -330159,7 +330175,25 @@ try {
   init_my_msgs();
   init_ai_manager();
   const aiWebService = createAiWebService({getUser,saveUser,getUserNumbers,updateNumber,ai:ai_manager_exports,clearMemory:uid=>{let count=0;for(const key of [...conversationHistory.keys()]) if(key.startsWith(`${uid}_`) || [ `rule_${uid}`, `test_${uid}`, `webtest_${uid}` ].includes(key)){conversationHistory.delete(key);count++;}return count;}});
-  registerWebApp(app, { sessionBridge: { reconnect: (uid) => reconnectSession(uid, null) }, devDiag: createDevDiagService(), statusService:_statusMod.getStatusService(), memberService:createGroupMemberManager({inMemoryDB,getUser,getBot:()=>botRef}), messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber,getUser,saveUser}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
+  registerWebApp(app, { sessionBridge: { reconnect: (uid) => reconnectSession(uid, null) }, devDiag: createDevDiagService(),
+    // [GENERAL] صحة النظام: عدد الجلسات المتصلة والأرقام وحالة الذاكرة
+    health: (uid) => {
+      try {
+        const socks = [...(inMemoryDB.sessions?.values?.() || [])].map((v) => v?.sock || v).filter((s) => s?.user?.id);
+        const numbers = (() => { try { return getUserNumbers(String(uid)) || []; } catch { return []; } })();
+        const replies = (() => { try { return getUserReplies(String(uid)) || []; } catch { return []; } })();
+        return {
+          connectedSockets: socks.length,
+          numbers: numbers.length,
+          activeNumbers: numbers.filter((n) => n?.status === "active").length,
+          replies: replies.length,
+          activeReplies: replies.filter((r) => r.isActive).length,
+          uptimeMinutes: Math.floor(process.uptime() / 60),
+          memoryMB: Math.round(process.memoryUsage().rss / 1048576),
+          node: process.version,
+        };
+      } catch (e) { return { error: String(e?.message || e) }; }
+    }, statusService:_statusMod.getStatusService(), memberService:createGroupMemberManager({inMemoryDB,getUser,getBot:()=>botRef}), messagesService:createMessagesWebService({getUser,saveUser,getContacts,inMemoryDB}), replyService: createAutoReplyWebService({getUserReplies,inMemoryDB,persistReplies,getReplyStat,getUserNumbers,updateNumber,getUser,saveUser}), aiService:aiWebService, myMsgsService:createMyMsgsWebService({getUser,inMemoryDB}), siteGenService:createSiteGenWebService({developerId:DEVELOPER_ID}) });
   // [SESSION-RESOLVER] ربط قسم التحويلات بمخزن جلسات البوت الرئيسي —
   // نفس الطريقة التي تجلب بها بقية أقسام البوت المجموعات (مفاتيح userId و userId_+رقم)
   const { setForwardSessionResolver, setForwardGroupsProvider } = await import("./forward.mjs");

@@ -240,8 +240,9 @@ async function relayOnce({ sock, jid, lib, message, extraNodes = [] }) {
  * يرسل رد البطاقات. يجرّب: بطاقات مغلّفة بـ viewOnce → viewOnceMessageV2 → مباشرة →
  * بطاقة منفصلة لكل عنصر (صورة + أزرار) → وأخيراً يرمي الخطأ الحقيقي ليستخدم المستدعي النص البديل.
  */
-export async function sendCarouselAutoReply(sock, jid, rule, { baileys, download = safeImageDownload, userId = null } = {}) {
+export async function sendCarouselAutoReply(sock, jid, rule, { baileys, download = safeImageDownload, userId = null, footer = '' } = {}) {
   const cfg = validateCarousel(rule.replyContent);
+  if (!cfg.footer && footer) cfg.footer = String(footer).slice(0, 60);
   if (typeof sock?.relayMessage !== 'function') throw new Error('جلسة واتساب لا تدعم البطاقات');
   const lib = baileys || await import('@whiskeysockets/baileys');
   const { proto } = lib;

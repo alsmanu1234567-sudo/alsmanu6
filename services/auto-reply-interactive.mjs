@@ -137,7 +137,7 @@ function idFactory(rule, stepKey) {
   return (index) => (stepKey ? `arstep:${rule.id}:${stepKey}:${index}` : `arbtn:${rule.id}:${index}`);
 }
 
-export function makeInteractiveMessage(rule, { stepKey = null } = {}) {
+export function makeInteractiveMessage(rule, { stepKey = null, footer = '' } = {}) {
   const config = validateInteractiveConfig(rule.replyType, rule.replyContent);
   const block = stepKey ? config.steps?.[stepKey] : config;
   if (!block) throw new Error('الخطوة المطلوبة غير موجودة');
@@ -146,12 +146,13 @@ export function makeInteractiveMessage(rule, { stepKey = null } = {}) {
   const buttons = listMode
     ? [listButton('عرض الخيارات', [{ title: 'اختر من القائمة', rows: block.entries.map((entry, i) => ({ title: entry.label, id: id(i) })) }])]
     : block.entries.map((entry, i) => buttonFor(entry, id(i), false));
-  return { text: block.text, buttons, footer: stepKey ? (block.title || 'اختر من الخيارات') : 'اختر من الخيارات' };
+  const defaultFooter = stepKey ? (block.title || 'اختر من الخيارات') : 'اختر من الخيارات';
+  return { text: block.text, buttons, footer: String(footer || defaultFooter).slice(0, 60) };
 }
 
-export async function sendInteractiveAutoReply(sock, chatId, rule, { image = null, stepKey = null } = {}) {
+export async function sendInteractiveAutoReply(sock, chatId, rule, { image = null, stepKey = null, footer = '' } = {}) {
   // [REPLY-IMAGE] الصورة اختيارية وتُرسل داخل رأس الرسالة التفاعلية (واتساب يسمح بها مع الأزرار والقوائم)
-  return sendInteractive(sock, chatId, { headerTitle: '⚡ رد تلقائي', ...makeInteractiveMessage(rule, { stepKey }), ...(image ? { image } : {}) });
+  return sendInteractive(sock, chatId, { headerTitle: '⚡ رد تلقائي', ...makeInteractiveMessage(rule, { stepKey, footer }), ...(image ? { image } : {}) });
 }
 
 /**

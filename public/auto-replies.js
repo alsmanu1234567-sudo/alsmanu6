@@ -31,7 +31,7 @@
     const active=entries.filter(r=>r.isActive).length;
     const pickedIds=new Set(entries.filter(r=>picks.has(String(r.id))).map(r=>String(r.id)));
     host.innerHTML=`<section class="ar-hero"><div><div class="ar-kicker">أدوات الأتمتة</div><h2>الردود التلقائية</h2><p>أنشئ ردوداً للرسائل، وحدد متى ولمن تعمل.</p></div><div class="ar-summary"><strong>${entries.length}</strong><span>رد محفوظ</span><strong>${active}</strong><span>مفعّل</span></div></section>
-      <div class="ar-actions"><button class="btn btn-p" id="arNew">＋ رد جديد</button><button class="btn btn-s" id="arRefresh">↻ تحديث</button><button class="btn btn-s" id="arSettings">⚙️ إعدادات</button><button class="btn btn-s" id="arTyping">⌨️ مؤشر يكتب</button></div>
+      <div class="ar-actions"><button class="btn btn-p" id="arNew">＋ رد جديد</button><button class="btn btn-s" id="arRefresh">↻ تحديث</button><button class="btn btn-s" id="arSettings">⚙️ إعدادات</button><button class="btn btn-s" id="arGeneral">🧩 عام</button><button class="btn btn-s" id="arTyping">⌨️ مؤشر يكتب</button></div>
       <div class="ar-tools"><button id="arOn">تفعيل الكل</button><button id="arOff">إيقاف الكل</button><button id="arExport">تصدير JSON</button><button id="arImport">استيراد JSON</button><button id="arGuide">دليل الذكاء</button><input id="arImportFile" type="file" accept="application/json,.json" hidden></div>
       <div class="ar-filters">
         <select id="arFilterType"><option value="">كل الأنواع</option>${Object.entries(types).map(([k,v])=>`<option value="${e(k)}" ${filterType===k?'selected':''}>${e(v)}</option>`).join('')}</select>
@@ -43,7 +43,7 @@
       <div class="ar-list-header"><strong>ردودك</strong><span>${visible.length} نتيجة${folders.length?` · ${folders.length} مجلد`:''}</span></div>
       ${visible.length?visible.map(r=>`<article class="ar-card"><div class="ar-card-head"><label class="ar-pick-wrap"><input type="checkbox" class="ar-pick" data-pick="${e(r.id)}" ${picks.has(String(r.id))?'checked':''}></label><div class="ar-icon">${r.replyType==='ai'?'✦':r.replyType?.startsWith('xo')?'🎮':r.replyType?.startsWith('button_')?'🔘':r.replyType==='carousel'?'🃏':'💬'}</div><div class="ar-card-name"><strong>${e(r.trigger)}</strong><small>${e(types[r.replyType]||r.replyType||'نص')} · ${e(({all:'الجميع',self:'رسائلي',specific:'شخص محدد',multiple:'عدة أشخاص'})[r.target]||'الجميع')} · ${e(({both:'الكل',private:'خاص',groups:'مجموعات',group:'مجموعات'})[r.scope]||'الكل')}${r.folder?` · 📁 ${e(r.folder)}`:''}</small></div><span class="ar-status ${r.isActive?'on':''}">${r.isActive?'مفعّل':'متوقف'}</span></div><div class="ar-card-foot"><span>📊 ${Number(r.usage||0)} استخدام</span><div><button data-action="edit" data-id="${e(r.id)}">تعديل</button><button data-action="toggle" data-id="${e(r.id)}">${r.isActive?'إيقاف':'تفعيل'}</button><button data-action="duplicate" data-id="${e(r.id)}">نسخ</button><button class="danger" data-action="delete" data-id="${e(r.id)}">حذف</button></div></div></article>`).join(''):'<div class="ar-empty">✦<strong>لا توجد ردود مطابقة</strong><span>أضف ردك الأول أو جرّب كلمة بحث أو فلتر آخر.</span></div>'}`;
     click('arNew',()=>openEditor());click('arRefresh',async()=>{try{await refresh();render(host,Q);toast('✅ تم تحديث الردود')}catch{}});
-    click('arSettings',openSettings); click('arTyping',openTyping); click('arGuide',openGuide);
+    click('arSettings',openSettings); click('arGeneral',openGeneral); click('arTyping',openTyping); click('arGuide',openGuide);
     click('arOn',()=>bulk(true));click('arOff',()=>bulk(false));click('arExport',exportJson);click('arImport',()=>$('arImportFile').click());
     $('arImportFile').addEventListener('change',importJson);
     const typeSel=$('arFilterType'); if(typeSel)typeSel.onchange=()=>{filterType=typeSel.value;render(host,Q)};
@@ -88,6 +88,139 @@
   async function openTyping(){
     try{const cfg=await api('/api/replies/typing');openSheet(`<div class="ar-sheet-top"><h2>⌨️ مؤشر يكتب في واتساب</h2><button class="ar-close" id="arClose">×</button></div><p class="ar-note">يظهر مؤشر واتساب الحقيقي قبل الردود التلقائية لكل أرقام الحساب، وليس رسالة نصية. عند تفعيل التأخير العشوائي يُضاف أيضاً.</p><form id="typingForm"><label class="ar-check"><input type="checkbox" id="typingEnabled" ${cfg.enabled?'checked':''}> تفعيل المؤشر</label>${input('typingPre','الانتظار قبل ظهوره (ثانية)',cfg.preDelaySeconds,'number','min="0" max="30" step="0.1"')}${input('typingDuration','مدة ظهور يكتب (ثانية)',cfg.typingSeconds,'number','min="0.1" max="30" step="0.1"')}<button class="btn btn-p" type="submit">حفظ</button></form>`);click('arClose',close);$('typingForm').onsubmit=async ev=>{ev.preventDefault();try{await api('/api/replies/typing',{enabled:$('typingEnabled').checked,preDelaySeconds:Number($('typingPre').value),typingSeconds:Number($('typingDuration').value)});toast('✅ تم حفظ مؤشر الكتابة');close()}catch(err){toast('❌ '+err.message)}}}catch(err){toast('❌ '+err.message)}
   }
+  // ═══ [GENERAL] إعدادات عامة + إيقاف طارئ + بحث شامل + صحة النظام ═══
+  function healthHtml(health, replyStats) {
+    const h = health || {};
+    const rows = [
+      ['🔌 جلسات واتساب متصلة', Number(h.connectedSockets) || 0],
+      ['📱 الأرقام', `${Number(h.activeNumbers) || 0} نشط من ${Number(h.numbers) || 0}`],
+      ['💬 الردود', `${Number(h.activeReplies ?? replyStats?.active) || 0} مفعّل من ${Number(h.replies ?? replyStats?.total) || 0}`],
+      ['⏱ مدة التشغيل', `${Number(h.uptimeMinutes) || 0} دقيقة`],
+      ['🧠 الذاكرة', `${Number(h.memoryMB) || 0} ميغابايت`],
+      ['⚙️ إصدار Node', String(h.node || '—')],
+    ];
+    return `<div class="ar-health">${rows.map(([label, value]) => `<div class="ar-hrow"><span>${e(label)}</span><b>${e(String(value))}</b></div>`).join('')}</div>${h.error ? `<p class="ar-note">⚠️ ${e(h.error)}</p>` : ''}`;
+  }
+  function searchResultsHtml(result) {
+    if (!result) return '';
+    if (result.hint && !result.total) return `<div class="ar-note">${e(result.hint)}</div>`;
+    if (!result.total) return `<div class="ar-note">لا نتائج مطابقة.</div>`;
+    return (result.groups || []).map((group) => `<div class="ar-sgroup"><div class="ar-slabel">${e(group.label)} <span>${group.items.length}</span></div>${group.items.map((item) => `<div class="ar-result" data-kind="${e(item.kind)}"><b>${e(item.title)}</b><small>${e(item.subtitle || '')}</small></div>`).join('')}</div>`).join('');
+  }
+  async function openGeneral() {
+    let data;
+    try { data = await api('/api/fw/general'); } catch (err) { return toast('❌ ' + err.message); }
+    const settings = data.settings || {};
+    const pause = data.pause || {};
+    let generalImageFile = null;
+    let generalImageCleared = false;
+    const hasImage = Boolean(settings.defaultImageRef);
+    openSheet(`<div class="ar-sheet-top"><div><span class="ar-kicker">إعدادات تسري على كل البوت</span><h2>⚙️ عام</h2></div><button class="ar-close" id="arClose">×</button></div>
+      <form id="arGeneralForm">
+        <section class="ar-form-section"><h3>⏸ إيقاف طارئ للردود</h3>
+          <p class="ar-note">يوقف كل الردود التلقائية فوراً (الحماية تبقى تعمل) ويعود تلقائياً عند انتهاء المدة.</p>
+          <div class="ar-pause ${pause.paused ? 'on' : ''}">${e(pause.text || 'الردود تعمل الآن')}</div>
+          <div class="ar-chips">
+            ${(data.presetMinutes || [30, 60, 180, 720, 1440]).map((m) => `<button type="button" class="ar-chip" data-pause="${m}">${m >= 60 ? Math.round(m / 60) + ' ساعة' : m + ' دقيقة'}</button>`).join('')}
+            <button type="button" class="ar-chip alt" data-pause="0">▶ استئناف الآن</button>
+          </div>
+        </section>
+        <section class="ar-form-section"><h3>🎨 تذييل وصورة افتراضية</h3>
+          <p class="ar-note">تُستخدم تلقائياً في أي رد لا يملك تذييلاً أو صورة.</p>
+          ${input('arGFooter', 'التذييل الافتراضي (حتى 60 حرفاً)', settings.defaultFooter || '')}
+          <div class="ar-field ar-img-pick"><span>صورة افتراضية للردود بلا صورة</span>
+            <div class="ar-img-row"><label class="ar-img-btn">🖼️ اختر من المعرض<input type="file" id="arGImage" accept="image/*" hidden></label><button type="button" class="ar-img-del" id="arGImageClear" ${hasImage ? '' : 'hidden'}>✕ إزالة</button></div>
+            <div class="ar-img-preview" id="arGImagePreview" ${hasImage ? '' : 'hidden'}>${hasImage ? `<img alt="الصورة الافتراضية" id="arGImageTag">` : ''}</div>
+          </div>
+          ${input('arGLimit', 'الحد اليومي العام لكل الردود (0 بلا حد)', settings.dailyGlobalLimit || 0, 'number', 'min="0" max="100000"')}
+          <p class="ar-note">استُخدم اليوم: <b>${Number(data.usedToday) || 0}</b> رد</p>
+          <div class="ar-form-actions"><button class="btn btn-p" type="submit">💾 حفظ الإعدادات العامة</button></div>
+        </section>
+      </form>
+      <section class="ar-form-section"><h3>🔎 بحث شامل في البوت</h3>
+        <input class="ar-gsearch" id="arGSearch" placeholder="اكتب كلمة… (رد، مجموعة، كلمة ممنوعة، قالب جاهز)">
+        <div id="arGResults" class="ar-gresults"></div>
+      </section>
+      <section class="ar-form-section"><h3>🩺 صحة النظام</h3>${healthHtml(data.health, data.replyStats)}</section>`);
+    click('arClose', close);
+    click('arCancel', close);
+    if (hasImage) {
+      const tag = $('arGImageTag');
+      if (tag) tag.src = '/api/replies/image?ref=' + encodeURIComponent(settings.defaultImageRef) + '&token=' + encodeURIComponent(typeof TOKEN === 'string' ? TOKEN : '');
+    }
+    document.querySelectorAll('[data-pause]').forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          const minutes = Number(btn.dataset.pause);
+          await api('/api/fw/general/pause', { minutes, reason: minutes ? 'إيقاف مؤقت من اللوحة' : '' });
+          toast(minutes ? '⏸ تم إيقاف الردود مؤقتاً' : '▶ عادت الردود للعمل');
+          close();
+          void openGeneral();
+        } catch (err) { toast('❌ ' + err.message); }
+      };
+    });
+    const fileInput = $('arGImage');
+    if (fileInput) fileInput.addEventListener('change', () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      if (!/^image\//.test(file.type)) { toast('❌ اختر صورة فقط'); fileInput.value = ''; return; }
+      if (file.size > 4 * 1024 * 1024) { toast('❌ الصورة أكبر من 4 ميغابايت'); fileInput.value = ''; return; }
+      generalImageFile = file;
+      generalImageCleared = false;
+      const preview = $('arGImagePreview');
+      if (preview) { preview.hidden = false; preview.innerHTML = `<img alt="معاينة" src="${URL.createObjectURL(file)}">`; }
+      const clearBtn = $('arGImageClear');
+      if (clearBtn) clearBtn.hidden = false;
+    });
+    const clearBtn = $('arGImageClear');
+    if (clearBtn) clearBtn.onclick = () => {
+      generalImageFile = null;
+      generalImageCleared = hasImage;
+      fileInput.value = '';
+      const preview = $('arGImagePreview');
+      if (preview) { preview.hidden = true; preview.innerHTML = ''; }
+      clearBtn.hidden = true;
+    };
+    const form = $('arGeneralForm');
+    if (form) form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const saveBtn = form.querySelector('button[type="submit"]');
+      if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'جارٍ الحفظ…'; }
+      try {
+        let ref = settings.defaultImageRef || '';
+        if (generalImageFile) ref = await uploadPickedImage(generalImageFile);
+        else if (generalImageCleared) ref = '';
+        await api('/api/fw/general', {
+          defaultFooter: $('arGFooter').value,
+          dailyGlobalLimit: $('arGLimit').value,
+          defaultImageRef: ref,
+        });
+        toast('✅ تم حفظ الإعدادات العامة');
+        close();
+        void openGeneral();
+      } catch (err) {
+        toast('❌ ' + err.message);
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '💾 حفظ الإعدادات العامة'; }
+      }
+    });
+    const searchBox = $('arGSearch');
+    if (searchBox) {
+      let timer = null;
+      searchBox.addEventListener('input', () => {
+        const q = searchBox.value.trim();
+        const box = $('arGResults');
+        clearTimeout(timer);
+        if (q.length < 2) { if (box) box.innerHTML = '<div class="ar-note">اكتب حرفين على الأقل.</div>'; return; }
+        timer = setTimeout(async () => {
+          try {
+            const result = await api('/api/fw/search?q=' + encodeURIComponent(q));
+            if (box) box.innerHTML = searchResultsHtml(result);
+          } catch (err) { if (box) box.innerHTML = `<div class="ar-note">❌ ${e(err.message)}</div>`; }
+        }, 250);
+      });
+    }
+  }
+
   function openSettings(){
     openSheet(`<div class="ar-sheet-top"><div><span class="ar-kicker">إعدادات الأرقام</span><h2>⏱️ تأخير الرد العشوائي</h2></div><button class="ar-close" id="arClose">×</button></div><p class="ar-note">يطبّق تأخيراً عشوائياً قبل الردود لكل رقم تختاره.</p>${numbers.length?numbers.map((n,i)=>`<div class="ar-setting"><span>📱 ${e(n.label||n.number||'رقم')}<small>${e(n.number||'')}</small></span><label class="sw"><input type="checkbox" data-delay="${i}" ${n.randomDelayEnabled?'checked':''}><span class="sl"></span></label></div>`).join(''):'<p class="ar-note">لا توجد أرقام مرتبطة.</p>'}`);
     click('arClose',close);document.querySelectorAll('[data-delay]').forEach(el=>el.addEventListener('change',async()=>{const n=numbers[Number(el.dataset.delay)];try{await api('/api/replies/delay',{id:n.id,enabled:el.checked});n.randomDelayEnabled=el.checked;toast('✅ تم حفظ الإعداد')}catch(err){el.checked=!el.checked;toast('❌ '+err.message)}}));
