@@ -293954,6 +293954,21 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
         saveCreds = _fresh0.saveCreds; // [PAIRING-SAVECREDS]
       } catch (e) { try { logger.warn({ err: e?.message }, "[PAIRING-CORRUPT] تعذر إعادة التهيئة"); } catch { } }
     }
+    // [PAIRING-POISON v8.19.2] requestPairingCode يكتب creds.me في creds.json. إن فشل
+    // الطلب وبقي الملف، فالمصافحة التالية ترى me ⇒ تُرسل login لجهاز غير مسجّل ⇒ 401 أبدي.
+    if (!authState?.creds?.registered && authState?.creds?.me && !s.cleaned) {
+      try {
+        const bak = authDir + ".poison-" + Date.now();
+        fs6.renameSync(authDir, bak);
+        _ensureDirSafe(authDir);
+        s.cleaned = true;
+        sessions.set(sessKey, s);
+        const _f2 = await useMultiFileAuthState2(authDir);
+        authState = _f2.state;
+        saveCreds = _f2.saveCreds;
+        try { logger.warn({ userId, sessKey, bak }, "[PAIRING-POISON] creds.me بلا تسجيل (بقايا محاولة فاشلة) — بدأنا بمفاتيح جديدة"); } catch { }
+      } catch (e) { try { logger.warn({ err: e?.message }, "[PAIRING-POISON] تعذر إعادة التهيئة"); } catch { } }
+    }
     if (isFirstTime && !authState?.creds?.registered && !s.cleaned) {
       try {
         for (const f of fs6.readdirSync(authDir)) {
@@ -293981,11 +293996,19 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
     // [STEAM-LEARN] كود الربط يُطلب **بعد** حدث الاتصال (connecting أو أول QR) لا بعد
     // تأخير أعمى — وهذا ما يفعله بوت STEAM الناجح.
     let _pairReadyResolve = null;
+    let _pairReadySignal = null;
+    const _pairReadyAt0 = Date.now();
     const _pairReady = new Promise((res) => { _pairReadyResolve = res; });
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect } = update;
       try {
-        if ((connection === "connecting" || update?.qr) && !authState?.creds?.registered && _pairReadyResolve) {
+        // [PAIRING-READY-FIX v8.19.2] لا نعتمد على connection==="connecting": المكتبة
+        // تُصدره في nextTick **قبل** فتح السوكت وقبل مصافحة Noise إطلاقاً، فالطلب حينها
+        // يرسل companion_hello باكراً + يضبط creds.me قبل validateConnection فيرسل
+        // تسجيل دخول لجهاز غير مسجّل ⇒ الخادم يغلق فوراً بـ401 (وهذا بالضبط ما كان يحدث).
+        // الإشارة الصحيحة: حدث qr (يأتي بعد <success>) أو open.
+        if ((update?.qr || connection === "open") && !authState?.creds?.registered && _pairReadyResolve) {
+          _pairReadySignal = update?.qr ? "qr" : "open";
           const r = _pairReadyResolve; _pairReadyResolve = null; r();
         }
       } catch { }
@@ -294133,8 +294156,23 @@ async function _connectPairing(sessKey, chatId, cleanPhone, isFirstTime, userId)
       }
     });
     if (isFirstTime && !authState.creds.registered) {
-      // [STEAM-LEARN] ننتظر حدث الاتصال الحقيقي (connecting/QR) بدل التأخير أو readyState
+      // [PAIRING-READY-FIX] كأسمانو5 الذي نجح على نفس السيرفر: لا طلب للكود إلا بعد
+      // اكتمال المصافحة. ننتظر إشارة qr حتى 20 ثانية، وأرضية صلبة 5 ثوانٍ مهما حدث.
       await Promise.race([_pairReady, new Promise((r) => setTimeout(r, 20e3))]);
+      {
+        const _floor = 5e3 - (Date.now() - _pairReadyAt0);
+        if (_floor > 0) await new Promise((r) => setTimeout(r, _floor));
+      }
+      {
+        const _stx = sessions.get(sessKey);
+        try {
+          logger.info({
+            signal: _pairReadySignal || "floor",
+            elapsedMs: Date.now() - _pairReadyAt0,
+            registered: !!(authState?.creds?.registered || _stx?.wasEverConnected)
+          }, "[PAIRING-READY] إشارة جاهزية الاقتران");
+        } catch { }
+      }
       if (sessions.get(sessKey)?.cancelled) return;
       // [FIX-DUP-CODE] لا تطلب كودين في نفس الوقت لنفس الرقم، ولا كوداً جديداً وكود سارٍ لم يمضِ 45ث
       {

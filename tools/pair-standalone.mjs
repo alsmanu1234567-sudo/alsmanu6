@@ -44,6 +44,7 @@ async function main() {
   }
 
   const { state, saveCreds } = await useMultiFileAuthState(dir);
+  const t0 = Date.now();
   const sock = makeWASocket({
     auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
     version,
@@ -69,7 +70,9 @@ async function main() {
       const txt = await qrcode.default.toString(qr, { type: 'terminal', small: true });
       console.log('\n📷 امسح هذا الكود من واتساب ← الأجهزة المرتبطة ← ربط جهاز:\n' + txt);
     }
-    if (!wantQr && !state.creds.registered && !requested && (connection === 'connecting' || qr)) {
+    // [READY-FIX] لا نطلب الكود على 'connecting' (يُصدر قبل فتح السوكت والمصافحة) — فقط بعد qr
+    const _readyEnough = qr && Date.now() - t0 >= 5000;
+    if (!wantQr && !state.creds.registered && !requested && _readyEnough) {
       requested = true;
       try {
         const phone = String(phoneArg || '').replace(/\D/g, '');

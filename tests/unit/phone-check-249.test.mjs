@@ -31,3 +31,18 @@ test('الإصدار المدمج افتراضياً مع إمكانية WA_VERS
   assert.match(idx, /\[WA-VERSION-MODE\]/);
   assert.match(idx, /WA_VERSION_MODE \|\| ""\)\.toLowerCase\(\) !== "latest"/);
 });
+
+// ── v8.19.2: سبب 401 الحقيقي — طلب الكود قبل اكتمال المصافحة ──
+test('لا طلب كود قبل إشارة qr + أرضية 5 ثوانٍ (مثل alsmanu5)', () => {
+  assert.match(idx, /\[PAIRING-READY-FIX v8\.19\.2\]/);
+  assert.match(idx, /\.\.\.\(version \? \{ version \} : \{\}\)/);
+  // إشارة الجاهزية لم تعد تشمل "connecting"
+  assert.ok(!/connection === "connecting" \|\| update\?\.qr \) && !authState/.test(idx));
+  assert.match(idx, /_pairReadySignal = update\?\.qr \? "qr" : "open"/);
+  assert.match(idx, /const _floor = 5e3 - \(Date\.now\(\) - _pairReadyAt0\)/);
+});
+
+test('حرس تسمّم creds.me بلا تسجيل', () => {
+  assert.match(idx, /\[PAIRING-POISON v8\.19\.2\]/);
+  assert.match(idx, /!authState\?\.creds\?\.registered && authState\?\.creds\?\.me/);
+});
