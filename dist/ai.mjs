@@ -52,7 +52,14 @@ async function showVerifiedModels(bot, chatId, userId, page, getUser, ai) {
 }
 // ══ [META-AI] لوحة «ذكاء ميتا» — مزوّد بلا مفتاح عبر محادثة Meta AI في واتساب ══
 function _metaAiSockOf(userId) {
-  // [META-AI-SOCK-FIX v8.21.0] readyState يعطي null على Orihost ⇒ «غير متصل» خطأً.
+  // [META-AI-SOCK-FIX v8.21.1] أولاً: دالة الحل من الحزمة الرئيسية (تعرف كل خانات الأرقام).
+  // كانت ai.mjs لا تستقبل inMemoryDB إطلاقاً ⇒ _deps.inMemoryDB = undefined ⇒ «غير متصل» دائماً.
+  try {
+    if (typeof _deps.getSock === "function") {
+      const sock = _deps.getSock(String(userId));
+      if (sock && typeof sock.sendMessage === "function") return sock;
+    }
+  } catch { }
   try {
     const sessions = _deps.inMemoryDB?.sessions;
     const pick = (value) => {
@@ -88,8 +95,9 @@ async function showMetaAiPanel(bot2, chatId, userId) {
     `رقم واتساب متصل: ${sock ? "✅" : "❌ (لا يمكن الإرسال الآن)"}`,
     `ردود ميتا الناجحة: ${stats.metaAi || 0}`,
     "",
-    "⚠️ التوفّر يعتمد على الدولة ونوع الحساب (حساب شخصي لا Business).",
-    "إن لم تصل ردود 3 مرات، يتوقف تلقائياً 6 ساعات ثم يعود.",
+    "⚠️ التوفّر يعتمد على الدولة ونوع الحساب: **حسابات WhatsApp Business لا تحصل على محادثة Meta AI** غالباً، وفي هذه الحالة لن يصل رد أبداً.",
+    "لذلك يعمل البوت تلقائياً بمزوّد **HTTP بلا مفتاح** (Pollinations) عند فشل ميتا — في الردود التلقائية والنشر التلقائي.",
+    "إن لم تصل ردود 3 مرات، يتوقف ميتا تلقائياً 6 ساعات ثم يعود.",
   ];
   const rows = [
     [{ text: enabled ? "⛔ إيقاف ذكاء ميتا" : "✅ تفعيل ذكاء ميتا", callback_data: "ai_metaai_toggle" }],
@@ -113,13 +121,31 @@ export async function handleAiCallback2(bot2, chatId, userId, data) {
   if (data === "ai_metaai_test") {
     const sock = _metaAiSockOf(userId);
     if (!sock) { await bot2.sendMessage(chatId, "❌ لا يوجد رقم واتساب متصل الآن. اربط رقماً أولاً."); return true; }
+    if (typeof _deps.keylessReply === "function" && getUser(userId)?.metaAiEnabled === false) {
+      await bot2.sendMessage(chatId, "🧪 ذكاء ميتا متوقف؛ نجرّب المزوّد بلا مفتاح (HTTP)…");
+      try {
+        const r = await _deps.keylessReply(userId, getUser(userId)?.aiSystemPrompt || null, "اكتب جملة قصيرة بالعربية تقول: تم اختبار الاتصال بنجاح.");
+        await bot2.sendMessage(chatId, r ? "✅ *رد المزوّد بلا مفتاح:*\n" + String(r).slice(0, 1200) : "❌ لم يصل رد من المزوّد بلا مفتاح أيضاً (تحقق من اتصال الخادم بالإنترنت).", { parse_mode: "Markdown" });
+      } catch (e) { await bot2.sendMessage(chatId, "❌ فشل الاختبار: " + String(e?.message || e).slice(0, 200)); }
+      return true;
+    }
     await bot2.sendMessage(chatId, "🧪 أرسلنا سؤالاً تجريبياً إلى Meta AI… قد يستغرق حتى دقيقة.");
     try {
       const mod = await import("../services/ai/meta-ai-provider.mjs");
       const client = mod.createMetaAiClient({ sock, timeoutMs: 90000 });
       const reply = await client.ask("اكتب جملة قصيرة بالعربية تقول: تم اختبار الاتصال بنجاح.");
       if (!reply) {
-        await bot2.sendMessage(chatId, "❌ لم يصل رد من Meta AI خلال 90 ثانية.\nالأسباب الشائعة: الميزة غير متاحة في دولة الرقم، أو الحساب Business، أو أن رقمك لم تظهر له محادثة Meta AI بعد (افتحها مرة من التطبيق: ابحث عن Meta AI وابدأ محادثة).");
+        await bot2.sendMessage(chatId, "⚠️ لم يصل رد من Meta AI خلال 90 ثانية (الأرجح: حساب Business أو دولة غير مدعومة).\n\n🧪 أجرّب المزوّد بلا مفتاح (HTTP) الآن…");
+        try {
+          const alt = typeof _deps.keylessReply === "function"
+            ? await _deps.keylessReply(userId, getUser(userId)?.aiSystemPrompt || null, "اكتب جملة قصيرة بالعربية تقول: تم اختبار الاتصال بنجاح.")
+            : null;
+          if (alt) {
+            await bot2.sendMessage(chatId, "✅ *المزوّد بلا مفتاح يعمل — وردّه:*\n" + String(alt).slice(0, 1200), { parse_mode: "Markdown" });
+          } else {
+            await bot2.sendMessage(chatId, "❌ لم يصل رد من أي مزوّد مجاني. الردود التلقائية تحتاج مفتاح NVIDIA أو اتصال خادم سليم.");
+          }
+        } catch (e) { await bot2.sendMessage(chatId, "❌ " + String(e?.message || e).slice(0, 160)); }
         return true;
       }
       const u2 = getUser(userId) || {};

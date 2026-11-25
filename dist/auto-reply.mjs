@@ -50,20 +50,12 @@ async function handleReplyTypeCallbackInternal(bot2, chatId, userId, data) {
     const aiMgr = await _deps.getAiManager();
     const hasKey = aiMgr.hasNvidiaKey(userId);
     if (!hasKey) {
+      // [KEYLESS-HTTP v8.21.1] بلا مفتاح: الرد التلقائي يعمل بالمزوّد المجاني (ميتا/HTTP) — نُكمل بدل إيقاف المستخدم.
       await bot2.sendMessage(
         chatId,
-        `⚠️ *الرد بالذكاء الاصطناعي*\n\nلم تضف مفتاح NVIDIA بعد.\n\nاذهب إلى: 🤖 الذكاء الاصطناعي ← 🔑 إضافة مفتاح\n\naحصل على مفتاح مجاني من:\nhttps://build.nvidia.com`,
-        {
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "🤖 إعدادات الذكاء", callback_data: "menu_ai" }],
-              [{ text: "🔙 رجوع", callback_data: "home" }]
-            ]
-          }
-        }
-      );
-      return;
+        "\u2139\uFE0F *\u0644\u0627 \u064A\u0648\u062C\u062F \u0645\u0641\u062A\u0627\u062D NVIDIA* \u2014 \u0633\u064A\u064F\u0633\u062A\u062E\u062F\u0645 \u0627\u0644\u0645\u0632\u0648\u0651\u062F \u0627\u0644\u0645\u062C\u0627\u0646\u064A \u062A\u0644\u0642\u0627\u0626\u064A\u0627\u064B (\u0645\u064A\u062A\u0627 \u0625\u0646 \u062A\u0648\u0641\u0651\u0631\u060C \u0648\u0625\u0644\u0627 HTTP \u0628\u0644\u0627 \u0645\u0641\u062A\u0627\u062D).",
+        { parse_mode: "Markdown" }
+      ).catch(() => { });
     }
     const modelShort = aiMgr.getUserSelectedModel(userId).split("/")[1] || "افتراضي";
     setState(userId, "awaiting_reply_content", { replyType: "ai" });

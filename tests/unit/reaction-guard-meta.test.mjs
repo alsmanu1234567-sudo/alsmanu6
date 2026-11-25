@@ -120,8 +120,10 @@ test("Meta AI: لم يبقَ أي اعتماد على ws.readyState في اخت�
   const gate = "sock?.ws?.readyState === 1 ? sock : null";
   assert.ok(!indexSrc.includes(gate), "index.mjs ما زال يفحص readyState كبوابة");
   assert.ok(!aiSrc.includes(gate), "ai.mjs ما زال يفحص readyState كبوابة");
-  assert.match(indexSrc, /\[META-AI-SOCK-FIX v8\.21\.0\]/);
-  assert.match(aiSrc, /\[META-AI-SOCK-FIX v8\.21\.0\]/);
+  assert.match(indexSrc, /\[META-AI-SOCK-FIX v8\.21\.\d\]/);
+  assert.match(aiSrc, /\[META-AI-SOCK-FIX v8\.21\.\d\]/);
+  // v8.21.1: ai.mjs يحلّ السوكت عبر دالة ممرَّرة من الحزمة الرئيسية أولاً
+  assert.match(aiSrc, /_deps\.getSock/);
   assert.match(indexSrc, /typeof sock\.sendMessage === "function"/);
 });
 
@@ -138,9 +140,11 @@ test("Meta AI: قابل للتفعيل من لوحة الويب (خدمة + مس
   assert.match(panel, /ذكاء ميتا/);
 });
 
-test("الردود التلقائية والنشر التلقائي يستخدمان Meta AI بلا مفتاح", () => {
-  assert.match(indexSrc, /\[META-AI\] لا مفتاح\؟ جرّب ذكاء ميتا المدمج في واتساب/);
-  assert.match(indexSrc, /metaAiReply: async \(uid, systemPrompt, text\) => _metaAiReply/);
+test("الردود التلقائية والنشر التلقائي يعملان بلا مفتاح (ميتا ثم HTTP)", () => {
+  assert.match(indexSrc, /\[META-AI\] لا مفتاح/);
+  assert.match(indexSrc, /async function _freeAiReply/);
+  assert.match(indexSrc, /metaAiReply: async \(uid, systemPrompt, text\) => _freeAiReply/);
+  assert.match(indexSrc, /keyless-provider\.mjs/);
 });
 
 // ───────────────────────── واجهة الأزرار في الردود ─────────────────────────

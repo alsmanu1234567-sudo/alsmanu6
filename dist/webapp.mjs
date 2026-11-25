@@ -480,6 +480,7 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/ai/memory/clear',parseJson,guard(async uid=>aiWeb().clear(uid)));
   app.post('/api/ai/meta',parseJson,guard(async(uid,req)=>aiWeb().metaAi(uid,!!req.body?.enabled)));
   app.post('/api/ai/meta/test',parseJson,guard(async uid=>aiWeb().metaAiTest(uid)));
+  app.post('/api/ai/keyless/test',parseJson,guard(async uid=>aiWeb().keylessTest(uid)));
 
   const reply = () => { if (!replyService) throw new Error('خدمة الردود غير جاهزة'); return replyService; };
   app.get('/auto-replies.js', (_req, res) => { res.setHeader('Content-Type','application/javascript; charset=utf-8'); res.setHeader('Cache-Control','no-store'); res.end(readFileSync(fileURLToPath(new URL('../public/auto-replies.js', import.meta.url)))); });

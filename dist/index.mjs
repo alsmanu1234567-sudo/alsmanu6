@@ -125662,12 +125662,60 @@ async function _metaAiReply(userId, prompt, senderName, incomingText, conversati
     return null;
   }
 }
+// [KEYLESS-HTTP v8.21.1] مزوّد بلا مفتاح ولا واتساب (HTTP) — يعمل حتى مع حساب Business
+var _keylessClients = /* @__PURE__ */ new Map(); // userId → client
+function _keylessClient(userId) {
+  const key = String(userId);
+  let client = _keylessClients.get(key);
+  if (!client) {
+    client = { mod: null, client: null };
+    _keylessClients.set(key, client);
+  }
+  return client;
+}
+async function _keylessReply(userId, prompt, senderName, incomingText, conversationKey) {
+  try {
+    const holder = _keylessClient(userId);
+    if (!holder.client) {
+      const mod = await import("../services/ai/keyless-provider.mjs");
+      holder.mod = mod;
+      holder.client = mod.createKeylessClient({ timeoutMs: 30000, logger });
+    }
+    const u = getUser(userId) || {};
+    const history = conversationHistory.get(conversationKey) || [];
+    const reply = await holder.client.askPrompt({
+      system: prompt || u.aiSystemPrompt || "أنت مساعد ودود يرد بالعربية باختصار.",
+      history,
+      senderName,
+      text: incomingText,
+    });
+    if (!reply) return null;
+    conversationHistory.set(conversationKey, [
+      ...history,
+      { role: "user", content: `${senderName}: ${incomingText}` },
+      { role: "assistant", content: reply },
+    ].slice(-20));
+    try {
+      const _s = u.aiStats || { requests: 0, tokens: 0 };
+      saveUser(userId, { aiStats: { requests: (_s.requests || 0) + 1, tokens: _s.tokens || 0, keyless: (_s.keyless || 0) + 1, metaAi: (_s.metaAi || 0), lastAt: Date.now() } });
+    } catch { }
+    return reply;
+  } catch (err) {
+    try { logger.warn({ err: String(err?.message || err).slice(0, 160), userId }, "[KEYLESS] خطأ"); } catch { }
+    return null;
+  }
+}
+// [FREE-AI] سلسلة مجانية موحّدة: ميتا (بلا مفتاح، واتساب) ثم HTTP بلا مفتاح
+async function _freeAiReply(userId, prompt, senderName, incomingText, conversationKey) {
+  const metaReply = await _metaAiReply(userId, prompt, senderName, incomingText, conversationKey);
+  if (metaReply) return metaReply;
+  return await _keylessReply(userId, prompt, senderName, incomingText, conversationKey);
+}
 async function getAiReply(userId, prompt, senderName, incomingText, conversationKey) {
   const apiKey = getNvidiaKey(userId);
   if (!apiKey) {
-    // [META-AI] لا مفتاح؟ جرّب ذكاء ميتا المدمج في واتساب
-    const metaReply = await _metaAiReply(userId, prompt, senderName, incomingText, conversationKey);
-    return metaReply || null;
+    // [META-AI] لا مفتاح؟ ذكاء ميتا المدمج، وإن فشل (حساب Business) ⇒ مزوّد HTTP بلا مفتاح
+    return await _freeAiReply(userId, prompt, senderName, incomingText, conversationKey);
   }
   const model = getUserSelectedModel(userId);
   // [AI-NEW] إعدادات المستخدم: درجة الإبداع، أقصى طول للرد، الكل��ا�� المحظورة
@@ -297714,6 +297762,9 @@ ${senderName}: ${text}` });
           const aiText = await getAiReply(userId, aiPrompt, senderName, text, convKey);
           // [FIX-TYPING] إيقاف حالة "يكتب..." بعد انتهاء المعالجة
           sock.sendPresenceUpdate("paused", jid).catch(() => {});
+          if (!aiText) {
+            try { logger.warn({ userId, jid, numberId: activeNum?.id || null }, "[AI-REPLY] لا رد من أي مزوّد (NVIDIA/Meta/HTTP)"); } catch { }
+          }
           if (aiText) {
             try {
               init_text_editor();
@@ -325987,7 +326038,7 @@ init_database();
 init_state();
 init_keyboards();
 async function handleAiCallback2(bot2, chatId, userId, data) {
-  _aiMod.setDeps({ getUser, saveUser, setState, cancelKeyboard, aiMenuKeyboard, init_ai_manager, ai_manager_exports });
+  _aiMod.setDeps({ getUser, saveUser, setState, cancelKeyboard, aiMenuKeyboard, init_ai_manager, ai_manager_exports, inMemoryDB, getSock: (uid) => _metaAiSock(uid), freeAiReply: (uid, prompt, text) => _freeAiReply(uid, prompt, "المستخدم", text, `aitest_${uid}`), keylessReply: (uid, prompt, text) => _keylessReply(uid, prompt, "المستخدم", text, `aitest_${uid}`) });
   return _aiMod.handleAiCallback2(bot2, chatId, userId, data);
 }
 // src/bot/features/groups/index.ts — فُصِل في dist/groups.mjs [PATCH_GROUPS_SPLIT_APPLIED]
@@ -325997,7 +326048,7 @@ init_keyboards();
 async function handleGroupsCallback(bot2, chatId, userId, data) {
   _groupsMod.setDeps({ getUser, setState, cancelKeyboard, inMemoryDB,
     // [META-AI] بديل مجاني لمفتاح NVIDIA في النشر التلقائي (مقتطف بالذكاء)
-    metaAiReply: async (uid, systemPrompt, text) => _metaAiReply(uid, systemPrompt, "المستخدم", text, `autopost_${uid}`),
+    metaAiReply: async (uid, systemPrompt, text) => _freeAiReply(uid, systemPrompt, "المستخدم", text, `autopost_${uid}`),
   });
   return _groupsMod.handleGroupsCallback(bot2, chatId, userId, data);
 }
