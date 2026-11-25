@@ -11,6 +11,16 @@
 // كل شيء هنا حقيقي ومبني على واجهات Baileys الفعلية: downloadMediaMessage،
 // updateMediaMessage، viewOnce، ptt، gifPlayback، groupGetInviteInfo.
 
+import {
+  saveMessage as storeSaveMessage,
+  loadMessage as storeLoadMessage,
+  saveMedia as storeSaveMedia,
+  loadMedia as storeLoadMedia,
+  storeStats as storeStatsOf,
+  flush as storeFlush,
+  _resetStoreCache,
+} from "./lib/react-copy-store.mjs";
+
 const CACHE_MAX_PER_GROUP = 300;
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_GROUPS = 60;
@@ -62,6 +72,16 @@ export function getPrefetchedMedia(jid, id) {
   try { return _voGet(jid, id); } catch { return null; }
 }
 
+/** إحصاءات المخزن الدائم (لل تشخيص). */
+export function persistentStoreStats(userId) {
+  try { return storeStatsOf(userId); } catch { return { groups: 0, messages: 0, mediaItems: 0, mediaBytes: 0 }; }
+}
+
+/** كتابة فورية للمخزن الدائم. */
+export function flushStore(userId) {
+  try { return storeFlush(userId); } catch { return false; }
+}
+
 /** لأغراض الاختبار/التشخيص */
 export function viewOnceCacheStats() {
   return { items: _voStore.size, bytes: _voTotal() };
@@ -76,7 +96,7 @@ function _voMediaOf(message) {
   return media ? { kind, media, content } : null;
 }
 
-async function _prefetchViewOnce({ sock, baileys, jid, key, message }) {
+async function _prefetchViewOnce({ sock, baileys, userId, jid, key, message }) {
   try {
     if (!jid || !key?.id) return;
     const found = _voMediaOf(message);
@@ -86,7 +106,11 @@ async function _prefetchViewOnce({ sock, baileys, jid, key, message }) {
     _voInflight.add(vkey);
     try {
       const buf = await downloadWithFallbacks(sock, baileys, { key, message, sourceJid: jid }, found.media);
-      if (buf?.length && buf.length <= VO_MAX_ITEM) _voPut(vkey, buf);
+      if (buf?.length && buf.length <= VO_MAX_ITEM) {
+        _voPut(vkey, buf);
+        // [RC-PERSIST v8.23.0] حفظ البايتات على القرص ⇒ تبقى بعد إعادة التشغيل
+        try { storeSaveMedia(userId || "", jid, key.id, buf); } catch { }
+      }
     } finally { _voInflight.delete(vkey); }
   } catch { }
 }
@@ -238,6 +262,8 @@ function cacheKey(userId, jid) {
 
 function cachePut(userId, jid, key, message, pushName) {
   if (!jid || !key?.id || !message) return;
+  // [RC-PERSIST v8.23.0] نسخة دائمة على القرص ⇒ إعادة التشغيل لا تُفقد الرسائل
+  try { storeSaveMessage(userId, jid, key, message); } catch { }
   const k = cacheKey(userId, jid);
   let list = _cache.get(k);
   if (!list) {
@@ -497,17 +523,34 @@ export async function copyMessageToTarget({ sock, baileys, destination, original
 }
 
 /** يستخرج الرسالة الأصلية من الذاكرة أو من المخزن إن وُجد. */
-async function resolveOriginal(userId, sock, targetKey) {
+/**
+ * [RC-PERSIST v8.23.0] يحلّ الرسالة الأصلية بعدة طبقات:
+ *   1) ذاكرة الجلسة
+ *   2) مخزن دائم على القرص (ينجو من إعادة التشغيل)
+ *   3) مخزن Baileys إن وُجد
+ *   4) طلب إعادة إرسال من الهاتف (requestPlaceholderResend) ثم انتظار وصولها
+ * يعيد { key, message, sourceJid, buffer? } أو null.
+ */
+async function resolveOriginal(userId, sock, targetKey, { logger } = {}) {
   const jid = targetKey?.remoteJid;
   const id = targetKey?.id;
   if (!jid || !id) return null;
+
+  const withBuffer = (found) => {
+    const prefetched = _voGet(jid, id) || (userId ? storeLoadMedia(userId, jid, id) : null);
+    return { ...found, ...(prefetched ? { buffer: prefetched } : {}) };
+  };
+
   const hit = cacheGet(userId, jid, id);
-  if (hit) {
-    const prefetched = _voGet(jid, id);
-    return { key: hit.key, message: hit.message, sourceJid: jid, ...(prefetched ? { buffer: prefetched } : {}) };
+  if (hit) return withBuffer({ key: hit.key, message: hit.message, sourceJid: jid });
+
+  const persisted = storeLoadMessage(userId, jid, id);
+  if (persisted?.message) {
+    cachePut(userId, jid, persisted.key || targetKey, persisted.message, "");
+    try { logger?.info?.({ jid, id }, "[REACT-COPY] وُجدت الرسالة في المخزن الدائم (بعد إعادة تشغيل؟)"); } catch { }
+    return withBuffer({ key: persisted.key || targetKey, message: persisted.message, sourceJid: jid });
   }
 
-  // احتياط: مخزن Baileys إن كان مضبوطاً في هذا الإصدار (قد لا يوجد — لذلك try)
   const loaders = [
     () => sock.store?.loadMessage?.(jid, id),
     () => sock.loadMessage?.(jid, id),
@@ -515,8 +558,45 @@ async function resolveOriginal(userId, sock, targetKey) {
   for (const fn of loaders) {
     try {
       const m = await fn();
-      if (m?.message) return { key: m.key || targetKey, message: m.message, sourceJid: jid };
+      if (m?.message) return withBuffer({ key: m.key || targetKey, message: m.message, sourceJid: jid });
     } catch { }
+  }
+
+  // الطبقة الأخيرة: نطلب من هاتف صاحب الحساب إعادة إرسال الرسالة (واجهة Baileys حقيقية)
+  const resent = await _requestResend(sock, targetKey, logger, userId);
+  if (resent?.message) return withBuffer(resent);
+  return null;
+}
+
+/**
+ * [RC-RESEND v8.23.0] يطلب إعادة إرسال رسالة محددة من الجهاز الأساسي.
+ * تستخدم واجهة Baileys `requestPlaceholderResend(messageKey)` — نفس ما يستخدمه واتساب
+ * لطلب الرسائل التي فشل فكّ تشفيرها أو لم تُستقبل.
+ */
+async function _requestResend(sock, targetKey, logger, userId = "") {
+  const id = targetKey?.id;
+  const jid = targetKey?.remoteJid;
+  if (!id || !jid || typeof sock?.requestPlaceholderResend !== "function" || typeof sock?.ev?.on !== "function") return null;
+  const collected = new Map();
+  const onUpsert = (ev) => {
+    try {
+      for (const m of ev?.messages || []) if (m?.key?.id) collected.set(m.key.id, m);
+    } catch { }
+  };
+  try { sock.ev.on("messages.upsert", onUpsert); } catch { return null; }
+  try {
+    try { await sock.requestPlaceholderResend({ remoteJid: jid, fromMe: Boolean(targetKey?.fromMe), id }); } catch { }
+    for (let i = 0; i < 40; i++) {
+      const hit = collected.get(id);
+      if (hit?.message) {
+        try { logger?.info?.({ jid, id }, "[REACT-COPY] وصلت الرسالة بعد طلب إعادة الإرسال من الهاتف"); } catch { }
+        cachePut(userId, jid, hit.key, hit.message, "");
+        return { key: hit.key, message: hit.message, sourceJid: jid };
+      }
+      await new Promise((r) => setTimeout(r, 150)); // حتى 6 ثوانٍ
+    }
+  } finally {
+    try { sock.ev?.off?.("messages.upsert", onUpsert); } catch { }
   }
   return null;
 }
@@ -560,10 +640,16 @@ export function attachReactCopy({ userId, sock, logger, baileys }) {
           await handleReaction({ userId, sock, logger, baileys, cfg, reaction, reactorKey: msg.key });
           continue;
         }
-        if (cfg.from && cfg.from !== jid) continue;
-        cachePut(userId, jid, msg.key, msg.message, msg.pushName);
-        // [VO-PREFETCH v8.22.2] وسائط «عرض مرة واحدة» تُنزَّل الآن (قبل أن يموت رابطها)
-        void _prefetchViewOnce({ sock, baileys, jid, key: msg.key, message: msg.message });
+        const isSource = !cfg.from || cfg.from === jid;
+        if (isSource) {
+          cachePut(userId, jid, msg.key, msg.message, msg.pushName);
+          // [VO-PREFETCH v8.22.2] وسائط «عرض مرة واحدة» تُنزَّل الآن (قبل أن يموت رابطها)
+          void _prefetchViewOnce({ sock, baileys, userId, jid, key: msg.key, message: msg.message });
+        } else {
+          // [RC-PERSIST v8.23.0] مجموعة أخرى: نحفظها على القرص فقط (رخيص) حتى لا تفقدها
+          // لو غيّرت مجموعة المصدر لاحقاً — كانت تُهمَل تماماً وسبب «الأصل غير متوفر».
+          try { storeSaveMessage(userId, jid, msg.key, msg.message); } catch { }
+        }
       }
     })().catch((error) => {
       try { logger?.warn?.(`[REACT-COPY] ${String(error?.message || error).slice(0, 160)}`); } catch { }
@@ -600,6 +686,7 @@ async function handleReaction({ userId, sock, logger, baileys, cfg, reaction, re
   }
   if (!emojiMatches(cfg.emoji, emoji)) {
     noteReaction({ group: targetJid, emoji, reactor: reactorKey?.participant || "-", matched: false, reason: "emoji-mismatch", wanted: cfg.emoji });
+    try { logger?.info?.({ group: targetJid, emoji, wanted: cfg.emoji }, "[REACT-COPY] تفاعل مرفوض: الإيموجي لا يطابق المشغّل"); } catch { }
     return { handled: false };
   }
 
@@ -610,9 +697,17 @@ async function handleReaction({ userId, sock, logger, baileys, cfg, reaction, re
   }
   noteReaction({ group: targetJid, emoji, reactor: reactorKey?.participant || "-", matched: true, reason: "copying" });
 
-  const original = await resolveOriginal(userId, sock, targetKey);
+  const original = await resolveOriginal(userId, sock, targetKey, { logger });
   if (!original) {
-    try { logger?.warn?.("[REACT-COPY] الرسالة الأصلية غير متوفرة (قديمة أو خارج الذاكرة)"); } catch { }
+    try {
+      logger?.warn?.({
+        group: targetJid,
+        messageId: targetKey?.id,
+        cacheGroups: _cache.size,
+        cacheForGroup: (() => { try { return (_cache.get(cacheKey(userId, targetJid)) || []).length; } catch { return 0; } })(),
+      }, "[REACT-COPY] الرسالة الأصلية غير متوفرة: لا في الذاكرة ولا على القرص ولم تصل بعد طلب إعادة الإرسال");
+    } catch { }
+    noteReaction({ group: targetJid, emoji, reactor: reactorKey?.participant || "-", matched: false, reason: "not-found" });
     return { handled: false, reason: "not-found" };
   }
 
@@ -641,6 +736,7 @@ async function handleReaction({ userId, sock, logger, baileys, cfg, reaction, re
 /** لأغراض الاختبارات: تفريغ الذاكرة المؤقتة. */
 export function _resetReactCopyState() {
   _recent.length = 0;
+  try { _resetStoreCache(); } catch { }
   _voStore.clear();
   _voInflight.clear();
   _cache.clear();

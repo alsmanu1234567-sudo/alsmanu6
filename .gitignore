@@ -25,3 +25,6 @@ data/member-manager/
 # Repositories downloaded from developer console
 developer-downloads/
 bot-data/
+
+# [RC-PERSIST v8.23.0] مخزن نسخ بالتفاعل (بيانات تشغيل ضخمة)
+bot-data/react-copy/

@@ -7,7 +7,7 @@ import {
 } from './lib/number-profiles.mjs';
 import { sortGroups, togglePinned, paginate, shortName, GROUP_PAGE_SIZE } from './lib/group-sort.mjs';
 import { listPins, togglePin } from './lib/group-pins.mjs';
-import { invalidateReactCopySettings, getRecentReactions, viewOnceCacheStats } from './react-copy.mjs';
+import { invalidateReactCopySettings, getRecentReactions, viewOnceCacheStats, persistentStoreStats } from './react-copy.mjs';
 
 let _deps = {};
 
@@ -669,6 +669,7 @@ export async function handleReactCopyCallback(bot2, chatId, userId, data) {
   }
   if (data === "mymsgs_rc_diag") {
     const recent = getRecentReactions(5);
+    const _rcStore = persistentStoreStats(userId);
     const lines = recent.length
       ? recent.map((r) => `• ${new Date(r.at).toLocaleTimeString("ar-EG")} — ${r.emoji || "-"} من ${String(r.reactor || "-").split("@")[0]} ⇒ ${r.matched ? "✅ نُسخت" : "⛔ " + (r.reason === "not-owner" ? "ليس صاحب الحساب" : r.reason === "emoji-mismatch" ? "إيموجي غير مطابق" : r.reason === "duplicate" ? "مكرر" : r.reason || "مرفوض")}`)
       : "لا تفاعلات مرصودة بعد.";
@@ -678,7 +679,8 @@ export async function handleReactCopyCallback(bot2, chatId, userId, data) {
       `الهدف: ${s.reactCopyTo ? _rcName(s.reactCopyTo) : "⚠️ غير محدد"}\n` +
       `الإيموجي: ${_rcState(s).effective}\n` +
       `من يستطيع: ${s.reactCopyAllSenders ? "كل الأعضاء" : "المالك فقط"}\n\n` +
-      `*ذاكرة عرض-مرة:* ${viewOnceCacheStats().items} عنصر · ${Math.round(viewOnceCacheStats().bytes / 1048576 * 10) / 10}MB\n\n` +
+      `*ذاكرة عرض-مرة:* ${viewOnceCacheStats().items} عنصر · ${Math.round(viewOnceCacheStats().bytes / 1048576 * 10) / 10}MB\n` +
+      `*المخزن الدائم:* ${_rcStore.messages} رسالة · ${_rcStore.groups} مجموعة · ${_rcStore.mediaItems} وسائط · ${Math.round(_rcStore.mediaBytes / 1048576 * 10) / 10}MB\n\n` +
       `*آخر التفاعلات:*\n${lines}\n\n` +
       (s.reactCopyAllSenders ? "" : "ℹ️ إن كنت تتفاعل من رقم مختلف عن رقم البوت ⇒ فعّل «👥 من يستطيع: الجميع»."),
       { parse_mode: "Markdown" });
