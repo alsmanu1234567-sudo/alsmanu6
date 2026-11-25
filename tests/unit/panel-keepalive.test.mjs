@@ -102,3 +102,15 @@ test("الفاصل الافتراضي 3 دقائق — أقل بكثير من 20
   assert.equal(mod.KEEPALIVE_DEFAULTS.intervalMs, 180000);
   assert.ok(mod.KEEPALIVE_DEFAULTS.intervalMs < 20 * 60 * 1000 / 3);
 });
+
+test("لوحة محمية بتوكن (401) تُكتشف أيضاً — الطلب وحده يُبقيها حيّة", async () => {
+  const fetchImpl = async (url) => ({ ok: false, status: 401, json: async () => ({ error: "غير مصرح" }) });
+  const found = await mod.detectPanelPort({ fetchImpl, ports: [9001] });
+  assert.equal(found?.port, 9001);
+  assert.equal(found?.authRequired, true);
+});
+
+test("البوت نفسه (404 على /api/overview) لا يُعتبر لوحة", async () => {
+  const fetchImpl = async () => ({ ok: false, status: 404, json: async () => ({}) });
+  assert.equal(await mod.detectPanelPort({ fetchImpl, ports: [5000] }), null);
+});

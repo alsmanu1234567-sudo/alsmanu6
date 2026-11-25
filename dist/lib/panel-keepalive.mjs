@@ -94,17 +94,24 @@ async function probe(fetchImpl, url, { token, timeoutMs } = {}) {
 /** يتحقق أن المنفذ هو «لوحة السيرفر» (ترجع JSON فيه base أو version). */
 export async function detectPanelPort({ fetchImpl = fetch, token = "", ports, timeoutMs } = {}) {
   const candidates = (ports || listListeningPorts()).filter((p) => !KEEPALIVE_DEFAULTS.portsToSkip.has(p));
+  let authOnly = null;
   for (const port of candidates) {
     const r = await probe(fetchImpl, `http://127.0.0.1:${port}/api/overview`, { token, timeoutMs });
+    // 401 = خدمة محمية برأس x-control-token ⇒ هذه هي اللوحة (حتى لو لم نملك التوكن).
+    // الطلب نفسه يُصفّر عدّاد الخمول، لذلك نكتفي به.
+    if (r.status === 401 && !authOnly) {
+      authOnly = { port, base: null, version: null, authRequired: true };
+      continue;
+    }
     if (!r.res || !r.ok) continue;
     try {
       const data = await r.res.json();
       if (data && (data.base || data.version) && (data.roots || data.cwd || data.runtime)) {
-        return { port, base: data.base || null, version: data.version || null };
+        return { port, base: data.base || null, version: data.version || null, authRequired: false };
       }
     } catch { }
   }
-  return null;
+  return authOnly;
 }
 
 const state = {
@@ -150,7 +157,7 @@ async function tick({ logger, fetchImpl }) {
     if (found) {
       state.port = found.port;
       state.discoveredAt = Date.now();
-      try { logger?.info?.({ port: found.port, version: found.version }, "[PANEL-KEEPALIVE] اكتُشف منفذ اللوحة تلقائياً"); } catch { }
+      try { logger?.info?.({ port: found.port, version: found.version, authRequired: Boolean(found.authRequired) }, found.authRequired ? "[PANEL-KEEPALIVE] اكتُشف منفذ اللوحة (محمي بتوكن — النبضة تُرسل بلا توكن وتكفي لإبقائها حيّة)" : "[PANEL-KEEPALIVE] اكتُشف منفذ اللوحة تلقائياً"); } catch { }
     } else {
       try {
         logger?.warn?.(state.token
