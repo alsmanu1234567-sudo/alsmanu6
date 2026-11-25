@@ -7,7 +7,7 @@ import {
 } from './lib/number-profiles.mjs';
 import { sortGroups, togglePinned, paginate, shortName, GROUP_PAGE_SIZE } from './lib/group-sort.mjs';
 import { listPins, togglePin } from './lib/group-pins.mjs';
-import { invalidateReactCopySettings, getRecentReactions } from './react-copy.mjs';
+import { invalidateReactCopySettings, getRecentReactions, viewOnceCacheStats } from './react-copy.mjs';
 
 let _deps = {};
 
@@ -678,6 +678,7 @@ export async function handleReactCopyCallback(bot2, chatId, userId, data) {
       `الهدف: ${s.reactCopyTo ? _rcName(s.reactCopyTo) : "⚠️ غير محدد"}\n` +
       `الإيموجي: ${_rcState(s).effective}\n` +
       `من يستطيع: ${s.reactCopyAllSenders ? "كل الأعضاء" : "المالك فقط"}\n\n` +
+      `*ذاكرة عرض-مرة:* ${viewOnceCacheStats().items} عنصر · ${Math.round(viewOnceCacheStats().bytes / 1048576 * 10) / 10}MB\n\n` +
       `*آخر التفاعلات:*\n${lines}\n\n` +
       (s.reactCopyAllSenders ? "" : "ℹ️ إن كنت تتفاعل من رقم مختلف عن رقم البوت ⇒ فعّل «👥 من يستطيع: الجميع»."),
       { parse_mode: "Markdown" });

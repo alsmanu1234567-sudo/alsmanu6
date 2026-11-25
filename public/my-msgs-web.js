@@ -82,7 +82,8 @@
   if (el('mm-rc-diag')) el('mm-rc-diag').onclick = () => act(async () => {
     const d = await api('/api/my-msgs/react-copy/diag' + (phone ? '?phone=' + encodeURIComponent(phone) : ''));
     const lines = (d.recent || []).map(r => '• ' + new Date(r.at).toLocaleTimeString() + ' — ' + (r.emoji || '-') + ' من ' + String(r.reactor || '-').split('@')[0] + ' ⇒ ' + (r.matched ? '✅ نُسخت' : '⛔ ' + (r.reason === 'not-owner' ? 'ليس صاحب الحساب' : r.reason === 'emoji-mismatch' ? 'إيموجي غير مطابق' : r.reason === 'duplicate' ? 'مكرر' : r.reason || 'مرفوض')));
-    el('mm-rc-diag-out').textContent = 'المصدر: ' + (d.from || 'أي مجموعة') + '\nالهدف: ' + (d.to || 'غير محدد') + '\nالإيموجي: ' + (d.emoji || '📌 (افتراضي)') + '\nمن يستطيع: ' + (d.allSenders ? 'كل الأعضاء' : 'المالك فقط') + '\n\nآخر التفاعلات:\n' + (lines.length ? lines.join('\n') : 'لا تفاعلات مرصودة بعد.') + (d.allSenders ? '' : '\n\nℹ️ إن كنت تتفاعل من رقم مختلف عن رقم البوت فعّل «السماح لكل الأعضاء».');
+    const vo = d.viewOnceCache || { items: 0, bytes: 0 };
+    el('mm-rc-diag-out').textContent = 'ذاكرة عرض-مرة: ' + vo.items + ' عنصر · ' + Math.round(vo.bytes / 1048576 * 10) / 10 + 'MB\n' + 'المصدر: ' + (d.from || 'أي مجموعة') + '\nالهدف: ' + (d.to || 'غير محدد') + '\nالإيموجي: ' + (d.emoji || '📌 (افتراضي)') + '\nمن يستطيع: ' + (d.allSenders ? 'كل الأعضاء' : 'المالك فقط') + '\n\nآخر التفاعلات:\n' + (lines.length ? lines.join('\n') : 'لا تفاعلات مرصودة بعد.') + (d.allSenders ? '' : '\n\nℹ️ إن كنت تتفاعل من رقم مختلف عن رقم البوت فعّل «السماح لكل الأعضاء».');
   });
   el('mm-pair').onclick=()=>act(async()=>{const result=await api('/api/my-msgs/pair',{phone:value('mm-pair-phone')});el('mm-pair-result').textContent='رمز الربط: '+result.code});
  }

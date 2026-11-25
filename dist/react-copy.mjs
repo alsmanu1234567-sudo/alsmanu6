@@ -23,6 +23,74 @@ const _attached = new WeakMap(); // sock -> Set(userId)
 const _settingsAt = new Map(); // `${userId}:${sockId}` -> {at, cfg}
 const _recent = []; // [DIAG v8.22.1] آخر التفاعلات (للتحقق من سبب التجاهل)
 
+// ── [VO-PREFETCH v8.22.2] تنزيل وسائط «عرض مرة واحدة» لحظة وصولها ──
+// السبب الجذري: وسائط العرض-مرة تُحذف من سيرفر واتساب بعد فتحها (وملفك هو نفس الحساب)،
+// فرابط التنزيل يموت قبل أن تتفاعل. الحل الوحيد الصحيح: ننزّلها فوراً ونحتفظ بالبايتات.
+const VO_MAX_ITEM = 16 * 1024 * 1024;   // 16MB أقصى للعنصر
+const VO_BUDGET = 24 * 1024 * 1024;     // 24MB إجمالاً
+const VO_MAX_ITEMS = 10;
+const VO_TTL_MS = 6 * 60 * 60 * 1000;
+const _voStore = new Map(); // `${jid}|${id}` -> {buf, ts}
+const _voInflight = new Set();
+
+function _voKey(jid, id) { return `${jid}|${id}`; }
+function _voTotal() {
+  let total = 0;
+  for (const v of _voStore.values()) total += v.buf.length;
+  return total;
+}
+function _voPut(key, buf) {
+  try {
+    for (const [k, v] of _voStore) if (Date.now() - v.ts > VO_TTL_MS) _voStore.delete(k);
+    _voStore.set(key, { buf, ts: Date.now() });
+    while (_voStore.size > VO_MAX_ITEMS || _voTotal() > VO_BUDGET) {
+      const oldest = _voStore.keys().next().value;
+      if (!oldest || oldest === key) break;
+      _voStore.delete(oldest);
+    }
+  } catch { }
+}
+function _voGet(jid, id) {
+  const hit = _voStore.get(_voKey(jid, id));
+  if (!hit) return null;
+  if (Date.now() - hit.ts > VO_TTL_MS) { _voStore.delete(_voKey(jid, id)); return null; }
+  return hit.buf;
+}
+/** بايتات رسالة «عرض مرة واحدة» محفوظة مسبقاً (أو null). */
+export function getPrefetchedMedia(jid, id) {
+  if (!jid || !id) return null;
+  try { return _voGet(jid, id); } catch { return null; }
+}
+
+/** لأغراض الاختبار/التشخيص */
+export function viewOnceCacheStats() {
+  return { items: _voStore.size, bytes: _voTotal() };
+}
+
+function _voMediaOf(message) {
+  const { content, viewOnce } = unwrapMessage(message);
+  if (!viewOnce) return null;
+  const kind = classifyContent(content);
+  if (!kind || kind === "text") return null;
+  const media = content.imageMessage || content.videoMessage || content.ptvMessage || content.audioMessage || content.documentMessage || content.stickerMessage;
+  return media ? { kind, media, content } : null;
+}
+
+async function _prefetchViewOnce({ sock, baileys, jid, key, message }) {
+  try {
+    if (!jid || !key?.id) return;
+    const found = _voMediaOf(message);
+    if (!found) return;
+    const vkey = _voKey(jid, key.id);
+    if (_voStore.has(vkey) || _voInflight.has(vkey)) return;
+    _voInflight.add(vkey);
+    try {
+      const buf = await downloadWithFallbacks(sock, baileys, { key, message, sourceJid: jid }, found.media);
+      if (buf?.length && buf.length <= VO_MAX_ITEM) _voPut(vkey, buf);
+    } finally { _voInflight.delete(vkey); }
+  } catch { }
+}
+
 /** يعيد آخر التفاعلات المرصودة (الأحدث أولاً) — للتشخيص من اللوحة. */
 export function getRecentReactions(limit = 5) {
   return _recent.slice(-limit).reverse();
@@ -379,7 +447,9 @@ export async function copyMessageToTarget({ sock, baileys, destination, original
       content.imageMessage || content.videoMessage || content.ptvMessage ||
       content.audioMessage || content.documentMessage || content.stickerMessage;
 
-    const buf = await downloadWithFallbacks(sock, baileys, original, mediaObj);
+    // [VO-PREFETCH v8.22.2] إن كانت البايتات محفوظة مسبقاً (عرض مرة واحدة) نستخدمها مباشرة
+    const cachedBuf = original?.buffer?.length ? original.buffer : null;
+    const buf = cachedBuf || await downloadWithFallbacks(sock, baileys, original, mediaObj);
     if (!buf) return { ok: false, kind, reason: "download-failed" };
 
     const asViewOnce = Boolean(preferViewOnce && wasViewOnce);
@@ -419,7 +489,7 @@ export async function copyMessageToTarget({ sock, baileys, destination, original
     } else if (kind === "sticker") {
       await sock.sendMessage(destination, { sticker: buf });
     }
-    return { ok: true, kind, viewOnce: asViewOnce };
+    return { ok: true, kind, viewOnce: asViewOnce, usedPrefetch: Boolean(cachedBuf) };
   } catch (error) {
     try { logger?.warn?.(`[REACT-COPY] خطأ النسخ: ${String(error?.message || error).slice(0, 160)}`); } catch { }
     return { ok: false, reason: "exception" };
@@ -432,7 +502,10 @@ async function resolveOriginal(userId, sock, targetKey) {
   const id = targetKey?.id;
   if (!jid || !id) return null;
   const hit = cacheGet(userId, jid, id);
-  if (hit) return { key: hit.key, message: hit.message, sourceJid: jid };
+  if (hit) {
+    const prefetched = _voGet(jid, id);
+    return { key: hit.key, message: hit.message, sourceJid: jid, ...(prefetched ? { buffer: prefetched } : {}) };
+  }
 
   // احتياط: مخزن Baileys إن كان مضبوطاً في هذا الإصدار (قد لا يوجد — لذلك try)
   const loaders = [
@@ -489,6 +562,8 @@ export function attachReactCopy({ userId, sock, logger, baileys }) {
         }
         if (cfg.from && cfg.from !== jid) continue;
         cachePut(userId, jid, msg.key, msg.message, msg.pushName);
+        // [VO-PREFETCH v8.22.2] وسائط «عرض مرة واحدة» تُنزَّل الآن (قبل أن يموت رابطها)
+        void _prefetchViewOnce({ sock, baileys, jid, key: msg.key, message: msg.message });
       }
     })().catch((error) => {
       try { logger?.warn?.(`[REACT-COPY] ${String(error?.message || error).slice(0, 160)}`); } catch { }
@@ -558,7 +633,7 @@ async function handleReaction({ userId, sock, logger, baileys, cfg, reaction, re
     }
   }
   try {
-    logger?.info?.(`[REACT-COPY] ${result.ok ? "نُسخت" : "فشلت"} رسالة ${result.kind || "-"} من ${targetJid} إلى ${cfg.to}${result.reason ? " سبب=" + result.reason : ""}${result.viewOnce ? " (كانت عرض-مرة)" : ""}`);
+    logger?.info?.(`[REACT-COPY] ${result.ok ? "نُسخت" : "فشلت"} رسالة ${result.kind || "-"} من ${targetJid} إلى ${cfg.to}${result.reason ? " سبب=" + result.reason : ""}${result.usedPrefetch ? " (من الذاكرة المسبقة)" : ""}`);
   } catch { }
   return result;
 }
@@ -566,6 +641,8 @@ async function handleReaction({ userId, sock, logger, baileys, cfg, reaction, re
 /** لأغراض الاختبارات: تفريغ الذاكرة المؤقتة. */
 export function _resetReactCopyState() {
   _recent.length = 0;
+  _voStore.clear();
+  _voInflight.clear();
   _cache.clear();
   _dedup.clear();
   _settingsAt.clear();

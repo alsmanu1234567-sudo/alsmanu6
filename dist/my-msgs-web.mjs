@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {COMMAND_CONTROL_FEATURES,getMyMsgsSettingsForNumber,saveMyMsgsSettingsForNumber,normalizeMyMsgsCommandCode} from './my-msgs.mjs';
 import {sortGroups} from './lib/group-sort.mjs';
 import {listPins} from './lib/group-pins.mjs';
-import {invalidateReactCopySettings,getRecentReactions} from './react-copy.mjs';
+import {invalidateReactCopySettings,getRecentReactions,viewOnceCacheStats} from './react-copy.mjs';
 export function createMyMsgsWebService({getUser,inMemoryDB}){
  const user=u=>getUser(String(u));
  function settings(uid,phone){const u=user(uid);if(!Array.isArray(u.whatsappNumbers)||!u.whatsappNumbers.some(n=>n.number===phone))throw Error('الرقم غير مرتبط بحسابك');return getMyMsgsSettingsForNumber(u,phone)}
@@ -14,7 +14,7 @@ export function createMyMsgsWebService({getUser,inMemoryDB}){
  function group(uid,phone,jid){settings(uid,phone);jid=String(jid||'').trim();if(jid&&!/^[A-Za-z0-9._:-]{3,128}@g\.us$/.test(jid))throw Error('معرف المجموعة غير صالح');save(uid,phone,{linkVideoGroupJid:jid||null});return {ok:true}}
  async function pairing(uid,phone){const number=String(phone||'').replace(/\D/g,'');if(number.length<7||number.length>15)throw Error('أدخل رقم الهاتف مع رمز الدولة');const sock=inMemoryDB?.sessions?.get(String(uid))?.sock;if(!sock?.requestPairingCode)throw Error('لا توجد جلسة واتساب نشطة لهذا الحساب');return {code:await sock.requestPairingCode(number)}}
  function reactCopy(uid,phone,input){const s=settings(uid,phone);const okJid=v=>!v||/^[A-Za-z0-9._:-]{3,128}@g\.us$/.test(v);const from=String(input.from||'').trim()||null,to=String(input.to||'').trim()||null;if(!okJid(from)||!okJid(to))throw Error('معرف المجموعة غير صالح');if(from&&to&&from===to)throw Error('لا يمكن أن تكون مجموعة المصدر هي نفسها الهدف');const rawEmoji=String(input.emoji||'').trim().slice(0,24);const emoji=rawEmoji;/* [RC-UI v8.22.0] ما تكتبه يُحفظ كما هو؛ الفراغ = 📌 وقت التشغيل فقط */if(input.enabled&&!to)throw Error('حدد مجموعة الهدف أولاً');save(uid,phone,{reactCopyEnabled:!!input.enabled,reactCopyEmoji:emoji,reactCopyFrom:from,reactCopyTo:to,reactCopyViewOnce:input.viewOnce===true,reactCopyAllSenders:!!input.allSenders,reactCopyDeleteOriginal:input.deleteOriginal===true});try{invalidateReactCopySettings(uid)}catch{}return {ok:true,emoji}}
- function reactCopyDiag(uid,phone){const s=settings(uid,phone);return {from:s.reactCopyFrom||'',to:s.reactCopyTo||'',emoji:s.reactCopyEmoji??'📌',allSenders:!!s.reactCopyAllSenders,viewOnce:s.reactCopyViewOnce===true,deleteOriginal:!!s.reactCopyDeleteOriginal,recent:getRecentReactions(5)}}
+ function reactCopyDiag(uid,phone){const s=settings(uid,phone);return {from:s.reactCopyFrom||'',to:s.reactCopyTo||'',emoji:s.reactCopyEmoji??'📌',allSenders:!!s.reactCopyAllSenders,viewOnce:s.reactCopyViewOnce===true,deleteOriginal:!!s.reactCopyDeleteOriginal,recent:getRecentReactions(5),viewOnceCache:viewOnceCacheStats()}}
  async function groups(uid,phone){
   const u=user(uid);
   if(phone&&(!Array.isArray(u.whatsappNumbers)||!u.whatsappNumbers.some(n=>n.number===phone)))throw Error('الرقم غير مرتبط بحسابك');

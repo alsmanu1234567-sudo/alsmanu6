@@ -295812,8 +295812,10 @@ ${nameLine}${statusLine}`;
                   key: { remoteJid: jid, fromMe: !ctxInfo?.participant, id: quotedId, participant: ctxInfo?.participant },
                   message: quoted
                 };
-                let buf = null;
+                // [VO-PREFETCH v8.22.2] إن كانت الرسالة عرض-مرة وقد نُزّلت لحظة وصولها ⇒ استخدم بايتاتها (رابطها ميت غالباً)
+                let buf = quotedId ? _reactCopyMod.getPrefetchedMedia(jid, quotedId) : null;
                 try {
+                  if (buf && buf.length) throw { __skip: true };
                   const { downloadMediaMessage: downloadMediaMessage2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
                   buf = await downloadMediaMessage2(
                     quotedMsgForDl,
@@ -295822,8 +295824,10 @@ ${nameLine}${statusLine}`;
                     { logger: baileysLogger, reuploadRequest: activeSock.updateMediaMessage }
                   );
                 } catch (dlErr) {
-                  // [COPY v8.22.1] المحاولة الأولى تفشل مع بعض الرسائل (بلا url) — الاحتياطي يعالجها، لذلك debug لا warn
-                  logger.debug({ dlErr: String(dlErr?.message || dlErr).slice(0, 160) }, "[/copy] المحاولة الأولى للتنزيل فشلت — استخدام الاحتياطي");
+                  if (!dlErr?.__skip) {
+                    // [COPY v8.22.1] المحاولة الأولى تفشل مع بعض الرسائل (بلا url) — الاحتياطي يعالجها، لذلك debug لا warn
+                    logger.debug({ dlErr: String(dlErr?.message || dlErr).slice(0, 160) }, "[/copy] المحاولة الأولى للتنزيل فشلت — استخدام الاحتياطي");
+                  }
                 }
                 if (!buf || !buf.length) {
                   // احتياط: نفس دالة التنزيل متعددة المصادر المستخدمة في النسخ بالتفاعل
