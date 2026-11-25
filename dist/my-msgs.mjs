@@ -452,19 +452,27 @@ const _rcLists = new Map();
 
 async function _rcLoadGroups(userId) {
   const scope = _deps.inMemoryDB;
-  let groups = scope?.groupsCache?.get?.(String(userId)) || [];
-  const sock = scope?.sessions?.get?.(String(userId))?.sock
-    || scope?.sessions?.get?.(String(userId));
-  if ((!Array.isArray(groups) || groups.length === 0) && sock?.groupFetchAllParticipating) {
+  let groups = Array.isArray(scope?.groupsCache?.get?.(String(userId))) ? scope.groupsCache.get(String(userId)) : [];
+  const sess = scope?.sessions?.get?.(String(userId));
+  const sock = sess?.sock || (sess && typeof sess.sendMessage === "function" ? sess : null);
+  // [RC-PICKER v8.21.2] نطلب القائمة من واتساب دائماً (المجموعات تُضاف/تُحذف باستمرار)
+  if (sock?.groupFetchAllParticipating) {
     try {
       const fetched = await sock.groupFetchAllParticipating();
-      groups = fetched ? Object.values(fetched) : [];
-      scope?.groupsCache?.set?.(String(userId), groups);
-    } catch { groups = Array.isArray(groups) ? groups : []; }
+      const arr = fetched ? Object.values(fetched) : [];
+      if (arr.length) {
+        groups = arr;
+        try { scope?.groupsCache?.set?.(String(userId), arr); } catch { }
+      }
+    } catch (error) {
+      try { _deps.logger?.warn?.(`[RC-PICKER] تعذّر جلب المجموعات: ${String(error?.message || error).slice(0, 120)}`); } catch { }
+    }
   }
+  // لا شيء؟ اعرض آخر قائمة عُرضت في هذه الجلسة بدل رسالة «لا توجد مجموعات»
+  if (!groups.length) groups = _rcLists.get(String(userId)) || [];
   const pinned = listPins(userId);
   const sorted = sortGroups(Array.isArray(groups) ? groups : [], pinned);
-  _rcLists.set(String(userId), sorted);
+  if (sorted.length) _rcLists.set(String(userId), sorted);
   return sorted;
 }
 
@@ -585,8 +593,13 @@ export async function handleReactCopyCallback(bot2, chatId, userId, data) {
     await bot2.sendMessage(chatId, "⏳ جارٍ جلب مجموعاتك…");
     const list = await _rcLoadGroups(userId);
     if (!list.length) {
-      await bot2.sendMessage(chatId, "⚠️ لم أجد مجموعات لهذا الرقم. تأكد أن الرقم متصل، أو استخدم «🔗 إدخال رابط دعوة».", {
-        reply_markup: { inline_keyboard: [[{ text: "🔗 إدخال رابط دعوة", callback_data: `mymsgs_rclink_${role}` }], [{ text: "◀️ رجوع", callback_data: "mymsgs_show_reactcopy" }]] },
+      const sess = _deps.inMemoryDB?.sessions?.get?.(String(userId));
+      const _s0 = sess?.sock || (sess && typeof sess.sendMessage === "function" ? sess : null);
+      const hasSock = Boolean(_s0?.sendMessage);
+      await bot2.sendMessage(chatId, hasSock
+        ? "⚠️ واتساب لم يُرجع أي مجموعة لهذا الرقم. اضغط «🔄 إعادة المحاولة»، وإن بقيت فارغة فالمشكلة من اتصال الجلسة لا من البوت."
+        : "⚠️ لا توجد جلسة واتساب متصلة الآن لهذا الحساب — اربط الرقم أولاً ثم أعد المحاولة.", {
+        reply_markup: { inline_keyboard: [[{ text: "🔄 إعادة المحاولة", callback_data: "mymsgs_rc_" + role }], [{ text: "🔗 إدخال رابط دعوة", callback_data: `mymsgs_rclink_${role}` }], [{ text: "◀️ رجوع", callback_data: "mymsgs_show_reactcopy" }]] },
       });
       return true;
     }

@@ -458,6 +458,8 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   const myMsgsWeb = () => {if(!myMsgsService)throw Error('قسم رسائلي غير جاهز');return myMsgsService;};
   app.get('/my-msgs-web.js',(_req,res)=>{res.setHeader('Content-Type','application/javascript; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(readFileSync(fileURLToPath(new URL('../public/my-msgs-web.js',import.meta.url))));});
   app.get('/api/my-msgs/overview',guard(async(uid,req)=>myMsgsWeb().overview(uid,req.query?.phone)));
+  // [RC-PICKER v8.21.2] قائمة مجموعات حقيقية لاختيار المصدر/الهدف من لوحة الويب
+  app.get('/api/my-msgs/groups',guard(async(uid,req)=>myMsgsWeb().groups(uid,req.query?.phone)));
   app.post('/api/my-msgs/feature',parseJson,guard(async(uid,req)=>myMsgsWeb().feature(uid,req.body?.phone,req.body?.id,req.body||{})));
   app.post('/api/my-msgs/custom',parseJson,guard(async(uid,req)=>myMsgsWeb().custom(uid,req.body?.phone,req.body||{})));
   app.post('/api/my-msgs/delete',parseJson,guard(async(uid,req)=>myMsgsWeb().remove(uid,req.body?.phone,req.body?.id)));
