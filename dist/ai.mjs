@@ -132,7 +132,7 @@ export async function handleAiCallback2(bot2, chatId, userId, data) {
     await bot2.sendMessage(chatId, "🧪 أرسلنا سؤالاً تجريبياً إلى Meta AI… قد يستغرق حتى دقيقة.");
     try {
       const mod = await import("../services/ai/meta-ai-provider.mjs");
-      const client = mod.createMetaAiClient({ sock, timeoutMs: 90000 });
+      const client = mod.createMetaAiClient({ sock, timeoutMs: 20000 });
       const reply = await client.ask("اكتب جملة قصيرة بالعربية تقول: تم اختبار الاتصال بنجاح.");
       if (!reply) {
         await bot2.sendMessage(chatId, "⚠️ لم يصل رد من Meta AI خلال 90 ثانية (الأرجح: حساب Business أو دولة غير مدعومة).\n\n🧪 أجرّب المزوّد بلا مفتاح (HTTP) الآن…");

@@ -137,3 +137,32 @@ test("اضبط التبعيات لا يكسر الوحدة", () => {
   setReactCopyDeps({ logger: { warn() { }, info() { } } });
   assert.ok(true);
 });
+
+// ─────────── /copy في index.mjs: طريقة alsmanu5 + فكّ العرض-مرة (v8.22.0) ───────────
+import { readFileSync } from "node:fs";
+const indexSrc = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+
+test("/copy: يستخدم downloadMediaMessage مثل alsmanu5 ويفكّ أغلفة العرض-مرة", () => {
+  assert.match(indexSrc, /\[\/COPY v8\.22\.0\]/);
+  assert.match(indexSrc, /quoted\.viewOnceMessageV2\?\.message/);
+  assert.match(indexSrc, /quoted\.viewOnceMessage\?\.message/);
+  assert.match(indexSrc, /downloadMediaMessage2/);
+  assert.match(indexSrc, /init_lib6\(\), lib_exports4/);
+  assert.match(indexSrc, /ctxInfo\?\.quotedMessageId \|\| ctxInfo\?\.stanzaId/);
+});
+
+test("/copy: لا يرسل أي شيء كـ viewOnce (المحتوى يُفتح دائماً)", () => {
+  const block = indexSrc.slice(indexSrc.indexOf("[/COPY v8.22.0]"), indexSrc.indexOf("[/COPY v8.22.0]") + 6000);
+  assert.equal(block.includes("viewOnce: true"), false);
+  assert.match(block, /sticker: buf/);
+});
+
+// ─────────── سرعة الذكاء: سباق ميتا/HTTP ومهل أقصر (v8.22.0) ───────────
+test("الذكاء: ميتا و HTTP يعملان بالتوازي وأول رد يصل يُستخدم", () => {
+  assert.match(indexSrc, /function _firstReply\(promises\)/);
+  assert.match(indexSrc, /_firstReply\(\[/);
+  assert.match(indexSrc, /META_AI_TIMEOUT_MS\) \|\| 12000/);
+  assert.match(indexSrc, /st\.fails >= 2/);
+  assert.match(indexSrc, /META_AI_DISABLED_MS = 12 \* 60 \* 60 \* 1000/);
+  assert.match(indexSrc, /createKeylessClient\(\{ timeoutMs: 20000/);
+});

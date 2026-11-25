@@ -125585,7 +125585,7 @@ function shouldAiReply(numberId, jid, isGroup, aiEnabled, aiTargets, aiGroups, a
 // ══════════════════════════════════════════════════════════════════
 var _metaAiClients = /* @__PURE__ */ new WeakMap(); // sock → client
 var _metaAiHealth = /* @__PURE__ */ new Map(); // userId → { fails, disabledUntil, lastError }
-var META_AI_DISABLED_MS = 6 * 60 * 60 * 1000;
+var META_AI_DISABLED_MS = 12 * 60 * 60 * 1000; // [META-FAST v8.22.0] حساب بلا ميتا = لا نُبطئ كل رسالة
 function _metaAiState(userId) {
   const k = String(userId);
   if (!_metaAiHealth.has(k)) _metaAiHealth.set(k, { fails: 0, disabledUntil: 0, lastError: null, ok: 0 });
@@ -125627,7 +125627,13 @@ async function _metaAiReply(userId, prompt, senderName, incomingText, conversati
     if (!sock) return null;
     const mod = await import("../services/ai/meta-ai-provider.mjs");
     let client = _metaAiClients.get(sock);
-    if (!client) { client = mod.createMetaAiClient({ sock, logger }); _metaAiClients.set(sock, client); }
+    // [META-FAST v8.22.0] 60 ثانية كانت تعني انتظار دقيقة لكل رسالة على حسابات Business (لا رد أصلاً)
+    const _metaTimeout = Number(process.env.META_AI_TIMEOUT_MS) || 12000;
+    if (!client || client.__timeoutMs !== _metaTimeout) {
+      client = mod.createMetaAiClient({ sock, logger, timeoutMs: _metaTimeout });
+      client.__timeoutMs = _metaTimeout;
+      _metaAiClients.set(sock, client);
+    }
     const history = conversationHistory.get(conversationKey) || [];
     const body = mod.buildMetaPrompt({
       system: prompt || u.aiSystemPrompt || "أنت مساعد ودود يرد بالعربية باختصار.",
@@ -125638,7 +125644,7 @@ async function _metaAiReply(userId, prompt, senderName, incomingText, conversati
     const reply = await client.ask(body);
     if (!reply) {
       st.fails = (st.fails || 0) + 1;
-      if (st.fails >= 3) {
+      if (st.fails >= 2) {
         st.disabledUntil = Date.now() + META_AI_DISABLED_MS;
         st.lastError = "no-reply";
         try { logger.warn({ userId }, "[META-AI] تعطيل مؤقت 6 ساعات بعد 3 محاولات بلا رد"); } catch { }
@@ -125679,7 +125685,7 @@ async function _keylessReply(userId, prompt, senderName, incomingText, conversat
     if (!holder.client) {
       const mod = await import("../services/ai/keyless-provider.mjs");
       holder.mod = mod;
-      holder.client = mod.createKeylessClient({ timeoutMs: 30000, logger });
+      holder.client = mod.createKeylessClient({ timeoutMs: 20000, logger });
     }
     const u = getUser(userId) || {};
     const history = conversationHistory.get(conversationKey) || [];
@@ -125705,11 +125711,33 @@ async function _keylessReply(userId, prompt, senderName, incomingText, conversat
     return null;
   }
 }
-// [FREE-AI] سلسلة مجانية موحّدة: ميتا (بلا مفتاح، واتساب) ثم HTTP بلا مفتاح
+// [FREE-AI v8.22.0] سباق بين ميتا و HTTP: أول رد يصل يُستخدَم ⇒ لا انتظار للمهلة الكاملة
+function _firstReply(promises) {
+  return new Promise((resolve) => {
+    let pending = promises.length;
+    let settled = false;
+    for (const p of promises) {
+      Promise.resolve(p).then((value) => {
+        if (!settled && value) { settled = true; resolve(value); return; }
+        pending -= 1;
+        if (!settled && pending <= 0) { settled = true; resolve(null); }
+      }).catch(() => {
+        pending -= 1;
+        if (!settled && pending <= 0) { settled = true; resolve(null); }
+      });
+    }
+  });
+}
 async function _freeAiReply(userId, prompt, senderName, incomingText, conversationKey) {
-  const metaReply = await _metaAiReply(userId, prompt, senderName, incomingText, conversationKey);
-  if (metaReply) return metaReply;
-  return await _keylessReply(userId, prompt, senderName, incomingText, conversationKey);
+  const st = _metaAiState(userId);
+  const metaUsable = getUser(userId)?.metaAiEnabled !== false && !(st.disabledUntil && Date.now() < st.disabledUntil) && Boolean(_metaAiSock(userId));
+  const httpReply = _keylessReply(userId, prompt, senderName, incomingText, conversationKey);
+  if (!metaUsable) return await httpReply;
+  const reply = await _firstReply([
+    _metaAiReply(userId, prompt, senderName, incomingText, conversationKey),
+    httpReply,
+  ]);
+  return reply || null;
 }
 async function getAiReply(userId, prompt, senderName, incomingText, conversationKey) {
   const apiKey = getNvidiaKey(userId);
@@ -295760,34 +295788,63 @@ ${nameLine}${statusLine}`;
           return; // [DISPATCH-FIX]
         }
         if (myS.copyEnabled && trimmed === myS.copyCmd) {
-          // [COPY-VIEWONCE v8.21.3] يفكّ غلاف «عرض مرة واحدة» وينسخ الوسائط **بلا viewOnce** داخل نفس الشات
+          // [/COPY v8.22.0] طريقة alsmanu5 نفسها (قراءة المقتبس مباشرة + downloadMediaMessage)
+          // مع فكّ أغلفة «عرض مرة واحدة» وإرسال المحتوى **بلا viewOnce**.
           try {
-            const ctxInfo = msg.message?.extendedTextMessage?.contextInfo
-              || msg.message?.imageMessage?.contextInfo
-              || msg.message?.videoMessage?.contextInfo
-              || msg.message?.audioMessage?.contextInfo
-              || msg.message?.documentMessage?.contextInfo;
+            const ctxInfo = msg.message?.extendedTextMessage?.contextInfo || msg.message?.imageMessage?.contextInfo || msg.message?.videoMessage?.contextInfo || msg.message?.audioMessage?.contextInfo || msg.message?.documentMessage?.contextInfo;
             const quoted = ctxInfo?.quotedMessage;
             if (!quoted) {
               await activeSock.sendMessage(jid, { text: `\u26A0\uFE0F \u0631\u062F\u0651 \u0639\u0644\u0649 \u0631\u0633\u0627\u0644\u0629 \u0623\u0648\u0644\u0627\u064B \u062B\u0645 \u0623\u0631\u0633\u0644 ${myS.copyCmd}` });
             } else {
-              const res = await _reactCopyMod.copyToSameChat({
-                sock: activeSock,
-                baileys: installedBaileys,
-                jid,
-                quoted,
-                quotedKey: { remoteJid: jid, id: ctxInfo?.quotedMessageId || "", fromMe: Boolean(msg.key?.fromMe && !ctxInfo?.participant), participant: ctxInfo?.participant },
-                logger,
-              });
-              if (!res.ok) {
-                const reasons = {
-                  unsupported: "\u26A0\uFE0F \u0646\u0648\u0639 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u063A\u064A\u0631 \u0645\u062F\u0639\u0648\u0645 \u0641\u064A \u0627\u0644\u0646\u0633\u062E",
-                  "download-failed": "\u26A0\uFE0F \u062A\u0639\u0630\u0651\u0631 \u062A\u0646\u0632\u064A\u0644 \u0627\u0644\u0648\u0633\u0627\u0626\u0637 \u2014 \u0623\u0639\u062F \u0627\u0644\u0645\u062D\u0627\u0648\u0644\u0629 \u0628\u0639\u062F \u0644\u062D\u0638\u0629",
-                  "empty-text": "\u26A0\uFE0F \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0641\u0627\u0631\u063A\u0629",
+              const inner = quoted.viewOnceMessageV2?.message
+                || quoted.viewOnceMessage?.message
+                || quoted.viewOnceMessageV2Extension?.message
+                || quoted.documentWithCaptionMessage?.message
+                || quoted.ephemeralMessage?.message
+                || quoted;
+              const qText = inner.conversation || inner.extendedTextMessage?.text || null;
+              const mediaObj = inner.imageMessage || inner.videoMessage || inner.ptvMessage || inner.audioMessage || inner.documentMessage || inner.stickerMessage || null;
+              const quotedId = ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || "";
+              if (qText) {
+                await activeSock.sendMessage(jid, { text: qText });
+              } else if (mediaObj) {
+                const quotedMsgForDl = {
+                  key: { remoteJid: jid, fromMe: !ctxInfo?.participant, id: quotedId, participant: ctxInfo?.participant },
+                  message: quoted
                 };
-                await activeSock.sendMessage(jid, { text: reasons[res.reason] || "\u26A0\uFE0F \u062A\u0639\u0630\u0651\u0631\u062A \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0625\u0631\u0633\u0627\u0644" });
+                let buf = null;
+                try {
+                  const { downloadMediaMessage: downloadMediaMessage2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
+                  buf = await downloadMediaMessage2(
+                    quotedMsgForDl,
+                    "buffer",
+                    {},
+                    { logger: baileysLogger, reuploadRequest: activeSock.updateMediaMessage }
+                  );
+                } catch (dlErr) {
+                  logger.warn({ dlErr: String(dlErr?.message || dlErr).slice(0, 160) }, "[/copy] download failed — محاولة ثانية");
+                }
+                if (!buf || !buf.length) {
+                  // احتياط: نفس دالة التنزيل متعددة المصادر المستخدمة في النسخ بالتفاعل
+                  buf = await _reactCopyMod.downloadWithFallbacks(activeSock, installedBaileys, { key: quotedMsgForDl.key, message: quoted, sourceJid: jid }, mediaObj);
+                }
+                if (!buf || !buf.length) {
+                  await activeSock.sendMessage(jid, { text: "\u26A0\uFE0F \u062A\u0639\u0630\u0651\u0631 \u062A\u0646\u0632\u064A\u0644 \u0627\u0644\u0645\u062D\u062A\u0648\u0649 \u2014 \u0623\u0639\u062F \u0627\u0644\u0645\u062D\u0627\u0648\u0644\u0629" });
+                } else if (inner.imageMessage) {
+                  await activeSock.sendMessage(jid, { image: buf, mimetype: inner.imageMessage.mimetype || "image/jpeg", ...(inner.imageMessage.caption ? { caption: inner.imageMessage.caption } : {}) });
+                } else if (inner.videoMessage || inner.ptvMessage) {
+                  const v = inner.videoMessage || inner.ptvMessage;
+                  await activeSock.sendMessage(jid, { video: buf, mimetype: v.mimetype || "video/mp4", ...(v.caption ? { caption: v.caption } : {}), ...(v.seconds ? { seconds: v.seconds } : {}), ...(v.gifPlayback ? { gifPlayback: true } : {}) });
+                } else if (inner.audioMessage) {
+                  await activeSock.sendMessage(jid, { audio: buf, mimetype: inner.audioMessage.mimetype || "audio/mp4", ptt: Boolean(inner.audioMessage.ptt), ...(inner.audioMessage.seconds ? { seconds: inner.audioMessage.seconds } : {}) });
+                } else if (inner.documentMessage) {
+                  await activeSock.sendMessage(jid, { document: buf, mimetype: inner.documentMessage.mimetype || "application/octet-stream", fileName: inner.documentMessage.fileName || "file", ...(inner.documentMessage.caption ? { caption: inner.documentMessage.caption } : {}) });
+                } else if (inner.stickerMessage) {
+                  await activeSock.sendMessage(jid, { sticker: buf });
+                }
+                logger.info({ userId, jid, wasViewOnce: inner !== quoted }, "[/copy] نُسخت الرسالة بلا علامة تحويل");
               } else {
-                logger.info({ userId, jid, kind: res.kind, wasViewOnce: Boolean(res.wasViewOnce) }, "[COPY] نُسخت الرسالة بلا علامة تحويل");
+                await activeSock.sendMessage(jid, { text: "\u26A0\uFE0F \u0646\u0648\u0639 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u063A\u064A\u0631 \u0645\u062F\u0639\u0648\u0645 \u0641\u064A \u0627\u0644\u0646\u0633\u062E" });
               }
             }
           } catch (e) {

@@ -29,11 +29,11 @@ setDeps({
 
 test("لوحة «نسخ بالتفاعل» تعرض كل عناصر التحكم", () => {
   const menu = myMsgsReactCopyMenu({ reactCopyEnabled: true, reactCopyEmoji: "📌", reactCopyFrom: SRC, reactCopyTo: DST, reactCopyViewOnce: true, reactCopyAllSenders: false });
-  assert.match(menu.text, /بدون أي رسالة تأكيد/);
-  assert.match(menu.text, /بدون علامة «محوّلة»/);
+  assert.match(menu.text, /بلا رسالة تأكيد/);
+  assert.match(menu.text, /بلا علامة «محوّلة»/);
   assert.match(menu.text, /نص · صورة · فيديو/);
   const cbs = menu.keyboard.inline_keyboard.flat().map((b) => b.callback_data);
-  for (const expected of ["mymsgs_rc_toggle", "mymsgs_rc_emoji", "mymsgs_rc_from", "mymsgs_rc_to", "mymsgs_rc_viewonce", "mymsgs_rc_who", "mymsgs_rc_clearfrom", "mymsgs_rc_clearto", "menu_mymsgs"]) {
+  for (const expected of ["mymsgs_rc_toggle", "mymsgs_rc_emoji_custom", "mymsgs_rc_emoji_clear", "mymsgs_rc_emoji_default", "mymsgs_rc_e_0", "mymsgs_rc_from", "mymsgs_rc_to", "mymsgs_rc_viewonce", "mymsgs_rc_who", "mymsgs_rc_delorig", "mymsgs_rc_clearfrom", "mymsgs_rc_clearto", "menu_mymsgs"]) {
     assert.ok(cbs.includes(expected), `زر مفقود: ${expected}`);
   }
   assert.match(menu.text, /الحالة: 🟢/);
@@ -57,8 +57,8 @@ test("لوحة الويب: تحقق من صحة إعدادات النسخ", () =
   assert.throws(() => svc.reactCopy("777", "249000000000", { from: SRC, to: SRC, emoji: "📌" }), /المصدر هي نفسها الهدف/);
   // تشغيل بلا هدف
   assert.throws(() => svc.reactCopy("777", "249000000000", { enabled: true, emoji: "📌", to: "" }), /حدد مجموعة الهدف/);
-  // [EMOJI-FIX v8.21.3] إيموجي فارغ = العودة إلى 📌 بلا خطأ
-  assert.equal(svc.reactCopy("777", "249000000000", { emoji: "  ", to: DST }).emoji, "📌");
+  // [RC-UI v8.22.0] الإيموجي الفارغ يُحفظ فارغاً (يُستخدم 📌 وقت التشغيل فقط ولا يُفرض على المستخدم)
+  assert.equal(svc.reactCopy("777", "249000000000", { emoji: "  ", to: DST }).emoji, "");
   assert.equal(typeof svc.reactCopy, "function");
 });
 

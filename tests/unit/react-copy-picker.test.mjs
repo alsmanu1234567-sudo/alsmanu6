@@ -117,11 +117,12 @@ function serviceForReactCopy() {
   return { svc, user, saved };
 }
 
-test("الإيموجي: حذف الحقل لا يُنتج خطأ ويعود إلى 📌", () => {
+test("الإيموجي: الحذف يُحفظ فارغاً ولا يُعاد فرض 📌 في الواجهة", () => {
   const { svc } = serviceForReactCopy();
   const res = svc.reactCopy(UID, PHONE, { emoji: "   ", from: "", to: "120363000000000001@g.us", enabled: true, viewOnce: false, allSenders: false });
   assert.equal(res.ok, true);
-  assert.equal(res.emoji, "📌");
+  assert.equal(res.emoji, "");
+  assert.equal(svc.overview(UID, PHONE).reactCopy.emoji, "");
 });
 
 test("الإيموجي: التغيير يُحفظ فوراً (لا يبقى القديم)", () => {
@@ -152,5 +153,5 @@ test("واجهة الويب: قواعد تمنع تمدّد الصفحة من أ
   assert.match(js, /\.mm \*\{box-sizing:border-box;min-width:0\}/);
   assert.match(js, /\.mm-pick-item \.nm\{flex:1 1 0;min-width:0/);
   // قصّ الأسماء الطويلة قبل العرض
-  assert.match(js, /slice\(0,34\)/);
+  assert.match(js, /slice\(0, ?34\)/);
 });

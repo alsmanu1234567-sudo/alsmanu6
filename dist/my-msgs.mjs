@@ -62,6 +62,7 @@ const DEFAULTS = {
   reactCopyTo: null,              // مجموعة الهدف (مطلوبة للتشغيل)
   reactCopyViewOnce: false,       // [COPY-VIEWONCE v8.21.3] الافتراضي: تُنسخ الوسائط عادية (تُفتح دائماً)
   reactCopyAllSenders: false,     // false = تفاعل المالك فقط
+  reactCopyDeleteOriginal: false, // [RC-UI v8.22.0] حذف الرسالة الأصلية بعد نسخها
 };
 
 export const COMMAND_CONTROL_FEATURES = [
@@ -512,40 +513,124 @@ function _rcPickMenu(userId, role, page = 0) {
   };
 }
 
-/** لوحة إعدادات «نسخ بالتفاعل». */
+// ─────────── [RC-UI v8.22.0] إعدادات «نسخ بالتفاعل» — إعادة بناء كاملة ───────────
+//  • القراءة/الحفظ على رقم السوكت الفعلي (كان يُحفظ على «الرقم النشط» فيضيع الإيموجي).
+//  • الإيموجي: أزرار سريعة + تعدد + إفراغ + إرجاع 📌 (لا يُعاد فرض 📌 على المستخدم).
+//  • خيارات إضافية: حذف الأصل بعد النسخ، من يستطيع التفاعل، عرض مرة واحدة.
+
+const RC_EMOJI_CHOICES = ["📌", "⭐", "❤️", "🔥", "👀", "✅", "😂", "👍"];
+
+function _rcNumber(userId) {
+  const user = _deps.getUser(userId);
+  if (!user) return null;
+  try {
+    const sess = _deps.inMemoryDB?.sessions?.get?.(String(userId));
+    const sock = sess?.sock || (sess && typeof sess.sendMessage === "function" ? sess : null);
+    if (sock) {
+      const n = resolveMyMsgsSocketNumber(user, sock);
+      if (n) return n;
+    }
+  } catch { }
+  const active = resolveActiveNumber(user);
+  if (active) return active;
+  return (user.whatsappNumbers || [])[0]?.number || null;
+}
+
+function _rcRead(userId) {
+  const user = _deps.getUser(userId) || {};
+  const number = _rcNumber(userId);
+  return number ? getMyMsgsSettingsForNumber(user, number) : getMyMsgsSettings(user);
+}
+
+function _rcPatch(userId, patch) {
+  const number = _rcNumber(userId);
+  if (!number) return null;
+  return saveMyMsgsSettingsForNumber(userId, number, patch);
+}
+
+/** يفصل قائمة الإيموجي المخزّنة إلى مصفوفة نظيفة. */
+function _rcEmojiList(raw) {
+  return String(raw || "").split(/[\s,،]+/).map((x) => x.replace(/[\uFE0E\uFE0F]/g, "").trim()).filter(Boolean);
+}
+
+/** يعيد نص الإيموجي من مصفوفة (بلا تكرار). */
+function _rcJoinEmojis(list) {
+  return [...new Set(list.filter(Boolean))].join(" ");
+}
+
+function _rcState(s) {
+  const emojis = _rcEmojiList(s.reactCopyEmoji);
+  const rawList = String(s.reactCopyEmoji || "").split(/[\s,،]+/).map((x) => x.trim()).filter(Boolean);
+  return {
+    emojis,
+    effective: rawList.length ? rawList.join(" ") : "📌 (افتراضي)",
+    on: Boolean(s.reactCopyEnabled),
+    from: s.reactCopyFrom || null,
+    to: s.reactCopyTo || null,
+    viewOnce: s.reactCopyViewOnce === true,
+    allSenders: Boolean(s.reactCopyAllSenders),
+    deleteOriginal: s.reactCopyDeleteOriginal === true,
+  };
+}
+
+function _rcName(jid) {
+  if (!jid) return "—";
+  const list = _rcLists.get("__names") || {};
+  return list[jid] || jid;
+}
+
+function _rcRememberNames(userId) {
+  const list = _rcLists.get(String(userId)) || [];
+  const map = {};
+  for (const g of list) if (g?.id) map[String(g.id)] = String(g.subject || g.name || g.id);
+  _rcLists.set("__names", map);
+}
+
+/** لوحة إعدادات «نسخ بالتفاعل» — واجهة واحدة واضحة. */
 export function myMsgsReactCopyMenu(s) {
-  const on = Boolean(s.reactCopyEnabled);
-  const viewOnce = s.reactCopyViewOnce === true;
-  const allSenders = Boolean(s.reactCopyAllSenders);
+  const st = _rcState(s);
   const text =
-    `📥 *نسخ بالتفاعل (إيموجي)*\n\n` +
-    `تتفاعل بإيموجي محدد على رسالة داخل مجموعة المصدر ⇒ تُنسخ الرسالة إلى مجموعة الهدف.\n` +
-    `• بدون أي رسالة تأكيد في شات المصدر.\n` +
-    `• بدون علامة «محوّلة» — المحتوى يُنزَّل ويُرسل من جديد.\n` +
-    `• يدعم: نص · صورة · فيديو · صوت/فويس · مستند · ملصق · رسائل العرض مرة واحدة.\n` +
-    `• «حالة» تُنسخ كما هي: نص الحالة أو الصورة/الفيديو/الصوت الموجود فيها فقط.\n\n` +
-    `الحالة: ${on ? "🟢 مُفعَّل" : "🔴 مُعطَّل"}\n` +
-    `الإيموجي: ${s.reactCopyEmoji || "📌"}\n` +
-    `المصدر: ${_rcShortJid(s.reactCopyFrom)}${s.reactCopyFrom ? "" : " (أي مجموعة)"}\n` +
-    `الهدف: ${_rcShortJid(s.reactCopyTo)}\n` +
-    `عرض مرة واحدة: ${viewOnce ? "🟢 يبقى كما هو" : "⚪ يُرسل عادياً (الافتراضي)"}\n` +
-    `من يستطيع التفاعل: ${allSenders ? "👥 كل الأعضاء" : "👤 المالك فقط"}`;
+    `📥 *نسخ بالتفاعل*\n\n` +
+    `تفاعل بإيموجي على رسالة في مجموعة المصدر ⇒ يُنسخ محتواها إلى مجموعة الهدف.\n` +
+    `• بلا رسالة تأكيد في الشات وبلا علامة «محوّلة».\n` +
+    `• يدعم: نص · صورة · فيديو · فويس · مستند · ملصق · *عرض مرة واحدة*.\n\n` +
+    `الحالة: ${st.on ? "🟢 مفعّل" : "🔴 متوقف"}\n` +
+    `الإيموجي المشغّل: ${st.effective}\n` +
+    `المصدر: ${st.from ? _rcName(st.from) : "أي مجموعة"}\n` +
+    `الهدف: ${st.to ? _rcName(st.to) : "⚠️ غير محدد"}\n` +
+    `عرض مرة واحدة: ${st.viewOnce ? "يبقى كما هو" : "⚪ يُرسل عادياً (يُفتح دائماً)"}\n` +
+    `من يستطيع التفاعل: ${st.allSenders ? "👥 كل الأعضاء" : "👤 المالك فقط"}` +
+    (st.deleteOriginal ? `\nحذف الأصل بعد النسخ: 🟢 نعم` : "");
+  const chips = [];
+  for (let i = 0; i < RC_EMOJI_CHOICES.length; i += 4) {
+    chips.push(RC_EMOJI_CHOICES.slice(i, i + 4).map((emo, j) => {
+      const idx = i + j;
+      const active = st.emojis.includes(emo.replace(/[\uFE0E\uFE0F]/g, ""));
+      return { text: `${active ? "✅" : "➕"} ${emo}`, callback_data: `mymsgs_rc_e_${idx}` };
+    }));
+  }
   return {
     text,
     keyboard: {
       inline_keyboard: [
-        [{ text: on ? "🔴 إيقاف" : "🟢 تشغيل", callback_data: "mymsgs_rc_toggle" }],
-        [{ text: `✏️ تغيير الإيموجي (${s.reactCopyEmoji || "📌"})`, callback_data: "mymsgs_rc_emoji" }],
+        [{ text: st.on ? "🔴 إيقاف الميزة" : "🟢 تشغيل الميزة", callback_data: "mymsgs_rc_toggle" }],
+        ...chips,
         [
-          { text: "📤 تحديد مجموعة المصدر", callback_data: "mymsgs_rc_from" },
-          { text: "📥 تحديد مجموعة الهدف", callback_data: "mymsgs_rc_to" },
+          { text: "✏️ إيموجي آخر…", callback_data: "mymsgs_rc_emoji_custom" },
+          { text: "🧹 إفراغ الإيموجي", callback_data: "mymsgs_rc_emoji_clear" },
+        ],
+        [{ text: "🔁 إرجاع 📌 الافتراضي", callback_data: "mymsgs_rc_emoji_default" }],
+        [
+          { text: "📤 مجموعة المصدر", callback_data: "mymsgs_rc_from" },
+          { text: "📥 مجموعة الهدف", callback_data: "mymsgs_rc_to" },
         ],
         [
-          { text: `👁️ عرض مرة واحدة: ${viewOnce ? "🟢" : "🔴"}`, callback_data: "mymsgs_rc_viewonce" },
-          { text: `👥 من يستطيع: ${allSenders ? "الجميع" : "المالك"}`, callback_data: "mymsgs_rc_who" },
+          { text: `👁 عرض مرة واحدة: ${st.viewOnce ? "🟢" : "⚪"}`, callback_data: "mymsgs_rc_viewonce" },
+          { text: `👥 من يستطيع: ${st.allSenders ? "الجميع" : "المالك"}`, callback_data: "mymsgs_rc_who" },
         ],
+        [{ text: `${st.deleteOriginal ? "🟢" : "⚪"} حذف الأصل بعد النسخ`, callback_data: "mymsgs_rc_delorig" }],
         [
-          { text: "🧹 مسح المصدر (أي مجموعة)", callback_data: "mymsgs_rc_clearfrom" },
+          { text: "🧹 مسح المصدر", callback_data: "mymsgs_rc_clearfrom" },
           { text: "🧹 مسح الهدف", callback_data: "mymsgs_rc_clearto" },
         ],
         [{ text: "◀️ رجوع للقائمة", callback_data: "menu_mymsgs" }],
@@ -555,7 +640,7 @@ export function myMsgsReactCopyMenu(s) {
 }
 
 async function _rcSendMenu(bot2, chatId, userId) {
-  const s = getMyMsgsSettings(_deps.getUser(userId));
+  const s = _rcRead(userId);
   const menu = myMsgsReactCopyMenu(s);
   await bot2.sendMessage(chatId, menu.text, { parse_mode: "Markdown", reply_markup: menu.keyboard });
   return true;
@@ -564,36 +649,68 @@ async function _rcSendMenu(bot2, chatId, userId) {
 /** معالج أزرار «نسخ بالتفاعل» — يعيد true إذا تعامل مع الزر. */
 export async function handleReactCopyCallback(bot2, chatId, userId, data) {
   if (!data.startsWith("mymsgs_rc_")) return false;
-  const s = getMyMsgsSettings(_deps.getUser(userId));
+  const s = _rcRead(userId);
+
   if (data === "mymsgs_rc_toggle") {
-    const ns = saveMyMsgsSettings(userId, { reactCopyEnabled: !s.reactCopyEnabled });
-    if (ns.reactCopyEnabled && !ns.reactCopyTo) {
-      await bot2.sendMessage(chatId, "⚠️ الميزة تعمل لكن *مجموعة الهدف غير محددة* — لن يُنسخ شيء قبل تحديدها.\n\nاستخدم «📥 تحديد مجموعة الهدف» وأرسل رابط دعوة المجموعة.", { parse_mode: "Markdown" });
+    const ns = _rcPatch(userId, { reactCopyEnabled: !s.reactCopyEnabled });
+    if (ns?.reactCopyEnabled && !ns.reactCopyTo) {
+      await bot2.sendMessage(chatId, "⚠️ الميزة تعمل لكن *مجموعة الهدف غير محددة* — لن يُنسخ شيء قبل تحديدها من «📥 مجموعة الهدف».", { parse_mode: "Markdown" });
     }
     return _rcSendMenu(bot2, chatId, userId);
   }
   if (data === "mymsgs_rc_viewonce") {
-    saveMyMsgsSettings(userId, { reactCopyViewOnce: !(s.reactCopyViewOnce === true) });
+    _rcPatch(userId, { reactCopyViewOnce: !(s.reactCopyViewOnce === true) });
     return _rcSendMenu(bot2, chatId, userId);
   }
   if (data === "mymsgs_rc_who") {
-    saveMyMsgsSettings(userId, { reactCopyAllSenders: !s.reactCopyAllSenders });
+    _rcPatch(userId, { reactCopyAllSenders: !s.reactCopyAllSenders });
+    return _rcSendMenu(bot2, chatId, userId);
+  }
+  if (data === "mymsgs_rc_delorig") {
+    _rcPatch(userId, { reactCopyDeleteOriginal: !(s.reactCopyDeleteOriginal === true) });
     return _rcSendMenu(bot2, chatId, userId);
   }
   if (data === "mymsgs_rc_clearfrom") {
-    saveMyMsgsSettings(userId, { reactCopyFrom: null });
+    _rcPatch(userId, { reactCopyFrom: null });
     return _rcSendMenu(bot2, chatId, userId);
   }
   if (data === "mymsgs_rc_clearto") {
-    saveMyMsgsSettings(userId, { reactCopyTo: null, reactCopyEnabled: false });
+    _rcPatch(userId, { reactCopyTo: null, reactCopyEnabled: false });
     await bot2.sendMessage(chatId, "🧹 تم مسح مجموعة الهدف وإيقاف الميزة.");
     return _rcSendMenu(bot2, chatId, userId);
   }
-  // [REACT-COPY v8.21.0] اختيار المجموعة من قائمة حقيقية بدل لصق رابط
+  // ── الإيموجي: تبديل سريع / إفراغ / افتراضي / مخصص ──
+  if (data.startsWith("mymsgs_rc_e_")) {
+    const idx = Number(data.slice("mymsgs_rc_e_".length));
+    const emo = RC_EMOJI_CHOICES[idx];
+    if (!emo) return _rcSendMenu(bot2, chatId, userId);
+    const key = emo.replace(/[\uFE0E\uFE0F]/g, "");
+    const list = _rcEmojiList(s.reactCopyEmoji);
+    const next = list.includes(key) ? list.filter((x) => x !== key) : [...list, key];
+    _rcPatch(userId, { reactCopyEmoji: _rcJoinEmojis(next) });
+    return _rcSendMenu(bot2, chatId, userId);
+  }
+  if (data === "mymsgs_rc_emoji_clear") {
+    _rcPatch(userId, { reactCopyEmoji: "" });
+    await bot2.sendMessage(chatId, "🧹 أُفرغت قائمة الإيموجي.\nℹ️ ما دامت فارغة سيُستخدم 📌 تلقائياً — أضف إيموجي من الأزرار أعلاه لتغييره.");
+    return _rcSendMenu(bot2, chatId, userId);
+  }
+  if (data === "mymsgs_rc_emoji_default") {
+    _rcPatch(userId, { reactCopyEmoji: "📌" });
+    return _rcSendMenu(bot2, chatId, userId);
+  }
+  if (data === "mymsgs_rc_emoji_custom") {
+    const { setState } = await Promise.resolve().then(() => (_deps.init_state(), _deps.state_exports));
+    setState(userId, "mymsgs_rc_input", { field: "reactCopyEmoji" });
+    await bot2.sendMessage(chatId, "✏️ *أرسل الإيموجي الآن*\n\nمثال: ❤️ — أو أكثر من واحد بمسافة: 📌 ⭐ ❤️\nأو أرسل /cancel للإلغاء.", { parse_mode: "Markdown" });
+    return true;
+  }
+  // اختيار المجموعة من قائمة حقيقية
   if (data === "mymsgs_rc_from" || data === "mymsgs_rc_to") {
     const role = data.endsWith("_from") ? "from" : "to";
     await bot2.sendMessage(chatId, "⏳ جارٍ جلب مجموعاتك…");
     const list = await _rcLoadGroups(userId);
+    _rcRememberNames(userId);
     if (!list.length) {
       const sess = _deps.inMemoryDB?.sessions?.get?.(String(userId));
       const _s0 = sess?.sock || (sess && typeof sess.sendMessage === "function" ? sess : null);
@@ -622,6 +739,7 @@ export async function handleReactCopyCallback(bot2, chatId, userId, data) {
     if (!group) { await _rcSendMenu(bot2, chatId, userId); return true; }
     togglePin(userId, group.id);
     await _rcLoadGroups(userId);
+    _rcRememberNames(userId);
     const page = Math.floor((Number(idx) || 0) / GROUP_PAGE_SIZE);
     const pick = _rcPickMenu(userId, role, page);
     await bot2.sendMessage(chatId, pick.text, { parse_mode: "Markdown", reply_markup: pick.keyboard });
@@ -633,14 +751,14 @@ export async function handleReactCopyCallback(bot2, chatId, userId, data) {
     const group = list[Number(idx)];
     if (!group) { await bot2.sendMessage(chatId, "⚠️ انتهت صلاحية القائمة — أعد فتحها."); return true; }
     const field = role === "from" ? "reactCopyFrom" : "reactCopyTo";
-    const current = getMyMsgsSettings(_deps.getUser(userId));
+    const current = _rcRead(userId);
     const other = role === "from" ? current.reactCopyTo : current.reactCopyFrom;
     if (other && String(other) === String(group.id)) {
       await bot2.sendMessage(chatId, "⚠️ لا يمكن أن تكون مجموعة المصدر هي نفسها مجموعة الهدف.");
       return true;
     }
-    saveMyMsgsSettings(userId, { [field]: group.id });
-    await bot2.sendMessage(chatId, `✅ تم تحديد ${role === "from" ? "المصدر" : "الهدف"}: ${group.subject || group.id}`);
+    _rcPatch(userId, { [field]: group.id });
+    await bot2.sendMessage(chatId, `✅ ${role === "from" ? "المصدر" : "الهدف"}: ${group.subject || group.id}`);
     return _rcSendMenu(bot2, chatId, userId);
   }
   if (data.startsWith("mymsgs_rclink_")) {
@@ -651,15 +769,7 @@ export async function handleReactCopyCallback(bot2, chatId, userId, data) {
     await bot2.sendMessage(chatId, `🔗 أرسل رابط دعوة مجموعة ${role === "from" ? "المصدر" : "الهدف"} — مثال:\nhttps://chat.whatsapp.com/XXXXXXXXXXXX`, { parse_mode: "Markdown" });
     return true;
   }
-  const fieldMap = {
-    mymsgs_rc_emoji: { field: "reactCopyEmoji", hint: "أرسل الإيموجي الذي سيشغّل النسخ — مثال: 📌\nيمكن أكثر من إيموجي مفصولة بمسافة: 📌 ⭐ ❤️" },
-  };
-  const target = fieldMap[data];
-  if (!target) return false;
-  const { setState } = await Promise.resolve().then(() => (_deps.init_state(), _deps.state_exports));
-  setState(userId, "mymsgs_rc_input", { field: target.field });
-  await bot2.sendMessage(chatId, `✏️ *${target.hint}*\n\nأرسل القيمة الآن، أو /cancel للإلغاء.`, { parse_mode: "Markdown" });
-  return true;
+  return false;
 }
 
 /** إدخال نصي لخطوات «نسخ بالتفاعل». */
@@ -670,13 +780,16 @@ export async function handleReactCopyInput(bot2, chatId, userId, text, state) {
   const value = String(text || "").trim();
 
   if (field === "reactCopyEmoji") {
-    if (!value || value.length > 24) {
-      await bot2.sendMessage(chatId, "⚠️ أرسل إيموجي واحداً على الأقل (بدون نص).");
-      return true;
+    const list = _rcEmojiList(value);
+    if (!list.length) {
+      clearState(userId);
+      _rcPatch(userId, { reactCopyEmoji: "" });
+      await bot2.sendMessage(chatId, "🧹 أُفرغت قائمة الإيموجي (سيُستخدم 📌 تلقائياً حتى تضيف غيرها).");
+      return _rcSendMenu(bot2, chatId, userId);
     }
     clearState(userId);
-    saveMyMsgsSettings(userId, { reactCopyEmoji: value });
-    await bot2.sendMessage(chatId, `✅ الإيموجي المشغّل الآن: ${value}`);
+    _rcPatch(userId, { reactCopyEmoji: _rcJoinEmojis(list) });
+    await bot2.sendMessage(chatId, `✅ الإيموجي المشغّل الآن: ${_rcJoinEmojis(list)}`);
     return _rcSendMenu(bot2, chatId, userId);
   }
 
@@ -684,7 +797,7 @@ export async function handleReactCopyInput(bot2, chatId, userId, text, state) {
     if (!value || ["بدون", "الكل", "الغاء", "إلغاء", "-"].includes(value)) {
       if (field === "reactCopyFrom") {
         clearState(userId);
-        saveMyMsgsSettings(userId, { reactCopyFrom: null });
+        _rcPatch(userId, { reactCopyFrom: null });
         await bot2.sendMessage(chatId, "✅ المصدر الآن: أي مجموعة (تفاعل الإيموجي في أي مجموعة يُفعّل النسخ).");
         return _rcSendMenu(bot2, chatId, userId);
       }
@@ -696,14 +809,14 @@ export async function handleReactCopyInput(bot2, chatId, userId, text, state) {
       await bot2.sendMessage(chatId, `❌ ${resolved.error}`);
       return true;
     }
-    const current = getMyMsgsSettings(_deps.getUser(userId));
+    const current = _rcRead(userId);
     const other = field === "reactCopyFrom" ? current.reactCopyTo : current.reactCopyFrom;
     if (other && other === resolved.jid) {
       await bot2.sendMessage(chatId, "⚠️ لا يمكن أن تكون مجموعة المصدر هي نفسها مجموعة الهدف.");
       return true;
     }
     clearState(userId);
-    saveMyMsgsSettings(userId, { [field]: resolved.jid });
+    _rcPatch(userId, { [field]: resolved.jid });
     const label = resolved.subject ? `«${resolved.subject}»` : resolved.jid;
     await bot2.sendMessage(chatId, `✅ تم تحديد ${field === "reactCopyFrom" ? "المصدر" : "الهدف"}: ${label}`);
     return _rcSendMenu(bot2, chatId, userId);

@@ -252,6 +252,7 @@ export function readSettings(userId, sock) {
       to: s.reactCopyTo || null,
       viewOnce: s.reactCopyViewOnce === true,
       allSenders: Boolean(s.reactCopyAllSenders),
+      deleteOriginal: s.reactCopyDeleteOriginal === true,
       number,
     };
   } catch {
@@ -484,6 +485,14 @@ async function handleReaction({ userId, sock, logger, baileys, cfg, reaction, re
     preferViewOnce: cfg.viewOnce,
     logger,
   });
+  if (result.ok && cfg.deleteOriginal) {
+    // [RC-UI v8.22.0] خيار «حذف الأصل بعد النسخ» — حذف من مجموعة المصدر فقط
+    try {
+      await sock.sendMessage(targetJid, { delete: { remoteJid: targetJid, fromMe: Boolean(targetKey?.fromMe), id: targetKey.id, participant: targetKey.participant } });
+    } catch (error) {
+      try { logger?.warn?.(`[REACT-COPY] تعذّر حذف الأصل: ${String(error?.message || error).slice(0, 120)}`); } catch { }
+    }
+  }
   try {
     logger?.info?.(`[REACT-COPY] ${result.ok ? "نُسخت" : "فشلت"} رسالة ${result.kind || "-"} من ${targetJid} إلى ${cfg.to}${result.reason ? " سبب=" + result.reason : ""}${result.viewOnce ? " (كانت عرض-مرة)" : ""}`);
   } catch { }
