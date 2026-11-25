@@ -294937,6 +294937,13 @@ function registerMessageHandler(sock, userId) {
       logger,
       getUser,
       baileys: installedBaileys,
+      // [MEDIA-DL v8.21.4] نفس دالة التنزيل التي يستخدمها /copy في هذا البِلد تماماً
+      getDownloadMediaMessage: async () => {
+        try {
+          const mod = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
+          return mod?.downloadMediaMessage || null;
+        } catch { return null; }
+      },
       myMsgs: {
         resolveMyMsgsSocketNumber: _mmMod.resolveMyMsgsSocketNumber,
         getMyMsgsSettingsForNumber: _mmMod.getMyMsgsSettingsForNumber,

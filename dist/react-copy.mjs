@@ -159,8 +159,24 @@ function dedupOnce(key) {
  * محاولات متعددة على JIDs محتملة + updateMediaMessage + رابط مباشر كاحتياط.
  */
 export async function downloadWithFallbacks(sock, baileys, original, mediaObj) {
-  const downloadMediaMessage = baileys?.downloadMediaMessage;
-  if (typeof downloadMediaMessage !== "function") return null;
+  // [MEDIA-DL v8.21.4] مصدر الدالة يختلف بين إصدارات/حزم Baileys (top-level أو default)
+  // ⇒ نجرّب كل المصادر + أي دالة يحقنها المشروع. بدون هذا تفشل الوسائط بصمت.
+  let downloadMediaMessage =
+    (typeof baileys?.downloadMediaMessage === "function" && baileys.downloadMediaMessage) ||
+    (typeof baileys?.default?.downloadMediaMessage === "function" && baileys.default.downloadMediaMessage) ||
+    (typeof baileys?.Utils?.downloadMediaMessage === "function" && baileys.Utils.downloadMediaMessage) ||
+    (typeof _deps.downloadMediaMessage === "function" && _deps.downloadMediaMessage) ||
+    null;
+  if (!downloadMediaMessage && typeof _deps.getDownloadMediaMessage === "function") {
+    try {
+      const fn = await _deps.getDownloadMediaMessage();
+      if (typeof fn === "function") downloadMediaMessage = fn;
+    } catch { }
+  }
+  if (typeof downloadMediaMessage !== "function") {
+    try { _deps.logger?.warn?.("[REACT-COPY] downloadMediaMessage غير متاح — تعذّر تنزيل الوسائط"); } catch { }
+    return null;
+  }
   const baseKey = original?.key || {};
   const candidates = [...new Set([
     baseKey.remoteJid,
@@ -191,6 +207,15 @@ export async function downloadWithFallbacks(sock, baileys, original, mediaObj) {
       } catch { }
     }
   }
+
+  // [MEDIA-DL v8.21.4] محاولة أخيرة بعد تحديث مفتاح الوسائط (روابط منتهية/مُعاد تشفيرها)
+  try {
+    const key = { remoteJid: original?.key?.remoteJid || original?.sourceJid, fromMe: Boolean(original?.key?.fromMe), id: original?.key?.id };
+    const dlMsg = { key, message: original.message };
+    try { await sock.updateMediaMessage?.(dlMsg); } catch { }
+    const buf = await downloadMediaMessage(dlMsg, "buffer", {}, { logger: _deps.logger, reuploadRequest: sock.updateMediaMessage });
+    if (buf && buf.length > 200) return buf;
+  } catch { }
 
   const directUrl = mediaObj?.url || mediaObj?.directPath;
   if (directUrl && String(directUrl).startsWith("http")) {
@@ -460,7 +485,7 @@ async function handleReaction({ userId, sock, logger, baileys, cfg, reaction, re
     logger,
   });
   try {
-    logger?.info?.(`[REACT-COPY] ${result.ok ? "نُسخت" : "فشلت"} رسالة ${result.kind || "-"} من ${targetJid} إلى ${cfg.to}${result.reason ? " سبب=" + result.reason : ""}`);
+    logger?.info?.(`[REACT-COPY] ${result.ok ? "نُسخت" : "فشلت"} رسالة ${result.kind || "-"} من ${targetJid} إلى ${cfg.to}${result.reason ? " سبب=" + result.reason : ""}${result.viewOnce ? " (كانت عرض-مرة)" : ""}`);
   } catch { }
   return result;
 }

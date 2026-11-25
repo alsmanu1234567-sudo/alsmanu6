@@ -4,6 +4,15 @@
 
 ---
 
+## v8.21.4 — «نسخ بالتفاعل» ينسخ وسائط «عرض مرة واحدة» فعلياً
+
+- **جذر المشكلة:** `downloadWithFallbacks` كان يستخدم `baileys.downloadMediaMessage` فقط. وفي بعض إصدارات/بِلدات Baileys الدالة موجودة تحت `default` أو تُحقن من داخل الحزمة ⇒ `null` ⇒ فشل صامت: التفاعل يُسجَّل ولا يُرسل شيء.
+- **الإصلاح:** البحث عن الدالة في كل المصادر (`baileys.downloadMediaMessage` → `default` → `Utils` → دالة محقونة)، و`index.mjs` يحقن **نفس** الدالة التي يستخدمها `/copy` عبر `getDownloadMediaMessage`.
+- **إعادة محاولة** بعد `updateMediaMessage` (روابط منتهية/أُعيد تشفيرها) + سقوط إلى الرابط المباشر.
+- **لوج تشخيصي**: `[REACT-COPY] نُسخت/فشلت رسالة image … سبب=download-failed (كانت عرض-مرة)`.
+- **النسخ نفسه بلا `viewOnce`**: مفكوك من كل الأغلفة، فيُرسل للهدف ويُفتح دائماً (مطابق لمنطق `/copy`).
+- اختبارات: `tests/unit/react-copy-viewonce-flow.test.mjs` (4) — محاكاة كاملة: وصول صورة/فيديو عرض-مرة + تفاعل 📌 ⇒ إرسال للهدف بلا viewOnce.
+
 ## v8.21.3 — إصلاح «عرض مرة واحدة» في /copy + الإيموجي + شكل نافذة المجموعات
 
 - **/copy صار ينسخ وسائط «عرض مرة واحدة»**: كان يقرأ `quoted.imageMessage` مباشرة فيفشل مع `viewOnceMessageV2` (نوع غير مدعوم). الآن `copyToSameChat()` في `react-copy.mjs` يفكّ كل الأغلفة (`viewOnceMessage/V2/V2Extension`, `ephemeral`, `documentWithCaption`, `edited`) ثم **يُرسل الصورة/الفيديو عاديّة بلا `viewOnce`** ⇒ تُفتح دائماً. الملصقات صارت مدعومة أيضاً (كانت ترفض).
