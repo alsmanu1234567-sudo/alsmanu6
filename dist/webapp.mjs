@@ -461,6 +461,7 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/my-msgs/custom',parseJson,guard(async(uid,req)=>myMsgsWeb().custom(uid,req.body?.phone,req.body||{})));
   app.post('/api/my-msgs/delete',parseJson,guard(async(uid,req)=>myMsgsWeb().remove(uid,req.body?.phone,req.body?.id)));
   app.post('/api/my-msgs/group',parseJson,guard(async(uid,req)=>myMsgsWeb().group(uid,req.body?.phone,req.body?.jid)));
+  app.post('/api/my-msgs/react-copy',parseJson,guard(async(uid,req)=>myMsgsWeb().reactCopy(uid,req.body?.phone,req.body||{})));
   app.post('/api/my-msgs/pair',parseJson,guard(async(uid,req)=>myMsgsWeb().pairing(uid,req.body?.phone)));
 
   const aiWeb = () => { if (!aiService) throw Error("خدمة الذكاء غير جاهزة"); return aiService; };

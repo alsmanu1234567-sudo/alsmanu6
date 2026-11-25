@@ -54,6 +54,8 @@ import * as _devMod from './developer.mjs';
 
 import * as _statusMod from './status.mjs';
 import * as _mmMod from './my-msgs.mjs';
+// [REACT-COPY] نسخ الرسائل بالتفاعل (إيموجي) من مجموعة إلى أخرى — وحدة مستقلة
+import * as _reactCopyMod from './react-copy.mjs';
 import * as _arMod from './auto-reply.mjs'; // PATCH_AUTO_REPLY_SPLIT_APPLIED
 import * as _wmMod from './worker-manager.mjs'; // PATCH_WORKER_MANAGER_SPLIT_APPLIED
 import * as _kaMod from './keepalive.mjs'; // PATCH_KEEPALIVE_SPLIT_APPLIED
@@ -294862,6 +294864,20 @@ function registerMessageHandler(sock, userId) {
   _registeredHandlerSocks.add(sock);
   // [GROUP-GUARD] أوامر المجموعات بالنقطة + الحماية بالتحذيرات والكروت
   try { attachGroupGuard({ userId, sock, logger }); } catch (e) { try { logger.warn({ err: String(e?.message || e) }, "[GROUP-GUARD] تعذر تثبيت حماية المجموعات"); } catch { } }
+  // [REACT-COPY] مستمع مستقل: تخزين رسائل مجموعة المصدر + النسخ عند التفاعل بالإيموجي
+  try {
+    _reactCopyMod.setReactCopyDeps({
+      logger,
+      getUser,
+      baileys: installedBaileys,
+      myMsgs: {
+        resolveMyMsgsSocketNumber: _mmMod.resolveMyMsgsSocketNumber,
+        getMyMsgsSettingsForNumber: _mmMod.getMyMsgsSettingsForNumber,
+      },
+    });
+    _reactCopyMod.attachReactCopy({ userId, sock, logger, baileys: installedBaileys });
+    try { logger.info({ userId }, "[REACT-COPY] تم تثبيت مستمع نسخ الرسائل بالتفاعل"); } catch { }
+  } catch (e) { try { logger.warn({ err: String(e?.message || e) }, "[REACT-COPY] تعذر التثبيت"); } catch { } }
   // [PAUSE-SESSION-SCOPED] التوقف لا يُستعاد بعد إعادة التشغيل: كان يترك البوت صامتاً بلا أي خطأ.
   const _restoredCutoff = Number(getUser(userId).messageCutoffAt) || 0;
   if (_restoredCutoff > Date.now() - 24 * 60 * 60 * 1000 && _restoredCutoff < Date.now() + 60000) setMessageCutoff(userId, _restoredCutoff);

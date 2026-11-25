@@ -58,6 +58,8 @@ const DEFAULTS = {
   stickerGuard: false,
   imageGuard: false,
   audioGuard: false,
+  // [BUTTON-GUARD v8.20.0] منع الأزرار وأزرار القوائم (رسائل تفاعلية/قوائم) — مطفأ افتراضياً
+  buttonGuard: false,
   stickerWarnEvery: 5,
   maxWarnings: 3,
   kickDelaySec: 30,
@@ -334,7 +336,7 @@ function fileFor(userId) {
 // نصدّر إعدادات المجموعات فقط: الأعلام والنصوص والقوائم — لا التحذيرات ولا قوائم الطرد
 // ولا سجلات الأعضاء (تلك معلومات شخصية لا تُرفع).
 const BACKUP_CONFIG_KEYS = [
-  "enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard",
+  "enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "buttonGuard",
   "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport",
   "maxWarnings", "stickerWarnEvery", "kickDelaySec", "floodCount", "floodWindowSec",
   "dailyReportHour", "words", "blockedDomains", "allowedDomains",
@@ -470,7 +472,7 @@ export function updateGroupConfig(userId, groupJid, patch = {}) {
       next.whitelist = normalizeJidList(value);
     } else if (key === "blockedDomains" || key === "allowedDomains") {
       next[key] = normalizeDomainList(value);
-    } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport"].includes(key)) {
+    } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "buttonGuard", "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport"].includes(key)) {
       next[key] = Boolean(value);
     } else if (["maxWarnings", "stickerWarnEvery", "kickDelaySec", "floodCount", "floodWindowSec"].includes(key)) {
       next[key] = Math.max(1, Math.min(50, Number(value) || DEFAULTS[key]));
@@ -686,6 +688,8 @@ const COMMANDS = [
   { key: "images-on", aliases: ["تفعيل-الصور", "تفعيل الصور"], usage: ".تفعيل الصور", description: "يسمح بالصور من جديد", adminOnly: true },
   { key: "audio-off", aliases: ["منع-الصوت", "منع الصوت", "منع-الفويس", "منع الفويس"], usage: ".منع الصوت", description: "يحذف الرسائل الصوتية والفويس من غير المشرفين", adminOnly: true },
   { key: "audio-on", aliases: ["تفعيل-الصوت", "تفعيل الصوت", "تفعيل-الفويس", "تفعيل الفويس"], usage: ".تفعيل الصوت", description: "يسمح بالرسائل الصوتية من جديد", adminOnly: true },
+  { key: "buttons-off", aliases: ["منع-الازرار", "منع الازرار", "منع-الأزرار", "منع الأزرار", "منع-القوائم", "منع القوائم"], usage: ".منع الازرار", description: "يحذف رسائل الأزرار والقوائم من غير المشرفين ويعطي مخالفة واحدة لكل رسالة", adminOnly: true },
+  { key: "buttons-on", aliases: ["تفعيل-الازرار", "تفعيل الازرار", "تفعيل-الأزرار", "تفعيل الأزرار", "تفعيل-القوائم", "تفعيل القوائم"], usage: ".تفعيل الازرار", description: "يسمح بالأزرار والقوائم من جديد", adminOnly: true },
   { key: "links-off", aliases: ["منع-الروابط", "منع الروابط"], usage: ".منع الروابط", description: "يحذف أي رابط ويرسل تحذيراً تصاعدياً", adminOnly: true },
   { key: "links-on", aliases: ["تفعيل-الروابط", "تفعيل الروابط"], usage: ".تفعيل الروابط", description: "يوقف حذف الروابط", adminOnly: true },
   { key: "reset", aliases: ["ترك"], usage: ".ترك @العضو  أو  .ترك الكل", description: "يصفر مخالفات عضو واحد أو الجميع", adminOnly: true },
@@ -951,6 +955,7 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
     : reason === "sticker" ? "نشر ملصقات ممنوعة"
     : reason === "image" ? "نشر صورة ممنوعة"
     : reason === "audio" ? "إرسال رسالة صوتية ممنوعة"
+    : reason === "buttons" ? "نشر أزرار أو قوائم ممنوعة"
     : reason === "manual" ? "تحذير يدوي من الإدارة"
     : reason === "flood" ? "إغراق المجموعة بالرسائل"
     : reason === "repeat" ? "تكرار نفس الرسالة"
@@ -1002,6 +1007,46 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
   }
   return { count, level, kicked, max };
 }
+
+// ═══ [BUTTON-GUARD v8.20.0] كشف الرسائل التفاعلية (أزرار/قوائم/بوتّونات) ═══
+// يفكّ الأغلفة ويبحث حتى عمق 4 عن أي حاوية أزرار. يعيد اسم النوع أو "" إن لم توجد.
+const BUTTON_CONTAINERS = [
+  "buttonsMessage",
+  "templateMessage",
+  "listMessage",
+  "interactiveMessage",
+  "highlyStructuredMessage",
+  "hydratedTemplateMessage",
+];
+export function detectButtonContent(message, depth = 0) {
+  if (!message || typeof message !== "object" || depth > 4) return "";
+  for (const key of BUTTON_CONTAINERS) {
+    const holder = message[key];
+    if (!holder) continue;
+    if (key === "interactiveMessage" && !holder.nativeFlowMessage && !holder.interactiveMessage) {
+      // رسالة تفاعلية بلا أزرار فعلية (نادرة) — لا تُحتسب
+      continue;
+    }
+    return key;
+  }
+  for (const key of ["ephemeralMessage", "viewOnceMessage", "viewOnceMessageV2", "viewOnceMessageV2Extension", "documentWithCaptionMessage", "editedMessage", "groupMentionedMessage", "statusMentionMessage"]) {
+    const inner = message[key]?.message;
+    if (inner) {
+      const found = detectButtonContent(inner, depth + 1);
+      if (found) return found;
+    }
+  }
+  return "";
+}
+
+const BUTTON_REASON_LABELS = {
+  buttonsMessage: "رسالة أزرار",
+  templateMessage: "قالب بأزرار",
+  listMessage: "قائمة خيارات",
+  interactiveMessage: "أزرار تفاعلية",
+  highlyStructuredMessage: "قالب تفاعلي",
+  hydratedTemplateMessage: "قالب تفاعلي",
+};
 
 export async function handleModeration({ userId, sock, message, cfg }) {
   const key = message?.key || {};
@@ -1070,6 +1115,24 @@ export async function handleModeration({ userId, sock, message, cfg }) {
     }
     const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "repeat", delayKick: true, name: message?.pushName, detail: text });
     return { handled: true, action: "repeat", ...result };
+  }
+
+  // [BUTTON-GUARD] منع الأزرار وأزرار القوائم: حذف الرسالة + **مخالفة واحدة فقط**
+  // (نعود مباشرةً بعد issueWarning حتى لا تُحتسب مخالفتان لنفس الرسالة).
+  if (cfg.buttonGuard) {
+    const buttonKind = detectButtonContent(msg);
+    if (buttonKind) {
+      const label = BUTTON_REASON_LABELS[buttonKind] || "رسالة أزرار";
+      await sock.sendMessage(groupJid, { delete: key }).catch(() => { });
+      noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: "buttons", text: label });
+      if (pendingNow) {
+        await kickImmediately({ userId, sock, groupJid, memberJid: resolvedMember || memberJid, name: message?.pushName, reasonText: `نشر ${label} أثناء مهلة الطرد`, count: warningCount(userId, groupJid, resolvedMember || memberJid) });
+        await sock.sendMessage(groupJid, { text: `🚪 ${memberTag} طُرد فوراً — نشر ${label} وهو في مهلة الطرد.` }, { mentions: memberMention.mentions }).catch(() => { });
+        return { handled: true, action: "kick-now-buttons" };
+      }
+      const result = await issueWarning({ userId, sock, groupJid, memberJid, cfg, reason: "buttons", delayKick: true, name: message?.pushName, detail: label, silent: true });
+      return { handled: true, action: "buttons-deleted", buttonKind, ...result };
+    }
   }
 
   if (cfg.imageGuard && isImage) {
@@ -1331,6 +1394,15 @@ export async function handleCommand({ userId, sock, message, text }) {
       await reply(on ? "🖼️ تم منع الصور: أي صورة من غير المشرفين تُحذف." : "✅ تم السماح بالصور.");
       return { handled: true };
     }
+    case "buttons-off":
+    case "buttons-on": {
+      const on = parsed.key === "buttons-off";
+      updateGroupConfig(userId, groupJid, on ? { buttonGuard: true, enabled: true } : { buttonGuard: false });
+      await reply(on
+        ? "🔘 تم منع الأزرار والقوائم: أي رسالة أزرار من غير المشرفين تُحذف وتُحتسب **مخالفة واحدة** لكل رسالة."
+        : "✅ تم السماح بالأزرار والقوائم من جديد.");
+      return { handled: true };
+    }
     case "audio-off":
     case "audio-on": {
       const on = parsed.key === "audio-off";
@@ -1358,7 +1430,7 @@ export async function handleCommand({ userId, sock, message, text }) {
       const yes = (value) => (value ? "✅" : "⛔");
       const lines = [
         "🛡️ *حالة الدرع المتقدم*",
-        `${yes(cfg.enabled)} الحماية العامة · ${yes(cfg.linkGuard)} روابط · ${yes(cfg.wordGuard)} كلمات · ${yes(cfg.stickerGuard)} ملصقات · ${yes(cfg.imageGuard)} صور · ${yes(cfg.audioGuard)} صوت`,
+        `${yes(cfg.enabled)} الحماية العامة · ${yes(cfg.linkGuard)} روابط · ${yes(cfg.wordGuard)} كلمات · ${yes(cfg.stickerGuard)} ملصقات · ${yes(cfg.imageGuard)} صور · ${yes(cfg.audioGuard)} صوت · ${yes(cfg.buttonGuard)} أزرار وقوائم`,
         `${yes(cfg.floodGuard)} منع الإغراق (${cfg.floodCount}/${cfg.floodWindowSec}ث) · ${yes(cfg.repeatGuard)} تكرار الرسالة · ${yes(cfg.autoReKick)} منع العودة بعد الطرد`,
         `${yes(cfg.quiet?.enabled)} ساعات هدوء (${cfg.quiet?.from} → ${cfg.quiet?.to}) · 🤍 القائمة البيضاء: ${(cfg.whitelist || []).length}`,
         "",
