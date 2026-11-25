@@ -11,6 +11,8 @@
 // كل شيء هنا حقيقي ومبني على واجهات Baileys الفعلية: downloadMediaMessage،
 // updateMediaMessage، viewOnce، ptt، gifPlayback، groupGetInviteInfo.
 
+import { downloadAndDecryptMedia } from "./lib/wa-media.mjs";
+
 import {
   saveMessage as storeSaveMessage,
   loadMessage as storeLoadMessage,
@@ -96,6 +98,21 @@ function _voMediaOf(message) {
   return media ? { kind, media, content } : null;
 }
 
+/** [WA-MEDIA v8.23.2] نوع الوسائط المستخدم في اشتقاق مفتاح واتساب. */
+export function waMediaTypeOf(mediaObj, kindHint) {
+  const kind = kindHint || (() => {
+    const mime = String(mediaObj?.mimetype || "");
+    if (mime.startsWith("image/")) return mediaObj?.fileLength && mediaObj?.width ? "image" : "image";
+    if (mime.startsWith("video/")) return "video";
+    if (mime.startsWith("audio/")) return "audio";
+    return "document";
+  })();
+  if (kind === "ptv") return "video";
+  if (kind === "sticker") return "sticker";
+  if (kind === "image" || kind === "video" || kind === "audio" || kind === "document") return kind;
+  return "document";
+}
+
 /** [VO-PROBE v8.23.1] وصف دقيق لتغليف الرسالة (للتشخيص الحقيقي من اللوق). */
 export function describeMessage(message) {
   try {
@@ -152,16 +169,32 @@ async function _prefetchViewOnce({ sock, baileys, userId, jid, key, message }) {
   _voInflight.add(vkey);
 
   try {
+    // ── [WA-MEDIA v8.23.2] الطريقة الأولى: تنزيل + فكّ تشفير ذاتي بلا أي مكتبة ──
+    try {
+      const own = await downloadAndDecryptMedia(found.media, { type: waMediaTypeOf(found.media, found.kind), logger: _deps.logger });
+      if (own?.buffer?.length > 200) {
+        if (own.buffer.length <= VO_MAX_ITEM) {
+          _voPut(vkey, own.buffer);
+          try { storeSaveMedia(userId || "", jid, key.id, own.buffer); } catch { }
+        }
+        try { logger?.info?.({ jid, id: key.id, method: "تنزيل ذاتي (WA-MEDIA)", bytes: own.bytes }, "[VO-PROBE] ✅ نجح تنزيل العرض-مرة — هذه هي الطريقة العاملة"); } catch { }
+        _lastVoMethod = "تنزيل ذاتي (WA-MEDIA)";
+        return true;
+      }
+    } catch (error) {
+      try { logger?.warn?.({ jid, id: key.id, error: String(error?.message || error).slice(0, 140) }, "[WA-MEDIA] تعذّر التنزيل الذاتي — ننتقل لطرق المكتبة"); } catch { }
+    }
+
     const dm = await resolveDownloader(baileys);
     if (!dm) {
-      try { logger?.warn?.("[VO-PROBE] دالة التنزيل غير متاحة إطلاقاً"); } catch { }
+      try { logger?.warn?.("[VO-PROBE] دالة المكتبة للتنزيل غير متاحة — اكتفينا بالتنزيل الذاتي"); } catch { }
       return false;
     }
     const ctx = { logger: _deps.logger, reuploadRequest: (m) => sock.updateMediaMessage?.(m) };
     const baseKey = { remoteJid: jid, fromMe: Boolean(key?.fromMe), id: key.id };
     const keyWithParticipant = key?.participant ? { ...baseKey, participant: key.participant } : null;
 
-    // كل الطرق الممكنة — الأولى عادةً الفائزة
+    // بقية الطرق عبر مكتبة Baileys
     const attempts = [
       ["المحتوى الداخلي", () => dm({ key: baseKey, message: content }, "buffer", {}, ctx)],
       ["الغلاف الكامل", () => dm({ key: baseKey, message }, "buffer", {}, ctx)],
@@ -439,6 +472,12 @@ export async function downloadWithFallbacks(sock, baileys, original, mediaObj) {
     try { _deps.logger?.warn?.("[REACT-COPY] downloadMediaMessage غير متاح — تعذّر تنزيل الوسائط"); } catch { }
     return null;
   }
+  // ── [WA-MEDIA v8.23.2] قبل أي مكتبة: تنزيل + فكّ تشفير ذاتي ──
+  try {
+    const own = await downloadAndDecryptMedia(mediaObj, { type: waMediaTypeOf(mediaObj) });
+    if (own?.buffer?.length > 200) return own.buffer;
+  } catch { }
+
   const baseKey = original?.key || {};
   const candidates = [...new Set([
     baseKey.remoteJid,
@@ -500,6 +539,13 @@ export async function downloadWithFallbacks(sock, baileys, original, mediaObj) {
  * يجرّب المحتوى الداخلي ثم الغلاف، مع ctx كامل (reuploadRequest) لأنه شرط مسار إعادة الرفع.
  */
 async function _dlViewOnceNow({ sock, baileys, original, content, mediaObj, logger }) {
+  // [WA-MEDIA v8.23.2] أولاً: تنزيل ذاتي بلا مكتبة (لا يتأثر بتغليف الرسالة)
+  try {
+    const own = await downloadAndDecryptMedia(mediaObj, { type: waMediaTypeOf(mediaObj) });
+    if (own?.buffer?.length > 200) return own.buffer;
+  } catch (error) {
+    try { logger?.warn?.({ error: String(error?.message || error).slice(0, 120) }, "[WA-MEDIA] فشل التنزيل الذاتي لحظة النسخ"); } catch { }
+  }
   const dm = await resolveDownloader(baileys);
   if (!dm) return null;
   const baseKey = original?.key || {};
