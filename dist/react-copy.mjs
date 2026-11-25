@@ -166,6 +166,11 @@ async function _prefetchViewOnce({ sock, baileys, userId, jid, key, message }) {
     return false;
   }
   if (_voStore.has(vkey) || _voInflight.has(vkey)) return true;
+  // حماية الذاكرة: ملف أكبر من الحد لا يُحفظ مسبقاً (يُنزَّل عند النسخ فقط)
+  if (Number(found.media?.fileLength || 0) > VO_MAX_ITEM) {
+    try { _deps.logger?.info?.({ jid, id: key.id, fileLength: Number(found.media.fileLength) }, "[VO-PROBE] حجم العرض-مرة أكبر من حد الحفظ المسبق — سيُنزَّل عند التفاعل"); } catch { }
+    return false;
+  }
   _voInflight.add(vkey);
 
   try {
