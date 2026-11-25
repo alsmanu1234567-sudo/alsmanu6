@@ -293141,6 +293141,13 @@ let _waVersion = null;
 let _waVersionAt = 0;
 let _skewChecked = false;
 async function _getWaVersion() {
+  // [WA-VERSION-MODE] بوت STEAM الناجح لا يمرّر إصداراً إطلاقاً (يستخدم المدمج في المكتبة).
+  // تمرير إصدار من sw.js قد يرفضه الخادم بـ401 بعد companion_hello. الافتراضي الآن:
+  // المدمج (مثل STEAM). لتجربة الأحدث: WA_VERSION_MODE=latest في متغيرات الاستضافة.
+  if (String(process.env.WA_VERSION_MODE || "").toLowerCase() !== "latest") {
+    try { logger.info({ mode: "bundled" }, "[WA-VERSION] استخدام الإصدار المدمج (سلوك STEAM)"); } catch { }
+    return null;
+  }
   if (_waVersion && Date.now() - _waVersionAt < 6 * 3600e3) return _waVersion;
   try {
     const fn = installedBaileys.fetchLatestWaWebVersion || installedBaileys.fetchLatestBaileysVersion;

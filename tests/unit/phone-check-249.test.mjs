@@ -25,3 +25,9 @@ test('تهدئة محاولات الربط بعد فشلين 401 في 15 دقي�
   assert.match(idx, /_st\.fails >= 2\) _st\.until = Date\.now\(\) \+ 30 \* 60e3/);
   assert.match(idx, /واتساب يقيّد محاولات الربط الآن/);
 });
+
+// ── v8.19.1: الافتراضي = الإصدار المدمج (سلوك بوت STEAM) وقابل للتبديل بمتغير بيئة ──
+test('الإصدار المدمج افتراضياً مع إمكانية WA_VERSION_MODE=latest', () => {
+  assert.match(idx, /\[WA-VERSION-MODE\]/);
+  assert.match(idx, /WA_VERSION_MODE \|\| ""\)\.toLowerCase\(\) !== "latest"/);
+});

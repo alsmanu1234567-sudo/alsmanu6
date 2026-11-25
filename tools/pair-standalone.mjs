@@ -33,8 +33,15 @@ mkdirSync(dir, { recursive: true, mode: 0o700 });
 const logger = pino({ level: 'silent' });
 
 async function main() {
-  const { version, isLatest } = await fetchLatestBaileysVersion();
-  console.log('ℹ️  WA version:', version.join('.'), 'latest:', isLatest);
+  // مثل بوت STEAM: لا نمرّر إصداراً — المكتبة تستخدم المدمج (أثبت نجاحه).
+  let version;
+  if (String(process.env.WA_VERSION_MODE || '').toLowerCase() === 'latest') {
+    const r = await fetchLatestBaileysVersion();
+    version = r.version;
+    console.log('ℹ️  WA version (latest):', version.join('.'));
+  } else {
+    console.log('ℹ️  WA version: bundled (STEAM mode)');
+  }
 
   const { state, saveCreds } = await useMultiFileAuthState(dir);
   const sock = makeWASocket({
