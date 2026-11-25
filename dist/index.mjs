@@ -125592,11 +125592,30 @@ function _metaAiState(userId) {
   return _metaAiHealth.get(k);
 }
 function _metaAiSock(userId) {
+  // [META-AI-SOCK-FIX v8.21.0] كان الفحص يعتمد على ws.readyState === 1، وهذا يعطي
+  // null على بيئة Orihost دائماً ⇒ «أنت غير متصل برقم واتساب» رغم أن الرقم متصل،
+  // وردود Meta AI لا تعمل في الردود التلقائية ولا في النشر التلقائي.
+  // الآن: نأخذ أي سوكت حيّ من الجلسة أو من خانات الأرقام، ونتحقق فقط من وجود sendMessage.
   try {
-    const s = inMemoryDB.sessions.get(String(userId));
-    const sock = s?.sock || s;
-    return sock?.ws?.readyState === 1 ? sock : null;
-  } catch { return null; }
+    const pick = (value) => {
+      const sock = value?.sock || value;
+      return sock && typeof sock.sendMessage === "function" ? sock : null;
+    };
+    const direct = pick(inMemoryDB.sessions.get(String(userId)));
+    if (direct) return direct;
+    try {
+      const ns = _numberSocks?.get?.(String(userId));
+      const list = ns instanceof Map ? [...ns.values()] : Object.values(ns || {});
+      for (const item of list) { const sock = pick(item); if (sock) return sock; }
+    } catch { }
+    for (const [key, value] of inMemoryDB.sessions) {
+      if (String(key).startsWith(String(userId) + "_")) {
+        const sock = pick(value);
+        if (sock) return sock;
+      }
+    }
+  } catch { }
+  return null;
 }
 async function _metaAiReply(userId, prompt, senderName, incomingText, conversationKey) {
   try {
@@ -331106,9 +331125,9 @@ try {
     guardExport: exportGuardSettings,
     guardImport: importGuardSettings,
     guardUsers: listGuardUserIds,
-    github: { hasToken: () => { init_github(); return !!GITHUB_TOKEN; }, repos: (force) => { init_github(); return getAllRepos(force); }, status: () => { init_github(); return ghStatus(); }, fetch: (...args) => { init_github(); return ghFetch(...args); } },
+    github: { hasToken: () => { init_github(); try { globalThis.__ghLoadToken?.(); } catch { } return !!GITHUB_TOKEN; }, repos: (force) => { init_github(); try { globalThis.__ghLoadToken?.(); } catch { } return getAllRepos(force); }, status: () => { init_github(); try { globalThis.__ghLoadToken?.(); } catch { } return ghStatus(); }, fetch: (...args) => { init_github(); try { globalThis.__ghLoadToken?.(); } catch { } return ghFetch(...args); } },
   });
-  developerConsole=createDeveloperWeb({developerId:DEVELOPER_ID,diagnostics,backup:backupService,replyDiag:createDevDiagService(),admin:adminService,sites:createSiteGenWebService({developerId:DEVELOPER_ID}),github:{hasToken:()=>{init_github();return !!GITHUB_TOKEN},repos:(force)=>{init_github();return getAllRepos(force)},status:()=>{init_github();return ghStatus()},fetch:(...args)=>{init_github();return ghFetch(...args)}},ai:{key:getNvidiaKey,model:getUserSelectedModel},texts:{list:getTextKeys,get:getText,set:setText,reset:resetText},stats:()=>({users:inMemoryDB.users.size,workers:workerManager.getStats(),uptime:Math.floor(process.uptime()),memoryMB:Math.round(process.memoryUsage().rss/1048576)})});
+  developerConsole=createDeveloperWeb({developerId:DEVELOPER_ID,diagnostics,backup:backupService,replyDiag:createDevDiagService(),admin:adminService,sites:createSiteGenWebService({developerId:DEVELOPER_ID}),github:{hasToken:()=>{init_github();try{globalThis.__ghLoadToken?.()}catch{};return !!GITHUB_TOKEN},repos:(force)=>{init_github();try{globalThis.__ghLoadToken?.()}catch{};return getAllRepos(force)},status:()=>{init_github();try{globalThis.__ghLoadToken?.()}catch{};return ghStatus()},fetch:(...args)=>{init_github();try{globalThis.__ghLoadToken?.()}catch{};return ghFetch(...args)}},ai:{key:getNvidiaKey,model:getUserSelectedModel},texts:{list:getTextKeys,get:getText,set:setText,reset:resetText},stats:()=>({users:inMemoryDB.users.size,workers:workerManager.getStats(),uptime:Math.floor(process.uptime()),memoryMB:Math.round(process.memoryUsage().rss/1048576)})});
   developerConsole.register(app);
   // [SETTINGS-BACKUP][LEVEL-2] النسخ التلقائي المجدول يعمل داخل البوت (لا يحتاج لوحة مفتوحة)
   try {
@@ -331128,7 +331147,7 @@ try {
   const { createGroupMemberManager } = await import("../services/group-member-manager.mjs");
   init_my_msgs();
   init_ai_manager();
-  const aiWebService = createAiWebService({getUser,saveUser,getUserNumbers,updateNumber,ai:ai_manager_exports,clearMemory:uid=>{let count=0;for(const key of [...conversationHistory.keys()]) if(key.startsWith(`${uid}_`) || [ `rule_${uid}`, `test_${uid}`, `webtest_${uid}` ].includes(key)){conversationHistory.delete(key);count++;}return count;}});
+  const aiWebService = createAiWebService({getUser,saveUser,getUserNumbers,updateNumber,ai:ai_manager_exports,clearMemory:uid=>{let count=0;for(const key of [...conversationHistory.keys()]) if(key.startsWith(`${uid}_`) || [ `rule_${uid}`, `test_${uid}`, `webtest_${uid}` ].includes(key)){conversationHistory.delete(key);count++;}return count;},inMemoryDB});
   // [SESSION-PORT] مشاركة مسار جلسات واتساب مع تطبيق الويب — كان يقرأ process.cwd()
   // فيرى مجلداً فارغاً ولا يجد أي جلسة للتصدير.
   try { process.env.WA_SESSIONS_ROOT = BOT_WA_SESSIONS_DIR; process.env.BOT_WA_SESSIONS_DIR = BOT_WA_SESSIONS_DIR; } catch { }

@@ -1,3 +1,5 @@
+
+(function(){try{if(document.getElementById('gg-pin-style'))return;var st=document.createElement('style');st.id='gg-pin-style';st.textContent='\n/* [GROUP-PIN v8.21.0] زر تثبيت صغير واضح */\n.gg-pinrow{display:flex;gap:8px;align-items:center}\n.gg-pinrow .gg-sel{flex:1;min-width:0}\n.gg-pin{flex:0 0 auto;width:38px;height:38px;border-radius:11px;border:1px solid #6f5fa8;background:#2a2444;color:#ffe6a3;font-size:17px;cursor:pointer;line-height:1}\n.gg-pin:hover{border-color:#bea3ff;background:#342a57}\n';document.head.appendChild(st);}catch(e){}})();
 /* [GROUP-GUARD-UI] لوحة حماية المجموعات + أوامر المجموعات + تصدير/استيراد الجلسة */
 (function () {
   "use strict";
@@ -134,6 +136,9 @@
 
   let cachedGroups = null;
 
+  function pinnedSet() {
+    try { const st = typeof ST !== "undefined" ? ST : null; return new Set((st && Array.isArray(st.groupsPinned) ? st.groupsPinned : []).map(String)); } catch { return new Set(); }
+  }
   function groups() {
     if (Array.isArray(cachedGroups) && cachedGroups.length) return cachedGroups;
     try {
@@ -239,9 +244,21 @@
     if (!groupId) {
       await loadGroups();
       body.innerHTML = `<div class="gg-card"><h3>اختر مجموعة</h3><div class="mut">الحماية تُضبط لكل مجموعة على حدة.</div>
-        <select class="gg-sel" id="ggPick"><option value="">— اختر مجموعة —</option>${groups().map((g) => `<option value="${esc(g.id)}">${esc(g.name || g.id)}</option>`).join("")}</select>
-        <div class="gg-note">إن لم تظهر مجموعاتك، اضغط «تحديث من واتساب» في قسم المجموعات أولاً.</div></div>`;
-      body.querySelector("#ggPick").addEventListener("change", (event) => { if (event.target.value) load(event.target.value); });
+        <div class="gg-pinrow"><select class="gg-sel" id="ggPick"><option value="">— اختر مجموعة —</option>${groups().map((g) => `<option value="${esc(g.id)}">${pinnedSet().has(String(g.id)) ? "📌 " : ""}${esc(g.name || g.id)}</option>`).join("")}</select><button type="button" class="gg-pin" id="ggPin" title="تثبيت/إزالة تثبيت المجموعة المختارة">📌</button></div>
+        <div class="gg-note">المثبَّتة 📌 تظهر أولاً في كل القوائم (البوت واللوحة) — ثم الإنجليزية أبجدياً، ثم العربية، والرموز آخراً. إن لم تظهر مجموعاتك، اضغط «تحديث من واتساب» في قسم المجموعات أولاً.</div></div>`;
+      const _pick = body.querySelector("#ggPick");
+      _pick.addEventListener("change", (event) => { if (event.target.value) load(event.target.value); });
+      body.querySelector("#ggPin").addEventListener("click", async () => {
+        const gid = _pick.value || (state && state.groupId) || "";
+        if (!gid) { toast("اختر مجموعة أولاً"); return; }
+        try {
+          const res = await api("/api/fw/groups/pin", { groupId: gid });
+          cachedGroups = null;
+          if (typeof ST !== "undefined" && ST) ST.groupsPinned = res.pinned || [];
+          toast((res.pinned || []).includes(gid) ? "📌 تم تثبيت المجموعة" : "تمت إزالة التثبيت");
+          await load("");
+        } catch (error) { toast("❌ " + (error.message || error)); }
+      });
       return;
     }
     body.innerHTML = `<div class="gg-card">جارٍ التحميل…</div>`;
@@ -301,6 +318,10 @@
             ${toggleRow("stickerGuard", "منع الملصقات", "حذف الملصقات من غير المشرفين", config.stickerGuard)}
             ${toggleRow("imageGuard", "منع الصور", "حذف أي صورة يرسلها غير المشرفين مع تنبيه", config.imageGuard)}
             ${toggleRow("audioGuard", "منع الصوت", "حذف الرسائل الصوتية والفويس من غير المشرفين", config.audioGuard)}
+            ${toggleRow("buttonGuard", "منع الأزرار والقوائم", "حذف رسائل الأزرار/القوائم من غير المشرفين — مخالفة واحدة لكل رسالة", config.buttonGuard)}
+            ${toggleRow("reactionGuard", "منع التفاعل بإيموجي 🖕", "يُحذف التفاعل ويُنبَّه العضو، وإن لم يُزله خلال المدة أدناه يُطرد فوراً", config.reactionGuard)}
+            <div class="gg-row"><div><b>الإيموجي الممنوع في التفاعل</b><div class="mut">يمكن أكثر من إيموجي مفصولة بمسافة</div></div><input class="gg-in" style="width:120px" value="${esc((config.reactionEmojis || ["🖕"]).join(" "))}" data-emojis="reactionEmojis" dir="auto"></div>
+            <div class="gg-row"><div><b>مهلة إزالة التفاعل (ثانية)</b><div class="mut">0 = طرد فوري</div></div><input class="gg-in" style="width:84px" type="number" min="0" max="600" value="${esc(config.reactionKickSec ?? 30)}" data-num="reactionKickSec"></div>
             ${toggleRow("kickOnLimit", "الطرد عند الحد", "طرد تلقائي بعد بلوغ عدد التحذيرات", config.kickOnLimit)}
           </div>
 
@@ -494,6 +515,11 @@
 
   function patchFromDom(body) {
     const patch = {};
+    // [REACTION-GUARD v8.21.0] إيموجي التفاعل الممنوع (حقل نصي بمسافات)
+    body.querySelectorAll("[data-emojis]").forEach((input) => {
+      const list = String(input.value || "").split(/[\s,،]+/).map((x) => x.trim()).filter(Boolean);
+      patch[input.dataset.emojis] = list.length ? list : ["🖕"];
+    });
     body.querySelectorAll("[data-toggle]").forEach((input) => {
       const key = input.dataset.toggle;
       if (key === "welcomeEnabled") (patch.welcome = patch.welcome || {}).enabled = input.checked;

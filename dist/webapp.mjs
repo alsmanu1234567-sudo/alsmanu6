@@ -12,6 +12,7 @@ import { createZip, readZip } from "../services/zip-lite.mjs";
 import { userForToken } from "./webapp-auth.mjs";
 import {
   webGetOverview,
+  webToggleGroupPin,
   webPreviewChannel,
   webAddChannel,
   webDeleteChannel,
@@ -188,7 +189,7 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     const groupId = guardGroupId(req);
     const patch = req.body?.patch || {};
     const allowed = {};
-    for (const key of ["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "kickOnLimit", "maxWarnings", "stickerWarnEvery", "kickDelaySec", "words", "welcome", "goodbye", "floodGuard", "floodCount", "floodWindowSec", "repeatGuard", "autoReKick", "whitelist", "quiet", "blockedDomains", "allowedDomains", "dailyReport", "dailyReportHour"]) {
+    for (const key of ["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "buttonGuard", "reactionGuard", "reactionEmojis", "reactionKickSec", "kickOnLimit", "maxWarnings", "stickerWarnEvery", "kickDelaySec", "words", "welcome", "goodbye", "floodGuard", "floodCount", "floodWindowSec", "repeatGuard", "autoReKick", "whitelist", "quiet", "blockedDomains", "allowedDomains", "dailyReport", "dailyReportHour"]) {
       if (key in patch) allowed[key] = patch[key];
     }
     return { groupId, config: publicGuardConfig(groupGuard.updateGroupConfig(uid, groupId, allowed)) };
@@ -477,6 +478,8 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/ai/number',parseJson,guard(async(uid,req)=>aiWeb().saveNumber(uid,req.body?.id,req.body||{})));
   app.post('/api/ai/test',parseJson,guard(async(uid,req)=>aiWeb().test(uid,req.body?.text)));
   app.post('/api/ai/memory/clear',parseJson,guard(async uid=>aiWeb().clear(uid)));
+  app.post('/api/ai/meta',parseJson,guard(async(uid,req)=>aiWeb().metaAi(uid,!!req.body?.enabled)));
+  app.post('/api/ai/meta/test',parseJson,guard(async uid=>aiWeb().metaAiTest(uid)));
 
   const reply = () => { if (!replyService) throw new Error('خدمة الردود غير جاهزة'); return replyService; };
   app.get('/auto-replies.js', (_req, res) => { res.setHeader('Content-Type','application/javascript; charset=utf-8'); res.setHeader('Cache-Control','no-store'); res.end(readFileSync(fileURLToPath(new URL('../public/auto-replies.js', import.meta.url)))); });
@@ -515,6 +518,9 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/replies/delay', parseJson, guard(async (uid, req) => reply().delay(uid, req.body?.id, req.body?.enabled)));
 
   app.get("/api/fw/overview", guard(async (uid) => webGetOverview(uid)));
+
+  // [GROUP-PIN v8.21.0] تثبيت/إزالة تثبيت مجموعة من لوحة الويب
+  app.post("/api/fw/groups/pin", parseJson, guard(async (uid, req) => webToggleGroupPin(uid, req.body?.groupId)));
 
   app.post("/api/fw/channel/preview", parseJson, guard(async (uid, req) => {
     return await webPreviewChannel(uid, req.body?.input);

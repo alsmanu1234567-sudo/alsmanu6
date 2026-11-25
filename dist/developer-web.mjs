@@ -49,7 +49,22 @@ export function createDeveloperWeb({developerId,github,ai,texts,stats,sites,admi
    app.get('/api/developer/backup/github/repos',auth,guarded(async req=>backup.repos(String(req.query?.refresh||'')==='1').map(r=>({name:r.full_name,private:r.private,defaultBranch:r.default_branch}))));
   }
   app.get('/api/developer/github/status',auth,guarded(async()=>{if(typeof github.status==='function')return github.status();return {hasToken:github.hasToken(),error:github.hasToken()?null:'لا يوجد توكن'}}));
-  app.get('/api/developer/repos',auth,guarded(async req=>{const force=String(req.query?.refresh||'')==='1';if(!github.hasToken())throw Error('أضف توكن GitHub في البوت أولاً');return (await github.repos(force)).map(r=>({name:r.full_name,private:r.private,defaultBranch:r.default_branch,url:r.html_url}))}));
+  app.get('/api/developer/repos',auth,guarded(async req=>{
+    const force=String(req.query?.refresh||'')==='1';
+    const shape=r=>({name:r.full_name||r.name,private:!!r.private,defaultBranch:r.default_branch||r.defaultBranch||'',url:r.html_url||r.url||''});
+    if(!github.hasToken())throw Error('أضف توكن GitHub في البوت أولاً (قسم GitHub في البوت ← تغيير التوكن)');
+    try{
+      const list=await github.repos(force);
+      return (Array.isArray(list)?list:[]).map(shape);
+    }catch(primary){
+      // [GH-REPOS-FALLBACK v8.21.0] مسار بديل: خدمة النسخ الاحتياطي (تستخدم نفس التوكن)
+      try{const alt=backup?.repos?.(true)||[];if(Array.isArray(alt)&&alt.length)return alt.map(shape)}catch{}
+      // تشخيص واضح بدل رسالة مبهمة
+      let extra='';
+      try{const st=github.status?await github.status():null;if(st)extra=` | توكن=${st.hasToken?'موجود ('+(st.tokenKind||'?')+')':'مفقود'} · الحساب=${st.login||'—'} · مستودعات=${st.repoCount??0} · خطأ=${st.error||'—'} · config=${st.configPath||'—'}`}catch{}
+      throw Error(String(primary?.message||primary)+extra);
+    }
+  }));
   app.get('/api/developer/files',auth,guarded(async req=>{const repo=validRepo(req.query.repo),path=validPath(req.query.path),ref=String(req.query.ref||'');const data=await github.fetch(`/repos/${repo}/contents/${path}${ref?'?ref='+encodeURIComponent(ref):''}`);if(Array.isArray(data))return {items:data.map(x=>({name:x.name,path:x.path,type:x.type}))};if(data.type!=='file'||data.encoding!=='base64'||data.size>500000)throw Error('الملف غير مدعوم أو أكبر من 500 كيلوبايت');const bytes=Buffer.from(data.content,'base64'),content=bytes.toString('utf8');if(!Buffer.from(content,'utf8').equals(bytes)||content.includes('\0'))throw Error('هذا ملف ثنائي ولا يمكن تعديله من المحرر النصي');return {file:{path:data.path,sha:data.sha,content}}}));
   app.post('/api/developer/files',auth,guarded(async req=>{const {repo,path,sha,content,message,branch}=req.body||{};const p=validPath(path),r=validRepo(repo);if(!p||typeof content!=='string'||Buffer.byteLength(content)>500000||typeof sha!=='string'||!sha)throw Error('بيانات الملف غير صالحة');const body={message:String(message||'Update file from developer console').slice(0,200),content:Buffer.from(content).toString('base64'),sha};if(branch)body.branch=String(branch).slice(0,200);const result=await github.fetch(`/repos/${r}/contents/${p}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return {ok:true,sha:result.content?.sha}}));
   const adminRequired=()=>{if(!admin)throw Error('إدارة البوت غير متاحة');return admin};

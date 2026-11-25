@@ -60,6 +60,10 @@ const DEFAULTS = {
   audioGuard: false,
   // [BUTTON-GUARD v8.20.0] منع الأزرار وأزرار القوائم (رسائل تفاعلية/قوائم) — مطفأ افتراضياً
   buttonGuard: false,
+  // [REACTION-GUARD v8.21.0] منع تفاعل بإيموجي محدد + مهلة إزالة قبل الطرد
+  reactionGuard: false,
+  reactionEmojis: ["\uD83D\uDD95"], // 🖕
+  reactionKickSec: 30,
   stickerWarnEvery: 5,
   maxWarnings: 3,
   kickDelaySec: 30,
@@ -336,7 +340,7 @@ function fileFor(userId) {
 // نصدّر إعدادات المجموعات فقط: الأعلام والنصوص والقوائم — لا التحذيرات ولا قوائم الطرد
 // ولا سجلات الأعضاء (تلك معلومات شخصية لا تُرفع).
 const BACKUP_CONFIG_KEYS = [
-  "enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "buttonGuard",
+  "enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "buttonGuard", "reactionGuard", "reactionEmojis", "reactionKickSec",
   "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport",
   "maxWarnings", "stickerWarnEvery", "kickDelaySec", "floodCount", "floodWindowSec",
   "dailyReportHour", "words", "blockedDomains", "allowedDomains",
@@ -472,8 +476,16 @@ export function updateGroupConfig(userId, groupJid, patch = {}) {
       next.whitelist = normalizeJidList(value);
     } else if (key === "blockedDomains" || key === "allowedDomains") {
       next[key] = normalizeDomainList(value);
-    } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "buttonGuard", "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport"].includes(key)) {
+    } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "buttonGuard", "reactionGuard", "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport"].includes(key)) {
       next[key] = Boolean(value);
+    } else if (key === "reactionEmojis") {
+      const list = (Array.isArray(value) ? value : String(value || "").split(/[,\s]+/))
+        .map((x) => normalizeReactionEmoji(x))
+        .filter(Boolean)
+        .slice(0, 10);
+      next.reactionEmojis = list.length ? list : [...DEFAULTS.reactionEmojis];
+    } else if (key === "reactionKickSec") {
+      next.reactionKickSec = Math.max(0, Math.min(600, Number.isFinite(Number(value)) ? Number(value) : DEFAULTS.reactionKickSec));
     } else if (["maxWarnings", "stickerWarnEvery", "kickDelaySec", "floodCount", "floodWindowSec"].includes(key)) {
       next[key] = Math.max(1, Math.min(50, Number(value) || DEFAULTS[key]));
     } else if (key === "dailyReportHour") {
@@ -688,6 +700,8 @@ const COMMANDS = [
   { key: "images-on", aliases: ["تفعيل-الصور", "تفعيل الصور"], usage: ".تفعيل الصور", description: "يسمح بالصور من جديد", adminOnly: true },
   { key: "audio-off", aliases: ["منع-الصوت", "منع الصوت", "منع-الفويس", "منع الفويس"], usage: ".منع الصوت", description: "يحذف الرسائل الصوتية والفويس من غير المشرفين", adminOnly: true },
   { key: "audio-on", aliases: ["تفعيل-الصوت", "تفعيل الصوت", "تفعيل-الفويس", "تفعيل الفويس"], usage: ".تفعيل الصوت", description: "يسمح بالرسائل الصوتية من جديد", adminOnly: true },
+  { key: "reactions-off", aliases: ["منع-التفاعل", "منع التفاعل", "منع-الايموجي", "منع الايموجي"], usage: ".منع التفاعل", description: "يمنع تفاعل 🖕: يُحذف التفاعل ويُنبَّه العضو، وإن لم يُزله خلال 30 ثانية يُطرد فوراً", adminOnly: true },
+  { key: "reactions-on", aliases: ["تفعيل-التفاعل", "تفعيل التفاعل", "تفعيل-الايموجي", "تفعيل الايموجي"], usage: ".تفعيل التفاعل", description: "يسمح بالتفاعلات من جديد", adminOnly: true },
   { key: "buttons-off", aliases: ["منع-الازرار", "منع الازرار", "منع-الأزرار", "منع الأزرار", "منع-القوائم", "منع القوائم"], usage: ".منع الازرار", description: "يحذف رسائل الأزرار والقوائم من غير المشرفين ويعطي مخالفة واحدة لكل رسالة", adminOnly: true },
   { key: "buttons-on", aliases: ["تفعيل-الازرار", "تفعيل الازرار", "تفعيل-الأزرار", "تفعيل الأزرار", "تفعيل-القوائم", "تفعيل القوائم"], usage: ".تفعيل الازرار", description: "يسمح بالأزرار والقوائم من جديد", adminOnly: true },
   { key: "links-off", aliases: ["منع-الروابط", "منع الروابط"], usage: ".منع الروابط", description: "يحذف أي رابط ويرسل تحذيراً تصاعدياً", adminOnly: true },
@@ -1006,6 +1020,108 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
     }
   }
   return { count, level, kicked, max };
+}
+
+// ═══ [REACTION-GUARD v8.21.0] منع التفاعل بإيموجي محدد (🖕) مع مهلة إزالة ثم طرد ═══
+const reactionPending = new Map(); // `${group}:${member}:${targetMsgId}` → { timer, secs }
+
+/** توحيد الإيموجي (إزالة مُحدِّد الشكل والمسافات). */
+export function normalizeReactionEmoji(value) {
+  return String(value || "").replace(/[\uFE0E\uFE0F\u200B-\u200D]/g, "").trim();
+}
+
+export function reactionEmojisOf(cfg) {
+  const list = (Array.isArray(cfg?.reactionEmojis) ? cfg.reactionEmojis : [])
+    .map(normalizeReactionEmoji)
+    .filter(Boolean);
+  return list.length ? list : ["\uD83D\uDD95"];
+}
+
+/** هل توجد مهلة جارية لهذا التفاعل؟ (للاختبار والمراقبة) */
+export function hasPendingReactionKick(groupJid, memberJid, targetId) {
+  return reactionPending.has(`${groupJid}:${jidOf(memberJid) || memberJid}:${targetId}`);
+}
+
+/**
+ * يعالج رسالة تفاعل: إن كان الإيموجي ممنوعاً ⇒ حذف التفاعل + تحذير + مهلة،
+ * وإن أُزيل التفاعل خلال المهلة ⇒ لا طرد. إن انتهت المهلة ⇒ طرد فوري بلا مقدمات.
+ */
+export async function handleReactionGuard({ userId, sock, message, cfg, logger }) {
+  const reaction = message?.message?.reactionMessage;
+  if (!reaction) return { handled: false };
+  if (!cfg?.enabled || !cfg?.reactionGuard) return { handled: false };
+  const groupJid = message?.key?.remoteJid;
+  if (!groupJid?.endsWith("@g.us")) return { handled: false };
+  const memberRaw = message?.key?.participant || message?.participant;
+  const memberJid = jidOf(memberRaw);
+  if (!memberJid) return { handled: false };
+  const targetId = reaction?.key?.id || "";
+  const emoji = normalizeReactionEmoji(reaction?.text);
+  const pendingKey = `${groupJid}:${memberJid}:${targetId}`;
+
+  // إزالة التفاعل (text فارغ) ⇒ إلغاء الطرد المعلّق
+  if (!emoji) {
+    const pending = reactionPending.get(pendingKey);
+    if (!pending) return { handled: false };
+    clearTimeout(pending.timer);
+    reactionPending.delete(pendingKey);
+    const mention = await mentionFor(sock, groupJid, memberJid);
+    await sock.sendMessage(groupJid, {
+      text: `\u2705 \u0623\u0632\u0644\u062A \u0627\u0644\u062a\u0641\u0627\u0639\u0644 \u0627\u0644\u0645\u0645\u0646\u0648\u0639 \u2014 \u0634\u0643\u0631\u0627\u064b ${mention.token}`,
+    }, { mentions: mention.mentions }).catch(() => { });
+    return { handled: true, action: "reaction-removed" };
+  }
+
+  if (!reactionEmojisOf(cfg).includes(emoji)) return { handled: false };
+  if (await isGroupAdmin(sock, groupJid, memberJid)) return { handled: false };
+  if (isWhitelisted(cfg, memberJid, memberJid)) return { handled: false };
+  if (isQuietNow(cfg.quiet)) return { handled: false };
+
+  const secs = Math.max(0, Math.min(600, Number(cfg.reactionKickSec ?? 30)));
+  const memberMention = await mentionFor(sock, groupJid, memberJid);
+  const memberTag = memberMention.token;
+
+  // حذف التفاعل نفسه (قد يرفضه واتساب لغير المشرفين — نتجاهل الفشل)
+  await sock.sendMessage(groupJid, { delete: message.key }).catch(() => { });
+  noteGuardEvent(userId, groupJid, "deleted", { jid: memberJid, name: message?.pushName, reason: "reaction", text: emoji });
+
+  const kickNow = async () => {
+    try {
+      await kickImmediately({
+        userId, sock, groupJid, memberJid,
+        name: message?.pushName,
+        reasonText: `تفاعل ممنوع ${emoji} ولم يُزله`,
+        count: warningCount(userId, groupJid, memberJid),
+      });
+      await sock.sendMessage(groupJid, {
+        text: `\u{1F6AA} \u0637\u064f\u0631\u062f ${memberTag} \u2014 \u0644\u0645 \u064a\u064f\u0632\u0644 \u0627\u0644\u062a\u0641\u0627\u0639\u0644 \u0627\u0644\u0645\u0645\u0646\u0648\u0639 ${emoji} \u062e\u0644\u0627\u0644 ${secs} \u062b\u0627\u0646\u064a\u0629.`,
+      }, { mentions: memberMention.mentions }).catch(() => { });
+    } catch (error) {
+      try { logger?.warn?.({ err: String(error?.message || error).slice(0, 160) }, "[REACTION-GUARD] تعذر الطرد"); } catch { }
+    }
+  };
+
+  const previous = reactionPending.get(pendingKey);
+  if (previous) clearTimeout(previous.timer);
+
+  if (secs === 0) {
+    reactionPending.delete(pendingKey);
+    await kickNow();
+    return { handled: true, action: "reaction-kick-now" };
+  }
+
+  await sock.sendMessage(groupJid, {
+    text: `\u{1F6AB} \u062a\u0641\u0627\u0639\u0644 \u0645\u0645\u0646\u0648\u0639 ${emoji} ${memberTag}\n\n` +
+      `\u0623\u0632\u0644 \u0627\u0644\u062a\u0641\u0627\u0639\u0644 \u062e\u0644\u0627\u0644 *${secs} \u062b\u0627\u0646\u064a\u0629* \u0648\u0625\u0644\u0627 \u0633\u062a\u064f\u0637\u0631\u062f \u0641\u0648\u0631\u0627\u064b \u0628\u0644\u0627 \u0645\u0642\u062f\u0645\u0627\u062a.`,
+  }, { mentions: memberMention.mentions }).catch(() => { });
+
+  const timer = setTimeout(() => {
+    reactionPending.delete(pendingKey);
+    void kickNow();
+  }, secs * 1000);
+  timer.unref?.();
+  reactionPending.set(pendingKey, { timer, secs, memberJid, emoji });
+  return { handled: true, action: "reaction-warned", secs };
 }
 
 // ═══ [BUTTON-GUARD v8.20.0] كشف الرسائل التفاعلية (أزرار/قوائم/بوتّونات) ═══
@@ -1394,6 +1510,16 @@ export async function handleCommand({ userId, sock, message, text }) {
       await reply(on ? "🖼️ تم منع الصور: أي صورة من غير المشرفين تُحذف." : "✅ تم السماح بالصور.");
       return { handled: true };
     }
+    case "reactions-off":
+    case "reactions-on": {
+      const on = parsed.key === "reactions-off";
+      updateGroupConfig(userId, groupJid, on ? { reactionGuard: true, enabled: true } : { reactionGuard: false });
+      const emojis = reactionEmojisOf(getGroupConfig(userId, groupJid)).join(" ");
+      await reply(on
+        ? `🚫 تم منع التفاعل ${emojis}: يُحذف التفاعل ويُنبَّه العضو، وإن لم يُزله خلال ${getGroupConfig(userId, groupJid).reactionKickSec} ثانية يُطرد فوراً.`
+        : "✅ تم السماح بالتفاعلات من جديد.");
+      return { handled: true };
+    }
     case "buttons-off":
     case "buttons-on": {
       const on = parsed.key === "buttons-off";
@@ -1430,7 +1556,7 @@ export async function handleCommand({ userId, sock, message, text }) {
       const yes = (value) => (value ? "✅" : "⛔");
       const lines = [
         "🛡️ *حالة الدرع المتقدم*",
-        `${yes(cfg.enabled)} الحماية العامة · ${yes(cfg.linkGuard)} روابط · ${yes(cfg.wordGuard)} كلمات · ${yes(cfg.stickerGuard)} ملصقات · ${yes(cfg.imageGuard)} صور · ${yes(cfg.audioGuard)} صوت · ${yes(cfg.buttonGuard)} أزرار وقوائم`,
+        `${yes(cfg.enabled)} الحماية العامة · ${yes(cfg.linkGuard)} روابط · ${yes(cfg.wordGuard)} كلمات · ${yes(cfg.stickerGuard)} ملصقات · ${yes(cfg.imageGuard)} صور · ${yes(cfg.audioGuard)} صوت · ${yes(cfg.buttonGuard)} أزرار وقوائم · ${yes(cfg.reactionGuard)} تفاعل ممنوع (${(cfg.reactionEmojis || []).join(" ") || "🖕"} · ${cfg.reactionKickSec ?? 30}ث)`,
         `${yes(cfg.floodGuard)} منع الإغراق (${cfg.floodCount}/${cfg.floodWindowSec}ث) · ${yes(cfg.repeatGuard)} تكرار الرسالة · ${yes(cfg.autoReKick)} منع العودة بعد الطرد`,
         `${yes(cfg.quiet?.enabled)} ساعات هدوء (${cfg.quiet?.from} → ${cfg.quiet?.to}) · 🤍 القائمة البيضاء: ${(cfg.whitelist || []).length}`,
         "",
@@ -1940,6 +2066,13 @@ export function attachGroupGuard({ userId, sock, logger }) {
             return;
           }
           const cfg = getGroupConfig(userId, groupJid);
+          // [REACTION-GUARD v8.21.0] التفاعل يُعالج قبل بقية الحمايات
+          try {
+            const rg = await handleReactionGuard({ userId, sock, message, cfg, logger });
+            if (rg?.handled) return;
+          } catch (error) {
+            try { logger?.warn?.({ err: String(error?.message || error).slice(0, 160) }, "[REACTION-GUARD] فشل المعالجة"); } catch { }
+          }
           await handleModeration({ userId, sock, message, cfg });
         } catch (error) {
           logger?.warn?.({ err: String(error?.message || error).slice(0, 200) }, "[GROUP-GUARD] فشل تنفيذ الحماية");

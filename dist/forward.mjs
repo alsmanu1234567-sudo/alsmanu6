@@ -17,6 +17,26 @@ import {
 } from "../engine/rules-cache.mjs";
 
 import { webappUrlFor } from "./webapp-auth.mjs";
+import { sortGroups } from "./lib/group-sort.mjs";
+import { listPins, togglePin } from "./lib/group-pins.mjs";
+
+/** [GROUP-SORT] ترتيب مجموعات اللوحة بنفس منطق البوت (المثبَّتة أولاً ثم أبجدياً). */
+function _sortGroupsFor(uid, groups) {
+  try {
+    return sortGroups(
+      (Array.isArray(groups) ? groups : []).map((g) => ({ ...g, id: g.id || g.jid, subject: g.subject || g.name })),
+      listPins(uid)
+    );
+  } catch { return Array.isArray(groups) ? groups : []; }
+}
+function _pinnedFor(uid) {
+  try { return listPins(uid); } catch { return []; }
+}
+/** تبديل تثبيت مجموعة من لوحة الويب. */
+export function webToggleGroupPin(uid, groupId) {
+  const pins = togglePin(String(uid), String(groupId || ""));
+  return { ok: true, pinned: pins };
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, "..", "data");
@@ -1632,6 +1652,7 @@ export function isForwardSession(uid) {
 // ═══════════════════════════════════════════════════════════════════
 export function webGetOverview(uid) {
   uid = String(uid);
+  // [GROUP-SORT v8.21.0] ترتيب موحّد: المثبَّتة أولاً ثم لاتيني/عربي/رموز آخراً
   const numbers = getConnectedForwardNumbers(uid);
   const owned = new Set(numbers.map(_normalizePhone));
   const groups = userGroups(uid).filter((g) => owned.has(_normalizePhone(g.phoneNumber)));
@@ -1640,7 +1661,8 @@ export function webGetOverview(uid) {
   return {
     numbers,
     channels,
-    groups,
+    groups: _sortGroupsFor(uid, groups),
+    groupsPinned: _pinnedFor(uid),
     rules,
     waConnected: numbers.length > 0 && !!_sockForUser(uid),
   };

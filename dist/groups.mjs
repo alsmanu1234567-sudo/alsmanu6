@@ -1,3 +1,6 @@
+import { sortGroups } from './lib/group-sort.mjs';
+import { listPins } from './lib/group-pins.mjs';
+
 let _deps = {};
 export function setDeps(d) { _deps = d; }
 
@@ -17,7 +20,8 @@ export async function handleGroupsCallback(bot2, chatId, userId, data) {
     if (groups.length === 0) {
       try { const c = await sock.groupFetchAllParticipating?.(); groups = c ? Object.values(c) : []; inMemoryDB.groupsCache.set(userId, groups); } catch {}
     }
-    return groups;
+    // [GROUP-SORT v8.21.0] المثبَّتة أولاً ثم لاتيني ثم عربي ثم الرموز آخراً
+    try { return sortGroups(groups, listPins(userId)); } catch { return groups; }
   };
   if (data === "groups_add_member") {
     if (!sock) { await bot2.sendMessage(chatId, "\u274C \u0631\u0628\u0637 \u0648\u0627\u062A\u0633\u0627\u0628 \u0623\u0648\u0644\u0627\u064B"); return true; }

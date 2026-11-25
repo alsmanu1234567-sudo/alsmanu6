@@ -78,3 +78,24 @@
 .ar-hrow{display:flex;justify-content:space-between;gap:10px;padding:7px 2px;border-bottom:1px solid rgba(255,255,255,.06);font-size:12.5px;color:#cfc6e4}
 .ar-hrow:last-child{border-bottom:0}
 .ar-hrow b{color:#fff}
+
+/* ═══ [REPLY-UI-FIX v8.21.0] خانات واضحة وكبيرة في بناء الأزرار والخطوات المتعددة ═══ */
+.ar-step{border:1px solid #574a78;border-radius:14px;padding:14px;margin:14px 0;background:#1b1730}
+.ar-step h3{display:flex;flex-wrap:wrap;align-items:center;gap:10px;font-size:14px;margin:0 0 10px}
+.ar-step .st-title{flex:1 1 220px;min-width:180px;min-height:42px;padding:10px 12px;font-size:14px;border-radius:10px}
+.ar-step .st-text{min-height:96px;padding:12px;font-size:14px;line-height:1.7;border-radius:10px}
+.ar-step .ar-field{margin:14px 0}
+.ar-step .ar-btn-row{padding:10px}
+.ar-btn-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto auto;gap:8px;align-items:stretch;padding:10px}
+.ar-btn-row input,.ar-btn-row select{width:100%;min-width:0;min-height:44px;padding:10px 12px;font-size:14px;line-height:1.5;border-radius:10px}
+.ar-btn-row .br-label,.ar-btn-row .cc-b-label{grid-column:1 / -1;flex:none;width:100%}
+.ar-btn-row select,.ar-btn-row select.br-type,.ar-btn-row select.br-next{flex:none;min-width:104px}
+.ar-btn-del{width:44px;height:44px;align-self:center;border-radius:10px;font-size:15px}
+.ar-field input,.ar-field textarea,.ar-field select{min-height:44px;padding:11px 12px;line-height:1.6}
+.ar-field{margin:14px 0}
+.ar-form-section{padding:16px}
+@media(max-width:560px){
+  .ar-btn-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .ar-btn-row select,.ar-btn-row select.br-type,.ar-btn-row select.br-next{grid-column:1 / -1;min-width:0}
+  .ar-step .st-title{flex:1 1 100%}
+}

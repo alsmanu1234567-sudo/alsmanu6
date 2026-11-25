@@ -5,6 +5,8 @@ import {
   getNumberSettings,
   setNumberSettings,
 } from './lib/number-profiles.mjs';
+import { sortGroups, togglePinned, paginate, shortName, GROUP_PAGE_SIZE } from './lib/group-sort.mjs';
+import { listPins, togglePin } from './lib/group-pins.mjs';
 
 let _deps = {};
 
@@ -445,6 +447,61 @@ export async function resolveGroupTarget(userId, input) {
   }
 }
 
+// ── [REACT-COPY] اختيار المجموعة من قائمة (مرتّبة + تثبيت) ──
+const _rcLists = new Map();
+
+async function _rcLoadGroups(userId) {
+  const scope = _deps.inMemoryDB;
+  let groups = scope?.groupsCache?.get?.(String(userId)) || [];
+  const sock = scope?.sessions?.get?.(String(userId))?.sock
+    || scope?.sessions?.get?.(String(userId));
+  if ((!Array.isArray(groups) || groups.length === 0) && sock?.groupFetchAllParticipating) {
+    try {
+      const fetched = await sock.groupFetchAllParticipating();
+      groups = fetched ? Object.values(fetched) : [];
+      scope?.groupsCache?.set?.(String(userId), groups);
+    } catch { groups = Array.isArray(groups) ? groups : []; }
+  }
+  const pinned = listPins(userId);
+  const sorted = sortGroups(Array.isArray(groups) ? groups : [], pinned);
+  _rcLists.set(String(userId), sorted);
+  return sorted;
+}
+
+function _rcPinnedSet(userId) {
+  return new Set(listPins(userId).map(String));
+}
+
+function _rcPickMenu(userId, role, page = 0) {
+  const list = _rcLists.get(String(userId)) || [];
+  const pinned = _rcPinnedSet(userId);
+  const { items, page: cur, total } = paginate(list, page);
+  const label = role === "from" ? "المصدر" : "الهدف";
+  const rows = items.map((g, i) => {
+    const idx = cur * GROUP_PAGE_SIZE + i;
+    const star = pinned.has(String(g.id)) ? "📌" : "☆";
+    return [
+      { text: `${star} ${shortName(g.subject || g.id, 30)}`, callback_data: `mymsgs_rcsel_${role}_${idx}` },
+      { text: pinned.has(String(g.id)) ? "📌 إزالة" : "📌 تثبيت", callback_data: `mymsgs_rcpin_${role}_${idx}` },
+    ];
+  });
+  const nav = [];
+  if (cur > 0) nav.push({ text: "◀️ السابق", callback_data: `mymsgs_rcpick_${role}_${cur - 1}` });
+  if (cur < total - 1) nav.push({ text: "التالي ▶️", callback_data: `mymsgs_rcpick_${role}_${cur + 1}` });
+  const keyboard = [...rows];
+  if (nav.length) keyboard.push(nav);
+  keyboard.push([{ text: "🔗 إدخال رابط دعوة بدل القائمة", callback_data: `mymsgs_rclink_${role}` }]);
+  keyboard.push([{ text: "◀️ رجوع", callback_data: "mymsgs_show_reactcopy" }]);
+  return {
+    text:
+      `📥 *اختر مجموعة ${label}*\n\n` +
+      `المجموعات المثبَّتة 📌 أولاً، ثم الأسماء الإنجليزية أبجدياً، ثم العربية، والرموز/الإيموجي آخر القائمة.\n` +
+      `الصفحة ${cur + 1} من ${total} · العدد ${list.length}` +
+      (list.length ? "" : "\n\n⚠️ لا توجد مجموعات في الذاكرة — سيتم جلبها من واتساب عند الحاجة."),
+    keyboard: { inline_keyboard: keyboard },
+  };
+}
+
 /** لوحة إعدادات «نسخ بالتفاعل». */
 export function myMsgsReactCopyMenu(s) {
   const on = Boolean(s.reactCopyEnabled);
@@ -522,10 +579,65 @@ export async function handleReactCopyCallback(bot2, chatId, userId, data) {
     await bot2.sendMessage(chatId, "🧹 تم مسح مجموعة الهدف وإيقاف الميزة.");
     return _rcSendMenu(bot2, chatId, userId);
   }
+  // [REACT-COPY v8.21.0] اختيار المجموعة من قائمة حقيقية بدل لصق رابط
+  if (data === "mymsgs_rc_from" || data === "mymsgs_rc_to") {
+    const role = data.endsWith("_from") ? "from" : "to";
+    await bot2.sendMessage(chatId, "⏳ جارٍ جلب مجموعاتك…");
+    const list = await _rcLoadGroups(userId);
+    if (!list.length) {
+      await bot2.sendMessage(chatId, "⚠️ لم أجد مجموعات لهذا الرقم. تأكد أن الرقم متصل، أو استخدم «🔗 إدخال رابط دعوة».", {
+        reply_markup: { inline_keyboard: [[{ text: "🔗 إدخال رابط دعوة", callback_data: `mymsgs_rclink_${role}` }], [{ text: "◀️ رجوع", callback_data: "mymsgs_show_reactcopy" }]] },
+      });
+      return true;
+    }
+    const pick = _rcPickMenu(userId, role, 0);
+    await bot2.sendMessage(chatId, pick.text, { parse_mode: "Markdown", reply_markup: pick.keyboard });
+    return true;
+  }
+  if (data.startsWith("mymsgs_rcpick_")) {
+    const [, , , role, page] = data.split("_");
+    const pick = _rcPickMenu(userId, role, Number(page) || 0);
+    await bot2.sendMessage(chatId, pick.text, { parse_mode: "Markdown", reply_markup: pick.keyboard });
+    return true;
+  }
+  if (data.startsWith("mymsgs_rcpin_")) {
+    const [, , , role, idx] = data.split("_");
+    const list = _rcLists.get(String(userId)) || [];
+    const group = list[Number(idx)];
+    if (!group) { await _rcSendMenu(bot2, chatId, userId); return true; }
+    togglePin(userId, group.id);
+    await _rcLoadGroups(userId);
+    const page = Math.floor((Number(idx) || 0) / GROUP_PAGE_SIZE);
+    const pick = _rcPickMenu(userId, role, page);
+    await bot2.sendMessage(chatId, pick.text, { parse_mode: "Markdown", reply_markup: pick.keyboard });
+    return true;
+  }
+  if (data.startsWith("mymsgs_rcsel_")) {
+    const [, , , role, idx] = data.split("_");
+    const list = _rcLists.get(String(userId)) || [];
+    const group = list[Number(idx)];
+    if (!group) { await bot2.sendMessage(chatId, "⚠️ انتهت صلاحية القائمة — أعد فتحها."); return true; }
+    const field = role === "from" ? "reactCopyFrom" : "reactCopyTo";
+    const current = getMyMsgsSettings(_deps.getUser(userId));
+    const other = role === "from" ? current.reactCopyTo : current.reactCopyFrom;
+    if (other && String(other) === String(group.id)) {
+      await bot2.sendMessage(chatId, "⚠️ لا يمكن أن تكون مجموعة المصدر هي نفسها مجموعة الهدف.");
+      return true;
+    }
+    saveMyMsgsSettings(userId, { [field]: group.id });
+    await bot2.sendMessage(chatId, `✅ تم تحديد ${role === "from" ? "المصدر" : "الهدف"}: ${group.subject || group.id}`);
+    return _rcSendMenu(bot2, chatId, userId);
+  }
+  if (data.startsWith("mymsgs_rclink_")) {
+    const role = data.endsWith("_from") ? "from" : "to";
+    const field = role === "from" ? "reactCopyFrom" : "reactCopyTo";
+    const { setState } = await Promise.resolve().then(() => (_deps.init_state(), _deps.state_exports));
+    setState(userId, "mymsgs_rc_input", { field });
+    await bot2.sendMessage(chatId, `🔗 أرسل رابط دعوة مجموعة ${role === "from" ? "المصدر" : "الهدف"} — مثال:\nhttps://chat.whatsapp.com/XXXXXXXXXXXX`, { parse_mode: "Markdown" });
+    return true;
+  }
   const fieldMap = {
     mymsgs_rc_emoji: { field: "reactCopyEmoji", hint: "أرسل الإيموجي الذي سيشغّل النسخ — مثال: 📌\nيمكن أكثر من إيموجي مفصولة بمسافة: 📌 ⭐ ❤️" },
-    mymsgs_rc_from: { field: "reactCopyFrom", hint: "أرسل رابط دعوة مجموعة المصدر — مثال:\nhttps://chat.whatsapp.com/XXXXXXXXXXXX\n(أو اتركه فارغاً لإلغاء التحديد = أي مجموعة)" },
-    mymsgs_rc_to: { field: "reactCopyTo", hint: "أرسل رابط دعوة مجموعة الهدف — مثال:\nhttps://chat.whatsapp.com/XXXXXXXXXXXX" },
   };
   const target = fieldMap[data];
   if (!target) return false;

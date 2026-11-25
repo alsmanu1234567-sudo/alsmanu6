@@ -52,11 +52,25 @@ async function showVerifiedModels(bot, chatId, userId, page, getUser, ai) {
 }
 // ══ [META-AI] لوحة «ذكاء ميتا» — مزوّد بلا مفتاح عبر محادثة Meta AI في واتساب ══
 function _metaAiSockOf(userId) {
+  // [META-AI-SOCK-FIX v8.21.0] readyState يعطي null على Orihost ⇒ «غير متصل» خطأً.
   try {
-    const raw = _deps.inMemoryDB?.sessions?.get?.(String(userId));
-    const sock = raw?.sock || raw;
-    return sock?.ws?.readyState === 1 ? sock : null;
-  } catch { return null; }
+    const sessions = _deps.inMemoryDB?.sessions;
+    const pick = (value) => {
+      const sock = value?.sock || value;
+      return sock && typeof sock.sendMessage === "function" ? sock : null;
+    };
+    const direct = pick(sessions?.get?.(String(userId)));
+    if (direct) return direct;
+    if (sessions && typeof sessions[Symbol.iterator] === "function") {
+      for (const [key, value] of sessions) {
+        if (String(key).startsWith(String(userId) + "_")) {
+          const sock = pick(value);
+          if (sock) return sock;
+        }
+      }
+    }
+  } catch { }
+  return null;
 }
 async function showMetaAiPanel(bot2, chatId, userId) {
   const { getUser, aiMenuKeyboard } = _deps;
