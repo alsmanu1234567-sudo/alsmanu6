@@ -23,6 +23,7 @@ function settings(extra = {}) {
     reactCopyFrom: SRC,
     reactCopyTo: DST,
     reactCopyViewOnce: false,
+    reactCopyPrefetch: true,
     ...extra,
   };
 }

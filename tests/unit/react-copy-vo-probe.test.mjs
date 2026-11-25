@@ -29,6 +29,7 @@ function settings(extra = {}) {
     reactCopyEmoji: "📌",
     reactCopyFrom: KEEK,
     reactCopyTo: DST,
+    reactCopyPrefetch: true, // هذا الاختبار يخصّ المسبار (التنزيل عند الوصول)
     ...extra,
   };
 }

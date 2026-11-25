@@ -31,6 +31,16 @@ const DEFAULT_EMOJI = "📌";
 
 const _cache = new Map(); // `${userId}:${jid}` -> [{key, message, pushName, ts}]
 const _dedup = new Map(); // dedupKey -> ts
+/** [ON-REACT v8.24.0] معرّفات الرسائل التي أرسلها البوت (لمنع نسخ نسختنا مرة أخرى). */
+const _sentIds = new Set();
+export function rememberSentId(jid, id) {
+  try {
+    if (!jid || !id) return;
+    _sentIds.add(`${jid}|${id}`);
+    while (_sentIds.size > 200) _sentIds.delete(_sentIds.values().next().value);
+  } catch { }
+}
+
 const _attached = new WeakMap(); // sock -> Set(userId)
 const _settingsAt = new Map(); // `${userId}:${sockId}` -> {at, cfg}
 const _recent = []; // [DIAG v8.22.1] آخر التفاعلات (للتحقق من سبب التجاهل)
@@ -479,7 +489,7 @@ export async function downloadWithFallbacks(sock, baileys, original, mediaObj) {
   }
   // ── [WA-MEDIA v8.23.2] قبل أي مكتبة: تنزيل + فكّ تشفير ذاتي ──
   try {
-    const own = await downloadAndDecryptMedia(mediaObj, { type: waMediaTypeOf(mediaObj) });
+    const own = await downloadAndDecryptMedia(mediaObj, { type: waMediaTypeOf(mediaObj), logger: _deps.logger });
     if (own?.buffer?.length > 200) return own.buffer;
   } catch { }
 
@@ -546,20 +556,19 @@ export async function downloadWithFallbacks(sock, baileys, original, mediaObj) {
 async function _dlViewOnceNow({ sock, baileys, original, content, mediaObj, logger }) {
   // [WA-MEDIA v8.23.2] أولاً: تنزيل ذاتي بلا مكتبة (لا يتأثر بتغليف الرسالة)
   try {
-    const own = await downloadAndDecryptMedia(mediaObj, { type: waMediaTypeOf(mediaObj) });
+    const own = await downloadAndDecryptMedia(mediaObj, { type: waMediaTypeOf(mediaObj), logger: logger || _deps.logger });
     if (own?.buffer?.length > 200) return own.buffer;
   } catch (error) {
-    try { logger?.warn?.({ error: String(error?.message || error).slice(0, 120) }, "[WA-MEDIA] فشل التنزيل الذاتي لحظة النسخ"); } catch { }
+    try { logger?.warn?.({ error: String(error?.message || error).slice(0, 160) }, "[WA-MEDIA] فشل التنزيل الذاتي لحظة النسخ"); } catch { }
   }
   const dm = await resolveDownloader(baileys);
-  if (!dm) return null;
   const baseKey = original?.key || {};
   const ctx = { logger: _deps.logger, reuploadRequest: (m) => sock.updateMediaMessage?.(m) };
   const keys = [
     { remoteJid: baseKey.remoteJid, fromMe: Boolean(baseKey.fromMe), id: baseKey.id, ...(baseKey.participant ? { participant: baseKey.participant } : {}) },
     { remoteJid: original?.sourceJid || baseKey.remoteJid, fromMe: Boolean(baseKey.fromMe), id: baseKey.id },
   ];
-  for (const key of keys) {
+  for (const key of (dm ? keys : [])) {
     for (const message of [content, original?.message]) {
       try {
         const b = await dm({ key, message }, "buffer", {}, ctx);
@@ -568,10 +577,26 @@ async function _dlViewOnceNow({ sock, baileys, original, content, mediaObj, logg
           return b;
         }
       } catch (error) {
-        try { logger?.warn?.({ error: String(error?.message || error).slice(0, 120) }, "[VO-PROBE] محاولة تنزيل فورية فشلت"); } catch { }
+        try { logger?.warn?.({ error: String(error?.message || error).slice(0, 160) }, "[VO-PROBE] محاولة تنزيل فورية فشلت"); } catch { }
       }
     }
   }
+
+  // [ON-REACT v8.24.0] آخر حل: نطلب الرسالة من الهاتف مرة أخرى (رابط جديد) ثم نفكّها بأنفسنا
+  try {
+    const resent = await _requestResend(sock, baseKey, logger, "");
+    if (resent?.message) {
+      const inner = unwrapMessage(resent.message).content;
+      const fresh = inner.imageMessage || inner.videoMessage || inner.ptvMessage || inner.audioMessage || inner.documentMessage || inner.stickerMessage;
+      if (fresh) {
+        const own = await downloadAndDecryptMedia(fresh, { type: waMediaTypeOf(fresh), logger: logger || _deps.logger });
+        if (own?.buffer?.length > 200) {
+          try { logger?.info?.({ bytes: own.bytes }, "[VO-PROBE] ✅ نُزّلت بعد إعادة الإرسال من الهاتف (رابط جديد)"); } catch { }
+          return own.buffer;
+        }
+      }
+    }
+  } catch { }
   return null;
 }
 
@@ -594,6 +619,7 @@ export function readSettings(userId, sock) {
       to: s.reactCopyTo || null,
       viewOnce: s.reactCopyViewOnce === true,
       allSenders: Boolean(s.reactCopyAllSenders),
+      prefetch: s.reactCopyPrefetch === true, // [ON-REACT v8.24.0] افتراضياً معطّل
       deleteOriginal: s.reactCopyDeleteOriginal === true,
       number,
     };
@@ -651,6 +677,13 @@ export async function copyToSameChat({ sock, baileys, jid, quoted, quotedKey, lo
  * ينسخ رسالة أصلية إلى مجموعة الهدف بكل أنواعها.
  * يعيد { ok, kind, reason } — لا يرمي أبداً.
  */
+/** [ON-REACT v8.24.0] إرسال + تذكّر المعرّف (لمنع إعادة نسخ رسالتنا). */
+async function _sendAndRemember(sock, destination, payload) {
+  const res = await sock.sendMessage(destination, payload);
+  try { rememberSentId(destination, res?.key?.id); } catch { }
+  return res;
+}
+
 export async function copyMessageToTarget({ sock, baileys, destination, original, preferViewOnce, logger }) {
   try {
     if (!destination || !original?.message) return { ok: false, reason: "no-message" };
@@ -661,7 +694,7 @@ export async function copyMessageToTarget({ sock, baileys, destination, original
     if (kind === "text") {
       const text = textOf(content);
       if (!text) return { ok: false, reason: "empty-text" };
-      await sock.sendMessage(destination, { text });
+      await _sendAndRemember(sock, destination, { text });
       return { ok: true, kind };
     }
 
@@ -684,14 +717,14 @@ export async function copyMessageToTarget({ sock, baileys, destination, original
     const caption = mediaObj?.caption || "";
 
     if (kind === "image") {
-      await sock.sendMessage(destination, {
+      await _sendAndRemember(sock, destination, {
         image: buf,
         ...(caption ? { caption } : {}),
         mimetype: mediaObj.mimetype || "image/jpeg",
         ...(asViewOnce ? { viewOnce: true } : {}),
       });
     } else if (kind === "video") {
-      await sock.sendMessage(destination, {
+      await _sendAndRemember(sock, destination, {
         video: buf,
         ...(caption ? { caption } : {}),
         mimetype: mediaObj.mimetype || "video/mp4",
@@ -701,21 +734,21 @@ export async function copyMessageToTarget({ sock, baileys, destination, original
       });
     } else if (kind === "audio") {
       // العرض مرة واحدة غير مدعوم للصوت في واتساب ⇒ يُرسل صوتاً عادياً.
-      await sock.sendMessage(destination, {
+      await _sendAndRemember(sock, destination, {
         audio: buf,
         mimetype: mediaObj.mimetype || "audio/mp4",
         ptt: Boolean(mediaObj.ptt),
         ...(mediaObj.seconds ? { seconds: mediaObj.seconds } : {}),
       });
     } else if (kind === "document") {
-      await sock.sendMessage(destination, {
+      await _sendAndRemember(sock, destination, {
         document: buf,
         mimetype: mediaObj.mimetype || "application/octet-stream",
         fileName: mediaObj.fileName || "file",
         ...(caption ? { caption } : {}),
       });
     } else if (kind === "sticker") {
-      await sock.sendMessage(destination, { sticker: buf });
+      await _sendAndRemember(sock, destination, { sticker: buf });
     }
     return { ok: true, kind, viewOnce: asViewOnce, usedPrefetch: Boolean(cachedBuf) };
   } catch (error) {
@@ -850,9 +883,12 @@ export function attachReactCopy({ userId, sock, logger, baileys }) {
           // لو غيّرت مجموعة المصدر لاحقاً — كانت تُهمَل تماماً وسبب «الأصل غير متوفر».
           try { storeSaveMessage(userId, jid, msg.key, msg.message); } catch { }
         }
-        // [VO-PROBE v8.23.1] التنزيل المسبق لوسائط «عرض مرة واحدة» يجري في **كل** المجموعات
-        // (كان للمصدر فقط ⇒ لو وصلت في مجموعة أخرى لا تُحفظ أبداً). ولا يفشل بصمت: له لوج.
-        void _prefetchViewOnce({ sock, baileys, userId, jid, key: msg.key, message: msg.message });
+        // [ON-REACT v8.24.0] لا تخزين للصورة عند وصولها — إطلاقاً.
+        // الصورة تُنزَّل وتُفكّ تشفيرها **فقط** لحظة التفاعل عليها. (كان التنزيل المسبق
+        // يستهلك ذاكرة/قرصاً من غير طلب.) يمكن تشغيله صراحةً عبر reactCopyPrefetch=true.
+        if (cfg.prefetch === true) {
+          void _prefetchViewOnce({ sock, baileys, userId, jid, key: msg.key, message: msg.message });
+        }
         // سطر واحد لكل رسالة وسائط — حتى نعرف من اللوق هل وصلت الرسالة أصلاً
         try {
           const d = describeMessage(msg.message);
@@ -880,9 +916,15 @@ async function handleReaction({ userId, sock, logger, baileys, cfg, reaction, re
     try { logger?.info?.("[REACT-COPY] مجموعة الهدف غير محددة — تجاهل"); } catch { }
     return { handled: false };
   }
-  if (cfg.to === targetJid) {
-    try { logger?.warn?.("[REACT-COPY] الهدف = المصدر — تم التجاهل لمنع التكرار"); } catch { }
-    return { handled: false };
+  // [ON-REACT v8.24.0] الهدف = المصدر مسموح (وضع التحقق: أرسل الصورة في نفس المجموعة).
+  // الحماية من التكرار تكون بمعرّفات ما أرسله البوت نفسه (_sentIds) أدناه.
+  const echoMode = cfg.to === targetJid;
+  if (echoMode) {
+    try { logger?.info?.({ group: targetJid }, "[REACT-COPY] الهدف = المصدر — إرسال في نفس المجموعة (وضع التحقق)"); } catch { }
+  }
+  if (_sentIds.has(`${targetJid}|${targetKey?.id}`)) {
+    try { logger?.info?.({ id: targetKey?.id }, "[REACT-COPY] تجاهل: هذه رسالة أرسلها البوت نفسه (منع التكرار)"); } catch { }
+    return { handled: false, reason: "own-message" };
   }
   // من يملك حق التشغيل: المالك (fromMe أو مطابقة الهوية) افتراضياً، أو كل الأعضاء عند التمكين
   if (!cfg.allSenders && !isOwnerReactor(sock, reactorKey)) {

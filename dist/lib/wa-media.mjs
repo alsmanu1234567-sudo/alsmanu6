@@ -107,6 +107,7 @@ export async function downloadAndDecryptMedia(media, { type, timeoutMs = 60000, 
   if (!res.ok) throw new Error(`HTTP ${res.status} من سيرفر واتساب`);
 
   const encrypted = Buffer.from(await res.arrayBuffer());
+  try { logger?.info?.({ host: (() => { try { return new URL(url).host; } catch { return "?"; } })(), httpStatus: res.status, encBytes: encrypted.length }, "[WA-MEDIA] ① تم تنزيل الملف المشفّر"); } catch { }
   if (!encrypted.length) throw new Error("استجابة فارغة من سيرفر واتساب");
 
   // تحقّق سلامة المشفّر إن كانت الرسالة تحمل البصمة
@@ -119,8 +120,32 @@ export async function downloadAndDecryptMedia(media, { type, timeoutMs = 60000, 
 
   const buffer = decryptMediaBuffer(encrypted, mediaKey, type || "image");
   if (!buffer.length) throw new Error("فكّ التشفير أعاد ملفاً فارغاً");
+  const sig = sniffMediaSignature(buffer);
+  const mediaType = type || "image";
+  // نلزم التوقيع للصور/الفيديو/الصوت فقط (المستندات قد تكون zip/docx…)
+  if (!sig && ["image", "video", "audio", "ptv", "sticker"].includes(mediaType)) {
+    throw new Error("الملف بعد فكّ التشفير ليس وسائط معروفة (مفتاح خاطئ؟)");
+  }
+  try { logger?.info?.({ bytes: buffer.length, signature: sig, encShaOk: Boolean(encSha?.length) }, "[WA-MEDIA] ② تم فكّ التشفير والتحقق من التوقيع"); } catch { }
   try { logger?.info?.({ bytes: buffer.length, encBytes: encrypted.length, type }, "[WA-MEDIA] نُزّلت وفُكّ تشفيرها بلا مكتبة"); } catch { }
   return { buffer, bytes: buffer.length, encBytes: encrypted.length, type: type || "image" };
+}
+
+/** يتعرّف على نوع الملف من بايتاته الأولى (كشف المفتاح الخاطئ فوراً). */
+export function sniffMediaSignature(buf) {
+  try {
+    if (!buf || buf.length < 12) return null;
+    if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "jpeg";
+    if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "png";
+    if (buf.subarray(0, 3).toString("latin1") === "GIF") return "gif";
+    if (buf.subarray(4, 8).toString("latin1") === "ftyp") return "mp4";
+    if (buf.subarray(0, 4).toString("latin1") === "OggS") return "ogg";
+    if (buf.subarray(0, 3).toString("latin1") === "ID3") return "mp3";
+    if (buf.subarray(0, 4).equals(Buffer.from([0x25, 0x50, 0x44, 0x46]))) return "pdf";
+    if (buf.subarray(0, 4).equals(Buffer.from([0x52, 0x49, 0x46, 0x46]))) return "webp/wav";
+    if (buf.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return "webm";
+    return null;
+  } catch { return null; }
 }
 
 /** تحقّق من سلامة الملف بعد فكّ التشفير (fileSha256). */

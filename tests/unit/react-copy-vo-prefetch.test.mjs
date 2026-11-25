@@ -36,6 +36,8 @@ function wireDownloader(downloadMediaMessage) {
       resolveMyMsgsSocketNumber: () => NUM,
       getMyMsgsSettingsForNumber: () => ({
         reactCopyEnabled: true, reactCopyEmoji: "📌", reactCopyFrom: SRC, reactCopyTo: DST, reactCopyViewOnce: false,
+        // هذا الملف يختبر ميزة التنزيل المسبق نفسها ⇒ تُفعَّل صراحةً (الافتراضي الآن معطّل)
+        reactCopyPrefetch: true,
       }),
     },
   });

@@ -13,6 +13,7 @@ const UID = "555111";
 const NUM = "249114375739";
 const KEEK = "120363432822413478@g.us";
 const DST = "120363431863934959@g.us";
+const MID = `VO-E2E-${Date.now()}`; // معرّف فريد (المخزن الدائم يبقى بين التشغيلات)
 
 const PHOTO = Buffer.concat([
   Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
@@ -73,7 +74,7 @@ test("من الاستقبال إلى النسخ: صورة عرض-مرة تُنز
   emit("messages.upsert", {
     type: "notify",
     messages: [{
-      key: { remoteJid: KEEK, fromMe: true, id: "VO-E2E-1", participant: "99978869522643:9@lid" },
+      key: { remoteJid: KEEK, fromMe: true, id: MID, participant: "99978869522643:9@lid" },
       message: {
         viewOnceMessageV2: {
           message: {
@@ -91,18 +92,16 @@ test("من الاستقبال إلى النسخ: صورة عرض-مرة تُنز
   });
   await new Promise((r) => setTimeout(r, 400));
 
+  // [ON-REACT v8.24.0] لا شيء يُخزَّن عند الوصول — هذا مطلب صريح
   flush(UID);
-  const saved = loadMedia(UID, KEEK, "VO-E2E-1");
-  if (!saved) console.log("LOGS:", JSON.stringify(logs).slice(0, 2000));
-  assert.ok(saved, "بايتات الصورة حُفظت عند الوصول");
-  assert.ok(saved.equals(PHOTO), "البايتات المحفوظة = الصورة الأصلية");
+  assert.equal(loadMedia(UID, KEEK, MID), null, "لا تُخزَّن الصورة عند وصولها");
 
   // 2) صاحب الحساب يتفاعل بـ📌
   emit("messages.upsert", {
     type: "notify",
     messages: [{
       key: { remoteJid: KEEK, fromMe: true, id: "R-E2E-1" },
-      message: { reactionMessage: { text: "📌", key: { remoteJid: KEEK, id: "VO-E2E-1" } } },
+      message: { reactionMessage: { text: "📌", key: { remoteJid: KEEK, id: MID } } },
     }],
   });
   await new Promise((r) => setTimeout(r, 500));
@@ -113,5 +112,121 @@ test("من الاستقبال إلى النسخ: صورة عرض-مرة تُنز
   assert.ok(Buffer.isBuffer(payload.image), "أُرسلت كصورة");
   assert.ok(payload.image.equals(PHOTO), "نفس بايتات الصورة الأصلية");
   assert.notEqual(payload.viewOnce, true, "تُرسل وسائط عادية بلا viewOnce");
-  assert.ok(JSON.stringify(logs).includes("WA-MEDIA") || JSON.stringify(logs).includes("الذاكرة المسبقة"));
+  if (!JSON.stringify(logs).includes("WA-MEDIA")) console.log("LOGS:", JSON.stringify(logs).slice(0,1500), "SENT:", sent.length);
+  assert.ok(JSON.stringify(logs).includes("WA-MEDIA"), "التنزيل جرى لحظة التفاعل بالطريقة الذاتية");
+});
+
+test("وضع التحقق: الهدف = المصدر (كيك) ⇒ تُرسل الصورة داخل كيك نفسه، وبلا تخزين مسبق", async (t) => {
+  const mediaKey = randomBytes(32);
+  const encrypted = encryptLikeWhatsApp(PHOTO, mediaKey, "image");
+  const server = createServer((req, res) => { res.end(encrypted); });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const photoUrl = `http://127.0.0.1:${server.address().port}/v/x`;
+  t.after(() => new Promise((r) => server.close(r)));
+
+  _resetReactCopyState();
+  const handlers = {};
+  const sent = [];
+  const logs = [];
+  const logger = { info: (...a) => logs.push(a), warn: (...a) => logs.push(a) };
+  setReactCopyDeps({
+    logger,
+    getUser: () => ({ telegramId: UID, whatsappNumbers: [{ number: NUM }] }),
+    baileys: {},
+    myMsgs: {
+      resolveMyMsgsSocketNumber: () => NUM,
+      getMyMsgsSettingsForNumber: () => ({
+        reactCopyEnabled: true,
+        reactCopyEmoji: "📌",
+        reactCopyFrom: KEEK,
+        reactCopyTo: KEEK,           // ← نفس المجموعة
+      }),
+    },
+  });
+  const sock = {
+    user: { id: `${NUM}:9@s.whatsapp.net` },
+    ev: { on: (n, fn) => { (handlers[n] ||= []).push(fn); }, off: () => { } },
+    sendMessage: async (jid, payload) => { sent.push({ jid, payload }); return { key: { id: `BOT-${Date.now()}` } }; },
+    updateMediaMessage: async () => { },
+    requestPlaceholderResend: async () => { },
+  };
+  attachReactCopy({ userId: UID, sock, logger, baileys: {} });
+  const emit = (ev, p) => (handlers[ev] || []).slice().forEach((fn) => fn(p));
+  const id = `ECHO-${Date.now()}`;
+
+  emit("messages.upsert", { type: "notify", messages: [{
+    key: { remoteJid: KEEK, fromMe: true, id },
+    message: { viewOnceMessageV2: { message: { imageMessage: { url: photoUrl, mediaKey, mimetype: "image/jpeg", fileLength: PHOTO.length } } } },
+  }] });
+  await new Promise((r) => setTimeout(r, 200));
+  flush(UID);
+  assert.equal(loadMedia(UID, KEEK, id), null, "لا تخزين عند الوصول");
+
+  emit("messages.upsert", { type: "notify", messages: [{
+    key: { remoteJid: KEEK, fromMe: true, id: `R-${Date.now()}` },
+    message: { reactionMessage: { text: "📌", key: { remoteJid: KEEK, id } } },
+  }] });
+  await new Promise((r) => setTimeout(r, 500));
+
+  assert.equal(sent.length, 1, "أُرسلت مرة واحدة");
+  assert.equal(sent[0].jid, KEEK, "داخل كيك نفسه");
+  assert.ok(sent[0].payload.image.equals(PHOTO), "نفس بايتات الصورة");
+});
+
+test("الرابط الأول ميت ⇒ نطلب الرسالة من الهاتف (رابط جديد) ونفكّها بأنفسنا", async (t) => {
+  const mediaKey = randomBytes(32);
+  const encrypted = encryptLikeWhatsApp(PHOTO, mediaKey, "image");
+  const server = createServer((req, res) => {
+    if (req.url === "/v/fresh") { res.end(encrypted); return; }
+    res.statusCode = 404; res.end("gone");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(() => new Promise((r) => server.close(r)));
+
+  _resetReactCopyState();
+  const handlers = {};
+  const sent = [];
+  const logger = { info: () => { }, warn: () => { } };
+  setReactCopyDeps({
+    logger,
+    getUser: () => ({ telegramId: UID, whatsappNumbers: [{ number: NUM }] }),
+    baileys: {},
+    myMsgs: {
+      resolveMyMsgsSocketNumber: () => NUM,
+      getMyMsgsSettingsForNumber: () => ({ reactCopyEnabled: true, reactCopyEmoji: "📌", reactCopyFrom: KEEK, reactCopyTo: DST }),
+    },
+  });
+  const id = `FRESH-${Date.now()}`;
+  const sock = {
+    user: { id: `${NUM}:9@s.whatsapp.net` },
+    ev: { on: (n, fn) => { (handlers[n] ||= []).push(fn); }, off: () => { } },
+    sendMessage: async (jid, payload) => { sent.push({ jid, payload }); return { key: { id: "s" } }; },
+    updateMediaMessage: async () => { },
+    // الهاتف يعيد إرسال الرسالة برابط سليم
+    requestPlaceholderResend: async (key) => {
+      setTimeout(() => {
+        (handlers["messages.upsert"] || []).forEach((fn) => fn({ type: "notify", messages: [{
+          key: { remoteJid: KEEK, fromMe: true, id: key.id },
+          message: { viewOnceMessageV2: { message: { imageMessage: { url: `${base}/v/fresh`, mediaKey, mimetype: "image/jpeg" } } } },
+        }] }));
+      }, 80);
+    },
+  };
+  attachReactCopy({ userId: UID, sock, logger, baileys: {} });
+  const emit = (ev, p) => (handlers[ev] || []).slice().forEach((fn) => fn(p));
+
+  emit("messages.upsert", { type: "notify", messages: [{
+    key: { remoteJid: KEEK, fromMe: true, id },
+    message: { viewOnceMessageV2: { message: { imageMessage: { url: `${base}/v/dead`, mediaKey, mimetype: "image/jpeg" } } } },
+  }] });
+  await new Promise((r) => setTimeout(r, 80));
+  emit("messages.upsert", { type: "notify", messages: [{
+    key: { remoteJid: KEEK, fromMe: true, id: `R-${id}` },
+    message: { reactionMessage: { text: "📌", key: { remoteJid: KEEK, id } } },
+  }] });
+  await new Promise((r) => setTimeout(r, 2500));
+
+  assert.equal(sent.length, 1, "نُسخت رغم موت الرابط الأول");
+  assert.ok(sent[0].payload.image.equals(PHOTO), "نفس بايتات الصورة");
 });

@@ -264,7 +264,9 @@ test("تفاعل عضو غير مخوّل لا ينسخ عندما يكون ال
   assert.equal(sock.sent.length, 0);
 });
 
-test("الهدف = المصدر ممنوع، والإيموجي غير المطابق لا ينسخ", async () => {
+test("وضع التحقق: الهدف = المصدر مسموح الآن، والإيموجي غير المطابق لا ينسخ", async () => {
+  // [ON-REACT v8.24.0] صار مسموحاً إرسال النسخة داخل نفس المجموعة (للتحقق)،
+  // والحماية من التكرار تكون بمعرّفات ما أرسله البوت نفسه.
   _resetReactCopyState();
   const sock = fakeSock();
   const same = { reactCopyEnabled: true, reactCopyEmoji: "📌", reactCopyFrom: SOURCE, reactCopyTo: SOURCE, reactCopyAllSenders: true };
@@ -277,12 +279,23 @@ test("الهدف = المصدر ممنوع، والإيموجي غير المط�
   attachReactCopy({ userId: "3", sock, logger: { info: () => { }, warn: () => { } }, baileys: fakeBaileys });
   sock.ev.emit("messages.upsert", { type: "notify", messages: [{ key: { remoteJid: SOURCE, id: "M300" }, message: { conversation: "نص" } }] });
   await new Promise((r) => setTimeout(r, 30));
+
+  // إيموجي غير مطابق ⇒ لا شيء
   sock.ev.emit("messages.upsert", {
     type: "notify",
-    messages: [{ key: { remoteJid: SOURCE, id: "R3", fromMe: true }, message: { reactionMessage: { text: "📌", key: { remoteJid: SOURCE, id: "M300" } } } }],
+    messages: [{ key: { remoteJid: SOURCE, id: "R3b", fromMe: true }, message: { reactionMessage: { text: "❤️", key: { remoteJid: SOURCE, id: "M300" } } } }],
   });
   await new Promise((r) => setTimeout(r, 60));
-  assert.equal(sock.sent.length, 0);
+  assert.equal(sock.sent.length, 0, "الإيموجي غير المطابق لا ينسخ");
+
+  // الإيموجي الصحيح ⇒ تُنسخ في نفس المجموعة
+  sock.ev.emit("messages.upsert", {
+    type: "notify",
+    messages: [{ key: { remoteJid: SOURCE, id: "R3c", fromMe: true }, message: { reactionMessage: { text: "📌", key: { remoteJid: SOURCE, id: "M300" } } } }],
+  });
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(sock.sent.length, 1, "وضع التحقق: تُرسل داخل نفس المجموعة");
+  assert.equal(sock.sent[0].jid, SOURCE);
 });
 
 test("readSettings يعيد القيم الافتراضية الصحيحة", () => {
