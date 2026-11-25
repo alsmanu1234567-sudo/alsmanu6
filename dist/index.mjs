@@ -295822,7 +295822,8 @@ ${nameLine}${statusLine}`;
                     { logger: baileysLogger, reuploadRequest: activeSock.updateMediaMessage }
                   );
                 } catch (dlErr) {
-                  logger.warn({ dlErr: String(dlErr?.message || dlErr).slice(0, 160) }, "[/copy] download failed — محاولة ثانية");
+                  // [COPY v8.22.1] المحاولة الأولى تفشل مع بعض الرسائل (بلا url) — الاحتياطي يعالجها، لذلك debug لا warn
+                  logger.debug({ dlErr: String(dlErr?.message || dlErr).slice(0, 160) }, "[/copy] المحاولة الأولى للتنزيل فشلت — استخدام الاحتياطي");
                 }
                 if (!buf || !buf.length) {
                   // احتياط: نفس دالة التنزيل متعددة المصادر المستخدمة في النسخ بالتفاعل

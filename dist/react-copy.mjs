@@ -21,6 +21,58 @@ const _cache = new Map(); // `${userId}:${jid}` -> [{key, message, pushName, ts}
 const _dedup = new Map(); // dedupKey -> ts
 const _attached = new WeakMap(); // sock -> Set(userId)
 const _settingsAt = new Map(); // `${userId}:${sockId}` -> {at, cfg}
+const _recent = []; // [DIAG v8.22.1] آخر التفاعلات (للتحقق من سبب التجاهل)
+
+/** يعيد آخر التفاعلات المرصودة (الأحدث أولاً) — للتشخيص من اللوحة. */
+export function getRecentReactions(limit = 5) {
+  return _recent.slice(-limit).reverse();
+}
+
+function noteReaction(entry) {
+  try {
+    _recent.push({ at: Date.now(), ...entry });
+    while (_recent.length > 20) _recent.shift();
+  } catch { }
+}
+
+/** أرقام/معرّفات صاحب الجلسة (رقم · LID · jid) لمطابقة هوية المتفاعل. */
+export function ownerIdentities(sock) {
+  const ids = new Set();
+  const add = (value) => {
+    const raw = String(value || "").trim();
+    if (!raw) return;
+    ids.add(raw);
+    const digits = raw.split("@")[0].split(":")[0].replace(/\D/g, "");
+    if (digits) ids.add(digits);
+  };
+  try {
+    add(sock?.user?.id);
+    add(sock?.user?.lid);
+    add(sock?.user?.pn);
+    add(sock?.user?.jid);
+  } catch { }
+  return ids;
+}
+
+/**
+ * [OWNER-MATCH v8.22.1] هل المتفاعل هو صاحب الجلسة؟
+ * كان الاعتماد على key.fromMe فقط ⇒ تفاعلات المالك تُتجاهل أحياناً («تفاعل من عضو غير مخوّل»
+ * مع أن المتفاعل هو نفسه). الآن نطابق الرقم وLID وjid أيضاً.
+ */
+export function isOwnerReactor(sock, reactorKey) {
+  if (reactorKey?.fromMe) return true;
+  const ids = ownerIdentities(sock);
+  if (!ids.size) return false;
+  const candidates = [reactorKey?.participant, reactorKey?.remoteJid, reactorKey?.senderPn, reactorKey?.senderLid];
+  for (const c of candidates) {
+    const raw = String(c || "").trim();
+    if (!raw) continue;
+    if (ids.has(raw)) return true;
+    const digits = raw.split("@")[0].split(":")[0].replace(/\D/g, "");
+    if (digits && ids.has(digits)) return true;
+  }
+  return false;
+}
 
 let _deps = {};
 
@@ -461,15 +513,27 @@ async function handleReaction({ userId, sock, logger, baileys, cfg, reaction, re
     try { logger?.warn?.("[REACT-COPY] الهدف = المصدر — تم التجاهل لمنع التكرار"); } catch { }
     return { handled: false };
   }
-  // من يملك حق التشغيل: المالك (fromMe) افتراضياً، أو كل الأعضاء عند التمكين
-  if (!cfg.allSenders && !reactorKey?.fromMe) {
-    try { logger?.info?.("[REACT-COPY] تفاعل من عضو غير مخوّل — تجاهل"); } catch { }
+  // من يملك حق التشغيل: المالك (fromMe أو مطابقة الهوية) افتراضياً، أو كل الأعضاء عند التمكين
+  if (!cfg.allSenders && !isOwnerReactor(sock, reactorKey)) {
+    const reactor = reactorKey?.participant || reactorKey?.remoteJid || "-";
+    noteReaction({ group: targetJid, emoji, reactor, matched: false, reason: "not-owner" });
+    try {
+      logger?.info?.({ group: targetJid, emoji, reactor, owner: [...ownerIdentities(sock)].slice(0, 3) },
+        "[REACT-COPY] تفاعل مرفوض: ليس صاحب الحساب — فعّل «👥 من يستطيع: الجميع» إن كنت تتفاعل من رقم آخر");
+    } catch { }
     return { handled: false };
   }
-  if (!emojiMatches(cfg.emoji, emoji)) return { handled: false };
+  if (!emojiMatches(cfg.emoji, emoji)) {
+    noteReaction({ group: targetJid, emoji, reactor: reactorKey?.participant || "-", matched: false, reason: "emoji-mismatch", wanted: cfg.emoji });
+    return { handled: false };
+  }
 
   const dedupKey = `${userId}|${targetJid}|${targetKey.id}|${normalizeEmoji(emoji)}`;
-  if (!dedupOnce(dedupKey)) return { handled: false, reason: "duplicate" };
+  if (!dedupOnce(dedupKey)) {
+    noteReaction({ group: targetJid, emoji, reactor: reactorKey?.participant || "-", matched: false, reason: "duplicate" });
+    return { handled: false, reason: "duplicate" };
+  }
+  noteReaction({ group: targetJid, emoji, reactor: reactorKey?.participant || "-", matched: true, reason: "copying" });
 
   const original = await resolveOriginal(userId, sock, targetKey);
   if (!original) {
@@ -501,6 +565,7 @@ async function handleReaction({ userId, sock, logger, baileys, cfg, reaction, re
 
 /** لأغراض الاختبارات: تفريغ الذاكرة المؤقتة. */
 export function _resetReactCopyState() {
+  _recent.length = 0;
   _cache.clear();
   _dedup.clear();
   _settingsAt.clear();

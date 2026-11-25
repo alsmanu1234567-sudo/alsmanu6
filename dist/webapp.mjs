@@ -465,6 +465,8 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
   app.post('/api/my-msgs/delete',parseJson,guard(async(uid,req)=>myMsgsWeb().remove(uid,req.body?.phone,req.body?.id)));
   app.post('/api/my-msgs/group',parseJson,guard(async(uid,req)=>myMsgsWeb().group(uid,req.body?.phone,req.body?.jid)));
   app.post('/api/my-msgs/react-copy',parseJson,guard(async(uid,req)=>myMsgsWeb().reactCopy(uid,req.body?.phone,req.body||{})));
+  // [RC-DIAG v8.22.1] تشخيص: لماذا لا تُنسخ التفاعلات
+  app.get('/api/my-msgs/react-copy/diag',guard(async(uid,req)=>myMsgsWeb().reactCopyDiag(uid,req.query?.phone)));
   app.post('/api/my-msgs/pair',parseJson,guard(async(uid,req)=>myMsgsWeb().pairing(uid,req.body?.phone)));
 
   const aiWeb = () => { if (!aiService) throw Error("خدمة الذكاء غير جاهزة"); return aiService; };

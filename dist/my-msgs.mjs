@@ -7,7 +7,7 @@ import {
 } from './lib/number-profiles.mjs';
 import { sortGroups, togglePinned, paginate, shortName, GROUP_PAGE_SIZE } from './lib/group-sort.mjs';
 import { listPins, togglePin } from './lib/group-pins.mjs';
-import { invalidateReactCopySettings } from './react-copy.mjs';
+import { invalidateReactCopySettings, getRecentReactions } from './react-copy.mjs';
 
 let _deps = {};
 
@@ -629,6 +629,7 @@ export function myMsgsReactCopyMenu(s) {
           { text: `👥 من يستطيع: ${st.allSenders ? "الجميع" : "المالك"}`, callback_data: "mymsgs_rc_who" },
         ],
         [{ text: `${st.deleteOriginal ? "🟢" : "⚪"} حذف الأصل بعد النسخ`, callback_data: "mymsgs_rc_delorig" }],
+        [{ text: "🩺 فحص: لماذا لا يُنسخ؟", callback_data: "mymsgs_rc_diag" }],
         [
           { text: "🧹 مسح المصدر", callback_data: "mymsgs_rc_clearfrom" },
           { text: "🧹 مسح الهدف", callback_data: "mymsgs_rc_clearto" },
@@ -665,6 +666,22 @@ export async function handleReactCopyCallback(bot2, chatId, userId, data) {
   if (data === "mymsgs_rc_who") {
     _rcPatch(userId, { reactCopyAllSenders: !s.reactCopyAllSenders });
     return _rcSendMenu(bot2, chatId, userId);
+  }
+  if (data === "mymsgs_rc_diag") {
+    const recent = getRecentReactions(5);
+    const lines = recent.length
+      ? recent.map((r) => `• ${new Date(r.at).toLocaleTimeString("ar-EG")} — ${r.emoji || "-"} من ${String(r.reactor || "-").split("@")[0]} ⇒ ${r.matched ? "✅ نُسخت" : "⛔ " + (r.reason === "not-owner" ? "ليس صاحب الحساب" : r.reason === "emoji-mismatch" ? "إيموجي غير مطابق" : r.reason === "duplicate" ? "مكرر" : r.reason || "مرفوض")}`)
+      : "لا تفاعلات مرصودة بعد.";
+    await bot2.sendMessage(chatId,
+      `🩺 *فحص نسخ بالتفاعل*\n\n` +
+      `المصدر: ${s.reactCopyFrom ? _rcName(s.reactCopyFrom) : "أي مجموعة"}\n` +
+      `الهدف: ${s.reactCopyTo ? _rcName(s.reactCopyTo) : "⚠️ غير محدد"}\n` +
+      `الإيموجي: ${_rcState(s).effective}\n` +
+      `من يستطيع: ${s.reactCopyAllSenders ? "كل الأعضاء" : "المالك فقط"}\n\n` +
+      `*آخر التفاعلات:*\n${lines}\n\n` +
+      (s.reactCopyAllSenders ? "" : "ℹ️ إن كنت تتفاعل من رقم مختلف عن رقم البوت ⇒ فعّل «👥 من يستطيع: الجميع»."),
+      { parse_mode: "Markdown" });
+    return true;
   }
   if (data === "mymsgs_rc_delorig") {
     _rcPatch(userId, { reactCopyDeleteOriginal: !(s.reactCopyDeleteOriginal === true) });
