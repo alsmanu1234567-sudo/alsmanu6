@@ -28,7 +28,7 @@ const ROOT = join(DATA_DIR, "react-copy");
 const MEDIA_DIR = join(ROOT, "media");
 
 export const STORE_LIMITS = {
-  messagesPerGroup: 120,
+  messagesPerGroup: 80,
   groups: 25,
   messageTtlMs: 24 * 60 * 60 * 1000,
   mediaItems: 8,
