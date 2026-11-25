@@ -331382,6 +331382,22 @@ async function main() {
       resolve();
     });
   });
+  // [PANEL-KEEPALIVE v8.25.0] يُبقي لوحة السيرفر (الرابط العام) حيّة دائماً:
+  // اللوحة تُغلق نفسها بعد ~20 دقيقة خمول فيموت النفق ويتغيّر الرابط.
+  // الحرس يكتشف منفذها تلقائياً من /proc/net/tcp ويطرقها كل ٣ دقائق.
+  try {
+    const ka = await import("./lib/panel-keepalive.mjs");
+    try { ka.ensureConfigFile(); } catch { }
+    const cfg = ka.readConfig() || {};
+    if (cfg.enabled !== false) {
+      ka.startPanelKeepalive({ logger, publicUrl: cfg.url || "", token: cfg.token || "", intervalMs: cfg.intervalMinutes ? Number(cfg.intervalMinutes) * 60000 : undefined });
+    } else {
+      logger.info("[PANEL-KEEPALIVE] معطّل من panel-keepalive.json");
+    }
+  } catch (error) {
+    try { logger.warn({ error: String(error?.message || error) }, "[PANEL-KEEPALIVE] تعذّر البدء"); } catch { }
+  }
+
   // [TUNNEL] إنشاء رابط عام تلقائياً للاستضافات بدون رابط — يعمل في الخلفية
   // لا يعطّل إقلاع البوت أبداً حتى لو فشل
   import("./tunnel.mjs")
