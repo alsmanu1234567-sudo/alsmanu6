@@ -225,7 +225,7 @@ export function readSettings(userId, sock) {
       emoji: s.reactCopyEmoji || DEFAULT_EMOJI,
       from: s.reactCopyFrom || null,
       to: s.reactCopyTo || null,
-      viewOnce: s.reactCopyViewOnce !== false,
+      viewOnce: s.reactCopyViewOnce === true,
       allSenders: Boolean(s.reactCopyAllSenders),
       number,
     };
@@ -234,17 +234,50 @@ export function readSettings(userId, sock) {
   }
 }
 
+/** [EMOJI-FIX v8.21.3] إبطال كاش الإعدادات فوراً بعد أي تعديل (كان 15 ثانية ⇒ «الإيموجي لا يتغير»). */
+export function invalidateReactCopySettings(userId) {
+  const key = String(userId ?? "");
+  if (!key) { _settingsAt.clear(); return; }
+  for (const k of [..._settingsAt.keys()]) {
+    if (k === key || k.startsWith(`${key}:`)) _settingsAt.delete(k);
+  }
+}
+
 function settingsCached(userId, sock) {
   const sid = (sock?.user?.id) || "s";
   const k = `${userId}:${sid}`;
   const hit = _settingsAt.get(k);
-  if (hit && Date.now() - hit.at < 15000) return hit.cfg;
+  if (hit && Date.now() - hit.at < 3000) return hit.cfg;
   const cfg = readSettings(userId, sock);
   _settingsAt.set(k, { at: Date.now(), cfg });
   return cfg;
 }
 
 // ───────────────────────────── النسخ نفسه ─────────────────────────────
+
+/**
+ * [COPY-VIEWONCE v8.21.3] نسخ رسالة مقتبسة داخل نفس المحادثة (أمر /copy).
+ * يفكّ غلاف «عرض مرة واحدة» ثم يُرسل الوسائط **عاديّة بلا viewOnce** ⇒ تُفتح دائماً.
+ * يعيد { ok, kind, reason, wasViewOnce } — لا يرمي أبداً.
+ */
+export async function copyToSameChat({ sock, baileys, jid, quoted, quotedKey, logger }) {
+  try {
+    if (!jid || !quoted) return { ok: false, reason: "no-message" };
+    const { content, viewOnce: wasViewOnce } = unwrapMessage(quoted);
+    const kind = classifyContent(content);
+    if (!kind) return { ok: false, reason: "unsupported", wasViewOnce };
+    const original = {
+      key: { remoteJid: jid, fromMe: Boolean(quotedKey?.fromMe), id: quotedKey?.id || "", ...(quotedKey?.participant ? { participant: quotedKey.participant } : {}) },
+      message: quoted,
+      sourceJid: jid,
+    };
+    const res = await copyMessageToTarget({ sock, baileys, destination: jid, original, preferViewOnce: false, logger });
+    return { ...res, wasViewOnce };
+  } catch (error) {
+    try { logger?.warn?.(`[COPY] خطأ النسخ المحلي: ${String(error?.message || error).slice(0, 160)}`); } catch { }
+    return { ok: false, reason: "exception" };
+  }
+}
 
 /**
  * ينسخ رسالة أصلية إلى مجموعة الهدف بكل أنواعها.

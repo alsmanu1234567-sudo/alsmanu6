@@ -295753,50 +295753,34 @@ ${nameLine}${statusLine}`;
           return; // [DISPATCH-FIX]
         }
         if (myS.copyEnabled && trimmed === myS.copyCmd) {
+          // [COPY-VIEWONCE v8.21.3] يفكّ غلاف «عرض مرة واحدة» وينسخ الوسائط **بلا viewOnce** داخل نفس الشات
           try {
-            const ctxInfo = msg.message?.extendedTextMessage?.contextInfo || msg.message?.imageMessage?.contextInfo || msg.message?.videoMessage?.contextInfo || msg.message?.audioMessage?.contextInfo || msg.message?.documentMessage?.contextInfo;
+            const ctxInfo = msg.message?.extendedTextMessage?.contextInfo
+              || msg.message?.imageMessage?.contextInfo
+              || msg.message?.videoMessage?.contextInfo
+              || msg.message?.audioMessage?.contextInfo
+              || msg.message?.documentMessage?.contextInfo;
             const quoted = ctxInfo?.quotedMessage;
             if (!quoted) {
               await activeSock.sendMessage(jid, { text: `\u26A0\uFE0F \u0631\u062F\u0651 \u0639\u0644\u0649 \u0631\u0633\u0627\u0644\u0629 \u0623\u0648\u0644\u0627\u064B \u062B\u0645 \u0623\u0631\u0633\u0644 ${myS.copyCmd}` });
             } else {
-              const qText = quoted.conversation || quoted.extendedTextMessage?.text || quoted.ephemeralMessage?.message?.conversation || quoted.ephemeralMessage?.message?.extendedTextMessage?.text || null;
-              if (qText) {
-                await activeSock.sendMessage(jid, { text: qText });
-              } else if (quoted.imageMessage || quoted.videoMessage || quoted.audioMessage || quoted.documentMessage) {
-                const quotedMsgForDl = {
-                  key: {
-                    remoteJid: jid,
-                    fromMe: ctxInfo?.quotedMessageId ? false : true,
-                    id: ctxInfo?.quotedMessageId || "",
-                    participant: ctxInfo?.participant
-                  },
-                  message: quoted
+              const res = await _reactCopyMod.copyToSameChat({
+                sock: activeSock,
+                baileys: installedBaileys,
+                jid,
+                quoted,
+                quotedKey: { remoteJid: jid, id: ctxInfo?.quotedMessageId || "", fromMe: Boolean(msg.key?.fromMe && !ctxInfo?.participant), participant: ctxInfo?.participant },
+                logger,
+              });
+              if (!res.ok) {
+                const reasons = {
+                  unsupported: "\u26A0\uFE0F \u0646\u0648\u0639 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u063A\u064A\u0631 \u0645\u062F\u0639\u0648\u0645 \u0641\u064A \u0627\u0644\u0646\u0633\u062E",
+                  "download-failed": "\u26A0\uFE0F \u062A\u0639\u0630\u0651\u0631 \u062A\u0646\u0632\u064A\u0644 \u0627\u0644\u0648\u0633\u0627\u0626\u0637 \u2014 \u0623\u0639\u062F \u0627\u0644\u0645\u062D\u0627\u0648\u0644\u0629 \u0628\u0639\u062F \u0644\u062D\u0638\u0629",
+                  "empty-text": "\u26A0\uFE0F \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0641\u0627\u0631\u063A\u0629",
                 };
-                const { downloadMediaMessage: downloadMediaMessage2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
-                const buf = await downloadMediaMessage2(
-                  quotedMsgForDl,
-                  "buffer",
-                  {},
-                  { logger: baileysLogger, reuploadRequest: activeSock.updateMediaMessage }
-                );
-                if (quoted.imageMessage) {
-                  await activeSock.sendMessage(jid, { image: buf, caption: quoted.imageMessage.caption || "" });
-                } else if (quoted.videoMessage) {
-                  await activeSock.sendMessage(jid, { video: buf, caption: quoted.videoMessage.caption || "" });
-                } else if (quoted.audioMessage) {
-                  await activeSock.sendMessage(jid, { audio: buf, mimetype: quoted.audioMessage.mimetype || "audio/mp4", ptt: quoted.audioMessage.ptt || false });
-                } else if (quoted.documentMessage) {
-                  await activeSock.sendMessage(jid, {
-                    document: buf,
-                    mimetype: quoted.documentMessage.mimetype || "application/octet-stream",
-                    fileName: quoted.documentMessage.fileName || "file",
-                    caption: quoted.documentMessage.caption || ""
-                  });
-                }
-              } else if (quoted.stickerMessage) {
-                await activeSock.sendMessage(jid, { text: "\u26A0\uFE0F \u0627\u0644\u0645\u0644\u0635\u0642\u0627\u062A \u063A\u064A\u0631 \u0645\u062F\u0639\u0648\u0645\u0629 \u0641\u064A \u0627\u0644\u0646\u0633\u062E" });
+                await activeSock.sendMessage(jid, { text: reasons[res.reason] || "\u26A0\uFE0F \u062A\u0639\u0630\u0651\u0631\u062A \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0625\u0631\u0633\u0627\u0644" });
               } else {
-                await activeSock.sendMessage(jid, { text: "\u26A0\uFE0F \u0646\u0648\u0639 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u063A\u064A\u0631 \u0645\u062F\u0639\u0648\u0645 \u0641\u064A \u0627\u0644\u0646\u0633\u062E" });
+                logger.info({ userId, jid, kind: res.kind, wasViewOnce: Boolean(res.wasViewOnce) }, "[COPY] نُسخت الرسالة بلا علامة تحويل");
               }
             }
           } catch (e) {

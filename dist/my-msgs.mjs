@@ -7,6 +7,7 @@ import {
 } from './lib/number-profiles.mjs';
 import { sortGroups, togglePinned, paginate, shortName, GROUP_PAGE_SIZE } from './lib/group-sort.mjs';
 import { listPins, togglePin } from './lib/group-pins.mjs';
+import { invalidateReactCopySettings } from './react-copy.mjs';
 
 let _deps = {};
 
@@ -59,7 +60,7 @@ const DEFAULTS = {
   reactCopyEmoji: "\uD83D\uDCCC", // 📌
   reactCopyFrom: null,            // مجموعة المصدر (null = أي مجموعة)
   reactCopyTo: null,              // مجموعة الهدف (مطلوبة للتشغيل)
-  reactCopyViewOnce: true,        // إبقاء رسائل «عرض مرة واحدة» كما هي
+  reactCopyViewOnce: false,       // [COPY-VIEWONCE v8.21.3] الافتراضي: تُنسخ الوسائط عادية (تُفتح دائماً)
   reactCopyAllSenders: false,     // false = تفاعل المالك فقط
 };
 
@@ -177,6 +178,7 @@ export function saveMyMsgsSettingsForNumber(userId, phoneNumber, settings) {
   const updated = { ...getMyMsgsSettingsForNumber(user, phoneNumber), ...settings };
   setNumberSettings(user, phoneNumber, updated);
   _deps.saveUser(userId, { whatsappNumbers: user.whatsappNumbers });
+  try { invalidateReactCopySettings(userId); } catch { } // [EMOJI-FIX v8.21.3] لا ينتظر 15 ثانية بعد التعديل
   return updated;
 }
 
@@ -513,7 +515,7 @@ function _rcPickMenu(userId, role, page = 0) {
 /** لوحة إعدادات «نسخ بالتفاعل». */
 export function myMsgsReactCopyMenu(s) {
   const on = Boolean(s.reactCopyEnabled);
-  const viewOnce = s.reactCopyViewOnce !== false;
+  const viewOnce = s.reactCopyViewOnce === true;
   const allSenders = Boolean(s.reactCopyAllSenders);
   const text =
     `📥 *نسخ بالتفاعل (إيموجي)*\n\n` +
@@ -526,7 +528,7 @@ export function myMsgsReactCopyMenu(s) {
     `الإيموجي: ${s.reactCopyEmoji || "📌"}\n` +
     `المصدر: ${_rcShortJid(s.reactCopyFrom)}${s.reactCopyFrom ? "" : " (أي مجموعة)"}\n` +
     `الهدف: ${_rcShortJid(s.reactCopyTo)}\n` +
-    `عرض مرة واحدة: ${viewOnce ? "🟢 يبقى كما هو" : "🔴 يُرسل عادياً"}\n` +
+    `عرض مرة واحدة: ${viewOnce ? "🟢 يبقى كما هو" : "⚪ يُرسل عادياً (الافتراضي)"}\n` +
     `من يستطيع التفاعل: ${allSenders ? "👥 كل الأعضاء" : "👤 المالك فقط"}`;
   return {
     text,
@@ -571,7 +573,7 @@ export async function handleReactCopyCallback(bot2, chatId, userId, data) {
     return _rcSendMenu(bot2, chatId, userId);
   }
   if (data === "mymsgs_rc_viewonce") {
-    saveMyMsgsSettings(userId, { reactCopyViewOnce: s.reactCopyViewOnce === false });
+    saveMyMsgsSettings(userId, { reactCopyViewOnce: !(s.reactCopyViewOnce === true) });
     return _rcSendMenu(bot2, chatId, userId);
   }
   if (data === "mymsgs_rc_who") {

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createMyMsgsWebService } from "../../dist/my-msgs-web.mjs";
+import { setDeps as setMyMsgsDeps } from "../../dist/my-msgs.mjs";
 
 const PHONE = "249114375739";
 const UID = "900001";
@@ -93,4 +94,63 @@ test("البوت: قائمة المجموعات في تيليجرام تطلب �
   assert.match(src, /groupFetchAllParticipating/);
   assert.match(src, /mymsgs_rcsel_/);
   assert.match(src, /إعادة المحاولة/);
+});
+
+// ───────────── إصلاحات v8.21.3: الإيموجي + عرض الويب + التفعيل ─────────────
+function serviceForReactCopy() {
+  const user = {
+    userId: UID,
+    telegramId: UID,
+    whatsappNumbers: [{ number: PHONE, myMsgs: { reactCopyEmoji: "⭐" } }],
+    myMsgs: {},
+  };
+  const saved = [];
+  const getUser = () => user;
+  const saveUser = (uid, patch) => { saved.push(patch); Object.assign(user, patch); };
+  // my-msgs.mjs يقرأ المستخدم من تبعياته المعيّنة من الحزمة الرئيسية
+  setMyMsgsDeps({ getUser, saveUser, inMemoryDB: { sessions: new Map(), groupsCache: new Map() } });
+  const svc = createMyMsgsWebService({
+    getUser,
+    saveUser,
+    inMemoryDB: { sessions: new Map(), groupsCache: new Map() },
+  });
+  return { svc, user, saved };
+}
+
+test("الإيموجي: حذف الحقل لا يُنتج خطأ ويعود إلى 📌", () => {
+  const { svc } = serviceForReactCopy();
+  const res = svc.reactCopy(UID, PHONE, { emoji: "   ", from: "", to: "120363000000000001@g.us", enabled: true, viewOnce: false, allSenders: false });
+  assert.equal(res.ok, true);
+  assert.equal(res.emoji, "📌");
+});
+
+test("الإيموجي: التغيير يُحفظ فوراً (لا يبقى القديم)", () => {
+  const { svc } = serviceForReactCopy();
+  const res = svc.reactCopy(UID, PHONE, { emoji: "🔥", from: "", to: "120363000000000001@g.us", enabled: true, viewOnce: false, allSenders: false });
+  assert.equal(res.emoji, "🔥");
+  const view = svc.overview(UID, PHONE);
+  assert.equal(view.reactCopy.emoji, "🔥");
+});
+
+test("التفعيل بلا مجموعة هدف يُعطي رسالة واضحة لا خطأ مبهم", () => {
+  const { svc } = serviceForReactCopy();
+  assert.throws(
+    () => svc.reactCopy(UID, PHONE, { emoji: "📌", from: "", to: "", enabled: true, viewOnce: false, allSenders: false }),
+    /حدد مجموعة الهدف/
+  );
+});
+
+test("الافتراضي: عرض مرة واحدة = يُرسل عادياً (viewOnce=false)", () => {
+  const { svc } = serviceForReactCopy();
+  const view = svc.overview(UID, PHONE);
+  assert.equal(view.reactCopy.viewOnce, false);
+});
+
+test("واجهة الويب: قواعد تمنع تمدّد الصفحة من أسماء المجموعات الطويلة", () => {
+  const js = readFileSync(new URL("../../public/my-msgs-web.js", import.meta.url), "utf8");
+  assert.match(js, /\.mm\{max-width:100%;overflow-x:hidden\}/);
+  assert.match(js, /\.mm \*\{box-sizing:border-box;min-width:0\}/);
+  assert.match(js, /\.mm-pick-item \.nm\{flex:1 1 0;min-width:0/);
+  // قصّ الأسماء الطويلة قبل العرض
+  assert.match(js, /slice\(0,34\)/);
 });

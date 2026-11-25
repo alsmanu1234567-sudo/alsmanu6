@@ -39,11 +39,11 @@ test("لوحة «نسخ بالتفاعل» تعرض كل عناصر التحكم
   assert.match(menu.text, /الحالة: 🟢/);
 });
 
-test("الإعدادات الافتراضية: معطّلة، إيموجي 📌، عرض مرة واحدة مفعّل، المالك فقط", () => {
+test("الإعدادات الافتراضية: معطّلة، إيموجي 📌، تُنسخ عادية (بلا viewOnce)، المالك فقط", () => {
   const s = getMyMsgsSettings(makeUser());
   assert.equal(s.reactCopyEnabled, false);
   assert.equal(s.reactCopyEmoji, "📌");
-  assert.equal(s.reactCopyViewOnce, true);
+  assert.equal(s.reactCopyViewOnce, false); // [COPY-VIEWONCE v8.21.3] الافتراضي: إرسال عادي
   assert.equal(s.reactCopyAllSenders, false);
   assert.equal(s.reactCopyFrom, null);
   assert.equal(s.reactCopyTo, null);
@@ -57,8 +57,8 @@ test("لوحة الويب: تحقق من صحة إعدادات النسخ", () =
   assert.throws(() => svc.reactCopy("777", "249000000000", { from: SRC, to: SRC, emoji: "📌" }), /المصدر هي نفسها الهدف/);
   // تشغيل بلا هدف
   assert.throws(() => svc.reactCopy("777", "249000000000", { enabled: true, emoji: "📌", to: "" }), /حدد مجموعة الهدف/);
-  // إيموجي فارغ
-  assert.throws(() => svc.reactCopy("777", "249000000000", { emoji: "  ", to: DST }), /إيموجي/);
+  // [EMOJI-FIX v8.21.3] إيموجي فارغ = العودة إلى 📌 بلا خطأ
+  assert.equal(svc.reactCopy("777", "249000000000", { emoji: "  ", to: DST }).emoji, "📌");
   assert.equal(typeof svc.reactCopy, "function");
 });
 

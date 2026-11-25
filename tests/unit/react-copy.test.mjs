@@ -294,7 +294,7 @@ test("readSettings يعيد القيم الافتراضية الصحيحة", () 
   assert.equal(cfg.enabled, true);
   assert.equal(cfg.to, TARGET);
   assert.equal(cfg.emoji, "📌");
-  assert.equal(cfg.viewOnce, true);
+  assert.equal(cfg.viewOnce, false); // [COPY-VIEWONCE v8.21.3] الافتراضي إرسال عادي
   assert.equal(cfg.allSenders, false);
 });
 
