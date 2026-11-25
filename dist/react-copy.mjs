@@ -96,24 +96,129 @@ function _voMediaOf(message) {
   return media ? { kind, media, content } : null;
 }
 
-async function _prefetchViewOnce({ sock, baileys, userId, jid, key, message }) {
+/** [VO-PROBE v8.23.1] وصف دقيق لتغليف الرسالة (للتشخيص الحقيقي من اللوق). */
+export function describeMessage(message) {
   try {
-    if (!jid || !key?.id) return;
-    const found = _voMediaOf(message);
-    if (!found) return;
-    const vkey = _voKey(jid, key.id);
-    if (_voStore.has(vkey) || _voInflight.has(vkey)) return;
-    _voInflight.add(vkey);
-    try {
-      const buf = await downloadWithFallbacks(sock, baileys, { key, message, sourceJid: jid }, found.media);
-      if (buf?.length && buf.length <= VO_MAX_ITEM) {
-        _voPut(vkey, buf);
-        // [RC-PERSIST v8.23.0] حفظ البايتات على القرص ⇒ تبقى بعد إعادة التشغيل
-        try { storeSaveMedia(userId || "", jid, key.id, buf); } catch { }
-      }
-    } finally { _voInflight.delete(vkey); }
-  } catch { }
+    const { content, viewOnce } = unwrapMessage(message);
+    const kind = classifyContent(content);
+    const media = content.imageMessage || content.videoMessage || content.ptvMessage || content.audioMessage || content.documentMessage || content.stickerMessage || null;
+    const topKeys = Object.keys(message || {}).filter((k) => k !== "messageContextInfo");
+    return {
+      viewOnce,
+      kind,
+      topKeys,
+      hasMedia: Boolean(media),
+      hasUrl: Boolean(media?.url),
+      urlHost: (() => { try { return new URL(media?.url).host; } catch { return null; } })(),
+      mediaKeyBytes: media?.mediaKey?.length || 0,
+      hasSha: Boolean(media?.fileEncSha256 || media?.fileSha256),
+      fileLength: media?.fileLength ? Number(media.fileLength) : null,
+      mimetype: media?.mimetype || null,
+    };
+  } catch { return { viewOnce: false, kind: null, topKeys: [], hasMedia: false }; }
 }
+
+/**
+ * [VO-PROBE v8.23.1] ينزّل وسائط «عرض مرة واحدة» بكل الطرق الممكنة ويسجّل أيّها نجح.
+ * لا يفشل بصمت أبداً: كل محاولة لها سطر لوج.
+ */
+async function _prefetchViewOnce({ sock, baileys, userId, jid, key, message }) {
+  const info = describeMessage(message);
+  if (!info.viewOnce) return false;
+  const logger = _deps.logger;
+  const vkey = _voKey(jid, key.id);
+  const { content } = unwrapMessage(message);
+  const found = _voMediaOf(message);
+
+  try {
+    logger?.info?.({
+      jid,
+      id: key.id,
+      fromMe: Boolean(key?.fromMe),
+      kind: found?.kind || info.kind,
+      topKeys: info.topKeys,
+      urlHost: info.urlHost,
+      mediaKeyBytes: info.mediaKeyBytes,
+      fileLength: info.fileLength,
+      mimetype: info.mimetype,
+    }, "[VO-PROBE] وردت رسالة عرض-مرة");
+  } catch { }
+
+  if (!found) {
+    try { logger?.warn?.({ jid, id: key.id, topKeys: info.topKeys }, "[VO-PROBE] عرض-مرة بلا محتوى وسائط معروف — لن يُحفظ"); } catch { }
+    return false;
+  }
+  if (_voStore.has(vkey) || _voInflight.has(vkey)) return true;
+  _voInflight.add(vkey);
+
+  try {
+    const dm = await resolveDownloader(baileys);
+    if (!dm) {
+      try { logger?.warn?.("[VO-PROBE] دالة التنزيل غير متاحة إطلاقاً"); } catch { }
+      return false;
+    }
+    const ctx = { logger: _deps.logger, reuploadRequest: (m) => sock.updateMediaMessage?.(m) };
+    const baseKey = { remoteJid: jid, fromMe: Boolean(key?.fromMe), id: key.id };
+    const keyWithParticipant = key?.participant ? { ...baseKey, participant: key.participant } : null;
+
+    // كل الطرق الممكنة — الأولى عادةً الفائزة
+    const attempts = [
+      ["المحتوى الداخلي", () => dm({ key: baseKey, message: content }, "buffer", {}, ctx)],
+      ["الغلاف الكامل", () => dm({ key: baseKey, message }, "buffer", {}, ctx)],
+      keyWithParticipant ? ["محتوى + مشارك", () => dm({ key: keyWithParticipant, message: content }, "buffer", {}, ctx)] : null,
+      ["محتوى + مشارك + غلاف", keyWithParticipant ? () => dm({ key: keyWithParticipant, message }, "buffer", {}, ctx) : null],
+      ["محتوى بلا fromMe", () => dm({ key: { ...baseKey, fromMe: false }, message: content }, "buffer", {}, ctx)],
+      ["بعد تحديث مفتاح الوسائط", async () => {
+        try { await sock.updateMediaMessage?.({ key: baseKey, message: content }); } catch { }
+        return dm({ key: baseKey, message: content }, "buffer", {}, ctx);
+      }],
+      ["محتوى بغلاف من صنعنا", () => {
+        const kind = found.kind;
+        const wrapperKey = { imageMessage: "imageMessage", videoMessage: "videoMessage", audioMessage: "audioMessage", documentMessage: "documentMessage", stickerMessage: "stickerMessage", ptvMessage: "ptvMessage" }[kind] || "imageMessage";
+        return dm({ key: baseKey, message: { [wrapperKey]: found.media } }, "buffer", {}, ctx);
+      }],
+    ].filter(Boolean);
+
+    for (const [name, run] of attempts) {
+      try {
+        const buf = await run();
+        if (buf?.length > 200) {
+          if (buf.length <= VO_MAX_ITEM) {
+            _voPut(vkey, buf);
+            try { storeSaveMedia(userId || "", jid, key.id, buf); } catch { }
+          }
+          try { logger?.info?.({ jid, id: key.id, method: name, bytes: buf.length }, "[VO-PROBE] ✅ نجح تنزيل العرض-مرة — هذه هي الطريقة العاملة"); } catch { }
+          _lastVoMethod = name;
+          return true;
+        }
+        try { logger?.warn?.({ jid, id: key.id, method: name, bytes: buf?.length || 0 }, "[VO-PROBE] نتيجة فارغة"); } catch { }
+      } catch (error) {
+        try { logger?.warn?.({ jid, id: key.id, method: name, error: String(error?.message || error).slice(0, 140) }, "[VO-PROBE] فشلت طريقة"); } catch { }
+      }
+    }
+
+    // احتياط أخير: الطريقة القديمة (روابط بديلة + fetch مباشر)
+    const legacy = await downloadWithFallbacks(sock, baileys, { key: baseKey, message, sourceJid: jid }, found.media);
+    if (legacy?.length > 200) {
+      if (legacy.length <= VO_MAX_ITEM) {
+        _voPut(vkey, legacy);
+        try { storeSaveMedia(userId || "", jid, key.id, legacy); } catch { }
+      }
+      try { logger?.info?.({ jid, id: key.id, bytes: legacy.length }, "[VO-PROBE] ✅ نجحت الطريقة الاحتياطية (fallbacks)"); } catch { }
+      _lastVoMethod = "fallback";
+      return true;
+    }
+
+    try {
+      logger?.warn?.({ jid, id: key.id, urlHost: info.urlHost, mediaKeyBytes: info.mediaKeyBytes, hasSha: info.hasSha, fromMe: Boolean(key?.fromMe) }, "[VO-PROBE] ❌ كل الطرق فشلت — الرابط ميت أو الوسائط لم تُرسل لهذا الجهاز");
+    } catch { }
+    return false;
+  } finally { _voInflight.delete(vkey); }
+}
+
+/** آخر طريقة ناجحة (للتشخيص). */
+let _lastVoMethod = null;
+export function lastViewOnceMethod() { return _lastVoMethod; }
 
 /** يعيد آخر التفاعلات المرصودة (الأحدث أولاً) — للتشخيص من اللوحة. */
 export function getRecentReactions(limit = 5) {
@@ -304,9 +409,10 @@ function dedupOnce(key) {
  * تنزيل وسائط رسالة بأعلى نسبة نجاح — نفس أسلوب /حالة:
  * محاولات متعددة على JIDs محتملة + updateMediaMessage + رابط مباشر كاحتياط.
  */
-export async function downloadWithFallbacks(sock, baileys, original, mediaObj) {
-  // [MEDIA-DL v8.21.4] مصدر الدالة يختلف بين إصدارات/حزم Baileys (top-level أو default)
-  // ⇒ نجرّب كل المصادر + أي دالة يحقنها المشروع. بدون هذا تفشل الوسائط بصمت.
+/**
+ * [VO-PROBE v8.23.1] يحلّ دالة تنزيل الوسائط من أي مصدر متاح في هذا الإصدار.
+ */
+export async function resolveDownloader(baileys) {
   let downloadMediaMessage =
     (typeof baileys?.downloadMediaMessage === "function" && baileys.downloadMediaMessage) ||
     (typeof baileys?.default?.downloadMediaMessage === "function" && baileys.default.downloadMediaMessage) ||
@@ -319,6 +425,16 @@ export async function downloadWithFallbacks(sock, baileys, original, mediaObj) {
       if (typeof fn === "function") downloadMediaMessage = fn;
     } catch { }
   }
+  if (!downloadMediaMessage) {
+    try { downloadMediaMessage = (await import("baileys")).downloadMediaMessage; } catch { }
+  }
+  return typeof downloadMediaMessage === "function" ? downloadMediaMessage : null;
+}
+
+export async function downloadWithFallbacks(sock, baileys, original, mediaObj) {
+  // [MEDIA-DL v8.21.4] مصدر الدالة يختلف بين إصدارات/حزم Baileys (top-level أو default)
+  // ⇒ نجرّب كل المصادر + أي دالة يحقنها المشروع. بدون هذا تفشل الوسائط بصمت.
+  let downloadMediaMessage = await resolveDownloader(baileys);
   if (typeof downloadMediaMessage !== "function") {
     try { _deps.logger?.warn?.("[REACT-COPY] downloadMediaMessage غير متاح — تعذّر تنزيل الوسائط"); } catch { }
     return null;
@@ -375,6 +491,35 @@ export async function downloadWithFallbacks(sock, baileys, original, mediaObj) {
         if (buf.length > 200) return buf;
       }
     } catch { }
+  }
+  return null;
+}
+
+/**
+ * [VO-PROBE v8.23.1] تنزيل فوري لوسائط عرض-مرة عند لحظة النسخ (بعد فشل الحفظ المسبق).
+ * يجرّب المحتوى الداخلي ثم الغلاف، مع ctx كامل (reuploadRequest) لأنه شرط مسار إعادة الرفع.
+ */
+async function _dlViewOnceNow({ sock, baileys, original, content, mediaObj, logger }) {
+  const dm = await resolveDownloader(baileys);
+  if (!dm) return null;
+  const baseKey = original?.key || {};
+  const ctx = { logger: _deps.logger, reuploadRequest: (m) => sock.updateMediaMessage?.(m) };
+  const keys = [
+    { remoteJid: baseKey.remoteJid, fromMe: Boolean(baseKey.fromMe), id: baseKey.id, ...(baseKey.participant ? { participant: baseKey.participant } : {}) },
+    { remoteJid: original?.sourceJid || baseKey.remoteJid, fromMe: Boolean(baseKey.fromMe), id: baseKey.id },
+  ];
+  for (const key of keys) {
+    for (const message of [content, original?.message]) {
+      try {
+        const b = await dm({ key, message }, "buffer", {}, ctx);
+        if (b?.length > 200) {
+          try { logger?.info?.({ bytes: b.length }, "[VO-PROBE] نُزّلت وسائط العرض-مرة لحظة النسخ"); } catch { }
+          return b;
+        }
+      } catch (error) {
+        try { logger?.warn?.({ error: String(error?.message || error).slice(0, 120) }, "[VO-PROBE] محاولة تنزيل فورية فشلت"); } catch { }
+      }
+    }
   }
   return null;
 }
@@ -475,7 +620,13 @@ export async function copyMessageToTarget({ sock, baileys, destination, original
 
     // [VO-PREFETCH v8.22.2] إن كانت البايتات محفوظة مسبقاً (عرض مرة واحدة) نستخدمها مباشرة
     const cachedBuf = original?.buffer?.length ? original.buffer : null;
-    const buf = cachedBuf || await downloadWithFallbacks(sock, baileys, original, mediaObj);
+    let buf = cachedBuf;
+    if (!buf) {
+      // [VO-PROBE v8.23.1] لو كانت «عرض مرة واحدة» نجرّب المحتوى الداخلي أولاً (أعلى نسبة نجاح)،
+      // ثم نرجع للتدرّج الكامل. السابق كان يمرّر الغلاف فقط ⇒ فشل صامت حين يكون الرابط سليماً.
+      if (wasViewOnce) buf = await _dlViewOnceNow({ sock, baileys, original, content, mediaObj, logger });
+      if (!buf) buf = await downloadWithFallbacks(sock, baileys, original, mediaObj);
+    }
     if (!buf) return { ok: false, kind, reason: "download-failed" };
 
     const asViewOnce = Boolean(preferViewOnce && wasViewOnce);
@@ -643,13 +794,21 @@ export function attachReactCopy({ userId, sock, logger, baileys }) {
         const isSource = !cfg.from || cfg.from === jid;
         if (isSource) {
           cachePut(userId, jid, msg.key, msg.message, msg.pushName);
-          // [VO-PREFETCH v8.22.2] وسائط «عرض مرة واحدة» تُنزَّل الآن (قبل أن يموت رابطها)
-          void _prefetchViewOnce({ sock, baileys, userId, jid, key: msg.key, message: msg.message });
         } else {
           // [RC-PERSIST v8.23.0] مجموعة أخرى: نحفظها على القرص فقط (رخيص) حتى لا تفقدها
           // لو غيّرت مجموعة المصدر لاحقاً — كانت تُهمَل تماماً وسبب «الأصل غير متوفر».
           try { storeSaveMessage(userId, jid, msg.key, msg.message); } catch { }
         }
+        // [VO-PROBE v8.23.1] التنزيل المسبق لوسائط «عرض مرة واحدة» يجري في **كل** المجموعات
+        // (كان للمصدر فقط ⇒ لو وصلت في مجموعة أخرى لا تُحفظ أبداً). ولا يفشل بصمت: له لوج.
+        void _prefetchViewOnce({ sock, baileys, userId, jid, key: msg.key, message: msg.message });
+        // سطر واحد لكل رسالة وسائط — حتى نعرف من اللوق هل وصلت الرسالة أصلاً
+        try {
+          const d = describeMessage(msg.message);
+          if (d.viewOnce || d.hasMedia) {
+            _deps.logger?.info?.({ jid, id: msg.key.id, fromMe: Boolean(msg.key.fromMe), kind: d.kind, viewOnce: d.viewOnce }, "[RC-MSG] رسالة وسائط وردت");
+          }
+        } catch { }
       }
     })().catch((error) => {
       try { logger?.warn?.(`[REACT-COPY] ${String(error?.message || error).slice(0, 160)}`); } catch { }
