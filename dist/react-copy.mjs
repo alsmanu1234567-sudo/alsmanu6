@@ -23,9 +23,11 @@ import {
   _resetStoreCache,
 } from "./lib/react-copy-store.mjs";
 
-const CACHE_MAX_PER_GROUP = 300;
+// [MEM v8.26.1] خُفِّض من 300 إلى 120 رسالة/مجموعة: المخزن الدائم على القرص يغطي الباقي
+// (كان الكاش الرمادي يستهلك ذاكرة ملحوظة في المجموعات النشطة على حد 589MB).
+const CACHE_MAX_PER_GROUP = 120;
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const MAX_GROUPS = 60;
+const MAX_GROUPS = 20;
 const DEDUP_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_EMOJI = "📌";
 

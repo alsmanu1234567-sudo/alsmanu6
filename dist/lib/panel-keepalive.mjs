@@ -21,7 +21,7 @@ const _here = dirname(fileURLToPath(import.meta.url));
 export const KEEPALIVE_DEFAULTS = {
   intervalMs: 3 * 60 * 1000,      // كل 3 دقائق (الخمول 20 دقيقة ⇒ هامش كبير)
   probeTimeoutMs: 1500,
-  portsToSkip: new Set([22, 80, 443]),
+  portsToSkip: new Set([22, 80, 443, Number(process.env.PORT) || 5000]), // منفذ البوت نفسه ليس لوحة
 };
 
 function resolveDataDir() {
@@ -97,9 +97,9 @@ export async function detectPanelPort({ fetchImpl = fetch, token = "", ports, ti
   let authOnly = null;
   for (const port of candidates) {
     const r = await probe(fetchImpl, `http://127.0.0.1:${port}/api/overview`, { token, timeoutMs });
-    // 401 = خدمة محمية برأس x-control-token ⇒ هذه هي اللوحة (حتى لو لم نملك التوكن).
+    // 401/403 = خدمة محمية برأس x-control-token ⇒ هذه هي اللوحة (حتى لو لم نملك التوكن).
     // الطلب نفسه يُصفّر عدّاد الخمول، لذلك نكتفي به.
-    if (r.status === 401 && !authOnly) {
+    if ((r.status === 401 || r.status === 403) && !authOnly) {
       authOnly = { port, base: null, version: null, authRequired: true };
       continue;
     }
@@ -151,6 +151,24 @@ async function tick({ logger, fetchImpl }) {
   state.pings++;
   state.lastPingAt = Date.now();
 
+  // [v8.26.1] إن كان الرابط العام محفوظاً فهو الطريق الأفضل: طلب واحد يُصفّر عدّاد
+  // خمول اللوحة ويُبقي نفق Cloudflare دافئاً — بلا حاجة لاكتشاف منفذ ولا توكن.
+  if (state.publicUrl) {
+    const pub = await probe(fetchImpl, state.publicUrl, { token: state.token, timeoutMs: 8000 });
+    state.lastStatus = pub.status || 0;
+    if (pub.ok || pub.status === 401 || pub.status === 403) {
+      state.lastOkAt = Date.now();
+      state.lastError = null;
+      if (!state.quiet || state.pings % 20 === 1) {
+        try { logger?.info?.({ url: state.publicUrl, status: pub.status, pings: state.pings }, "[PANEL-KEEPALIVE] نبضة عبر الرابط العام — اللوحة حيّة"); } catch { }
+      }
+      return;
+    }
+    state.failures++;
+    state.lastError = pub.error || `HTTP ${pub.status}`;
+    try { logger?.warn?.({ url: state.publicUrl, status: pub.status, error: pub.error }, "[PANEL-KEEPALIVE] الرابط العام لم يستجب — سأحاول محلياً"); } catch { }
+  }
+
   // 1) اكتشف المنفذ إن لم نعرفه أو إن توقّف
   if (!state.port) {
     const found = await detectPanelPort({ fetchImpl, token: state.token, ports: state.ports });
@@ -160,9 +178,9 @@ async function tick({ logger, fetchImpl }) {
       try { logger?.info?.({ port: found.port, version: found.version, authRequired: Boolean(found.authRequired) }, found.authRequired ? "[PANEL-KEEPALIVE] اكتُشف منفذ اللوحة (محمي بتوكن — النبضة تُرسل بلا توكن وتكفي لإبقائها حيّة)" : "[PANEL-KEEPALIVE] اكتُشف منفذ اللوحة تلقائياً"); } catch { }
     } else {
       try {
-        logger?.warn?.(state.token
-          ? "[PANEL-KEEPALIVE] لم أجد اللوحة على منافذ محلية — تأكد أنها تعمل"
-          : "[PANEL-KEEPALIVE] لم أجد اللوحة: غالباً تحتاج التوكن. ضع url و token في bot-data/panel-keepalive.json");
+        logger?.warn?.(state.publicUrl
+          ? "[PANEL-KEEPALIVE] تعذّر الوصول للرابط العام ولم أجد اللوحة محلياً — تأكد أن لوحة السيرفر تعمل"
+          : "[PANEL-KEEPALIVE] لم أجد اللوحة محلياً: ضع رابطها العام في bot-data/panel-keepalive.json (حقل url) — الطلب عبر الرابط يكفي ولا يحتاج توكن");
       } catch { }
     }
   }
@@ -225,7 +243,14 @@ export function startPanelKeepalive(options = {}) {
   state.timer = setInterval(() => { void tick({ logger, fetchImpl }).catch(() => { }); }, state.intervalMs);
   if (typeof state.timer.unref === "function") state.timer.unref();
 
-  try { logger?.info?.({ intervalMinutes: Math.round(state.intervalMs / 60000), publicUrl: state.publicUrl }, "[PANEL-KEEPALIVE] الحرس بدأ — اللوحة لن تتوقف بسبب الخمول"); } catch { }
+  try {
+    logger?.info?.(
+      { intervalMinutes: Math.round(state.intervalMs / 60000), mode: state.publicUrl ? "public-url" : "local-port" },
+      state.publicUrl
+        ? "[PANEL-KEEPALIVE] الحرس بدأ عبر الرابط العام — اللوحة لن تتوقف بسبب الخمول"
+        : "[PANEL-KEEPALIVE] الحرس بدأ (اكتشاف محلي) — لضمان أفضل ضع url في bot-data/panel-keepalive.json",
+    );
+  } catch { }
   return keepaliveStats();
 }
 

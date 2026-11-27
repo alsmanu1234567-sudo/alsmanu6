@@ -77,15 +77,34 @@ test("الحرس يرسل نبضة دورية فعلية ويكرّرها على
   assert.ok(stats.lastOkAt > 0);
 });
 
-test("يطرق الرابط العام أيضاً إن حُدِّد (كي لا يعتبره Cloudflare خامداً)", async () => {
+test("الرابط العام ناجح ⇒ لا نلمس المنافذ المحلية (v8.26.1)", async () => {
   mod._resetKeepalive();
   const hits = [];
-  const fetchImpl = async (url) => { hits.push(url); return { ok: true, status: 401, json: async () => ({}) }; };
+  const fetchImpl = async (url) => { hits.push(url); return { ok: true, status: 200, json: async () => ({}) }; };
   mod.startPanelKeepalive({ fetchImpl, publicUrl: "https://panel.example.com/", intervalMs: 50, token: "tok" });
-  await new Promise((r) => setTimeout(r, 120));
+  await new Promise((r) => setTimeout(r, 130));
   mod.stopPanelKeepalive();
   assert.ok(hits.some((u) => u.startsWith("https://panel.example.com/")), "طرق الرابط العام");
-  assert.ok(hits.filter((u) => u.includes("127.0.0.1")).length >= 1, "مع الاستمرار في طرق اللوحة محلياً");
+  assert.equal(hits.filter((u) => u.includes("127.0.0.1")).length, 0, "لا طرق محلي عند نجاح الرابط");
+});
+
+test("الرابط العام فاشل ⇒ يرجع للمحلي (شبكة/نفق ميت)", async () => {
+  mod._resetKeepalive();
+  fakeProc({ ports: [7777] });
+  const hits = [];
+  const fetchImpl = async (url) => {
+    hits.push(url);
+    if (url.includes("panel.example.com")) throw new Error("ECONNREFUSED");
+    if (url.endsWith("/api/overview")) {
+      return { ok: true, status: 200, json: async () => ({ base: "/b", version: "8.26.1", cwd: "/c", roots: {} }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  mod.startPanelKeepalive({ fetchImpl, publicUrl: "https://panel.example.com", intervalMs: 40, ports: [7777] });
+  await new Promise((r) => setTimeout(r, 140));
+  mod.stopPanelKeepalive();
+  assert.ok(hits.some((u) => u.startsWith("https://panel.example.com")), "جرّب الرابط");
+  assert.ok(hits.some((u) => u.includes(":7777/")), "ثم رجع للمنفذ المحلي");
 });
 
 test("ملف الإعدادات يُنشأ مرة واحدة ويُقرأ", () => {
@@ -101,6 +120,28 @@ test("ملف الإعدادات يُنشأ مرة واحدة ويُقرأ", () =
 test("الفاصل الافتراضي 3 دقائق — أقل بكثير من 20 دقيقة خمول", () => {
   assert.equal(mod.KEEPALIVE_DEFAULTS.intervalMs, 180000);
   assert.ok(mod.KEEPALIVE_DEFAULTS.intervalMs < 20 * 60 * 1000 / 3);
+});
+
+test("403 يُعتبر لوحة أيضاً", async () => {
+  const fetchImpl = async () => ({ ok: false, status: 403, json: async () => ({}) });
+  const found = await mod.detectPanelPort({ fetchImpl, ports: [9003] });
+  assert.equal(found?.port, 9003);
+});
+
+test("الرابط العام يُطرق أولاً بلا حاجة لاكتشاف منفذ ولا توكن", async () => {
+  mod._resetKeepalive();
+  const hits = [];
+  const fetchImpl = async (url) => {
+    hits.push(url);
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  mod.startPanelKeepalive({ fetchImpl, publicUrl: "https://panel.example.com", intervalMs: 40 });
+  await new Promise((r) => setTimeout(r, 120));
+  mod.stopPanelKeepalive();
+  assert.ok(hits.length >= 2, "نبضات متعددة");
+  assert.ok(hits.every((u) => u === "https://panel.example.com"), "لا يلمس منافذ محلية إطلاقاً");
+  const st = mod.keepaliveStats();
+  assert.ok(st.lastOkAt > 0);
 });
 
 test("لوحة محمية بتوكن (401) تُكتشف أيضاً — الطلب وحده يُبقيها حيّة", async () => {
