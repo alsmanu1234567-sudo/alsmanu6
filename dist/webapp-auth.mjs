@@ -74,3 +74,35 @@ export function webappLocalUrlFor(uid, port) {
   const p = port || process.env.PORT || 3000;
   return `http://localhost:${p}/webapp?token=${tokenForUser(uid)}`;
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// [WEBAPP-OPEN v8.27.0] فتح الويب آب بلا أي شرط
+// عندما يُفتح /webapp مباشرة (بلا توكن) نستخدم حساب المالك بدل رفض الطلب.
+// لإيقاف هذا السلوك: WEBAPP_OPEN=false في البيئة أو {"open":false} في data/webapp-open.json
+// ═══════════════════════════════════════════════════════════════════
+export function ownerUid() {
+  return String(process.env.DEVELOPER_ID || process.env.OWNER_ID || "7428421245");
+}
+
+export function webappOpenWithoutToken() {
+  if (String(process.env.WEBAPP_OPEN).toLowerCase() === "false") return false;
+  try {
+    const file = join(DATA_DIR, "webapp-open.json");
+    if (existsSync(file)) {
+      const cfg = JSON.parse(readFileSync(file, "utf8"));
+      if (cfg && cfg.open === false) return false;
+    }
+  } catch { }
+  return true;
+}
+
+/** المستخدم المقصود من الطلب: التوكن أولاً، ثم المالك عند الفتح الحر. */
+export function resolveUid(req) {
+  const token =
+    req?.query?.token ||
+    req?.headers?.["x-webapp-token"] ||
+    (req?.headers?.authorization || "").replace(/^Bearer\s+/i, "");
+  const uid = userForToken(token);
+  if (uid) return String(uid);
+  return webappOpenWithoutToken() ? ownerUid() : null;
+}

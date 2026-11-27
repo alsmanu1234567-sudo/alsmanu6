@@ -9,7 +9,7 @@ import { createZip, readZip } from "../services/zip-lite.mjs";
 // تعمل داخل نفس خادم البوت — لا تحتاج أي شيء خارجي
 // كل مستخدم يرى بياناته فقط عبر token خاص به
 // ═══════════════════════════════════════════════════════════════════
-import { userForToken } from "./webapp-auth.mjs";
+import { userForToken, resolveUid, webappOpenWithoutToken, ownerUid } from "./webapp-auth.mjs";
 import {
   webGetOverview,
   webToggleGroupPin,
@@ -54,11 +54,9 @@ import { registerGroupWorldWebApp } from "./group-world-web.mjs";
 
 // ─── مصادقة ────────────────────────────────────────────────────────
 function authUid(req) {
-  const token =
-    req.query?.token ||
-    req.headers["x-webapp-token"] ||
-    (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-  return userForToken(token);
+  // [WEBAPP-OPEN v8.27.0] التوكن إن وُجد، وإلا حساب المالك ⇒ الويب آب يفتح بلا أي شرط.
+  const uid = resolveUid(req);
+  return uid || null;
 }
 
 function guard(handler) {
