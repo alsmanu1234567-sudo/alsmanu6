@@ -138,8 +138,14 @@ test("sendAudioSticker: يرفع الاثنين ثم relayMessage ويعيد mes
     },
   };
   const uploaded = [];
+  const { readFileSync } = await import("node:fs");
   const prepareWAMessageMedia = async (payload, opts) => {
-    uploaded.push({ payload: Object.keys(payload)[0], hasUpload: typeof opts.upload === "function" });
+    const kind = Object.keys(payload)[0];
+    const url = payload[kind]?.url;
+    // [v8.27.1] يجب أن يكون مسار ملف نصّي موجود فعلاً (لا Buffer)
+    if (typeof url !== "string") throw new Error(`url ليست مساراً نصياً: ${typeof url}`);
+    const content = readFileSync(url);
+    uploaded.push({ payload: kind, hasUpload: typeof opts.upload === "function", path: url, bytes: content.length });
     if (payload.sticker) return { stickerMessage: { fileSha256: Buffer.from("sha-x"), url: "u1" } };
     return { audioMessage: { url: "u2" } };
   };
@@ -156,6 +162,9 @@ test("sendAudioSticker: يرفع الاثنين ثم relayMessage ويعيد mes
   assert.match(res.messageId, /^3EB0[0-9A-F]+$/);
   assert.equal(uploaded.length, 2);
   assert.deepEqual(uploaded.map((u) => u.payload), ["sticker", "audio"]);
+  assert.ok(uploaded[0].path.endsWith(".webp"), "مسار ملصق .webp");
+  assert.ok(uploaded[1].path.endsWith(".ogg"), "مسار صوت .ogg");
+  assert.equal(uploaded[0].bytes, Buffer.from("webp").length, "الملف المؤقت يحمل بايتات الملصق");
   assert.equal(relayed.length, 1);
   assert.equal(relayed[0].jid, "123@g.us");
   assert.ok(relayed[0].message.stickerMessage, "يُرسل الملصق (والاعتراض يضيف الصوت)");

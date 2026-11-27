@@ -207,13 +207,34 @@ export function _resetAudioSticker() {
 
 // ───────────────────────── تحويل الوسائط ─────────────────────────
 
+let _ffmpegCache = null;
 function ffmpegPath() {
-  if (process.env.FFMPEG_PATH && existsSync(process.env.FFMPEG_PATH)) return process.env.FFMPEG_PATH;
+  if (_ffmpegCache) return _ffmpegCache;
+  if (process.env.FFMPEG_PATH && existsSync(process.env.FFMPEG_PATH)) return (_ffmpegCache = process.env.FFMPEG_PATH);
+  // [v8.27.1] ffmpeg-static موجود في dependencies ⇒ نستخدمه بدل الاعتماد على PATH
+  for (const rel of ["node_modules/ffmpeg-static/ffmpeg", "../node_modules/ffmpeg-static/ffmpeg", "../../node_modules/ffmpeg-static/ffmpeg"]) {
+    try {
+      const p = join(_here, "..", rel);
+      if (existsSync(p)) return (_ffmpegCache = p);
+    } catch { }
+  }
   try {
-    const p = join(_here, "..", "..", "node_modules", "ffmpeg-static", "ffmpeg");
-    if (existsSync(p)) return p;
+    const p = join(process.cwd(), "node_modules", "ffmpeg-static", "ffmpeg");
+    if (existsSync(p)) return (_ffmpegCache = p);
   } catch { }
-  return "ffmpeg";
+  return (_ffmpegCache = "ffmpeg");
+}
+
+/** مدة الملف من مخرجات ffmpeg -i (بلا ffprobe — ffmpeg-static لا يضمّه). */
+async function durationFromFfmpeg(path, runner = execFileAsync) {
+  try {
+    const out = await runner(ffmpegPath(), ["-hide_banner", "-i", path], { timeout: 15000 }).catch((e) => e);
+    const text = String(out?.stderr || out?.message || "");
+    const m = text.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+    if (!m) return null;
+    const secs = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+    return Number.isFinite(secs) ? secs : null;
+  } catch { return null; }
 }
 
 async function withTempDir(fn) {
@@ -241,18 +262,10 @@ export async function convertAudioToOpus(input, { seconds = AUDIO_STICKER_LIMITS
     ], { timeout: 30000 });
     const out = await readFile(outPath);
     if (!out.length) throw new Error("فشل تحويل الصوت إلى Opus");
-    return { buffer: out, seconds: Math.min(seconds, await probeDurationSeconds(inPath, runner)) };
+    const real = await durationFromFfmpeg(outPath, runner);
+    const finalSeconds = Math.max(0.5, Math.min(seconds, real ?? seconds));
+    return { buffer: out, seconds: finalSeconds };
   });
-}
-
-async function probeDurationSeconds(path, runner = execFileAsync) {
-  try {
-    const { stdout } = await runner(ffmpegPath().replace(/ffmpeg$/, "ffprobe"), [
-      "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path,
-    ], { timeout: 15000 });
-    const n = Number(String(stdout).trim());
-    return Number.isFinite(n) ? Math.max(0.5, Math.min(n, AUDIO_STICKER_LIMITS.maxAudioSeconds)) : 1;
-  } catch { return 1; }
 }
 
 /** صورة/ملصق → WebP 512×512. */
@@ -315,14 +328,24 @@ export async function sendAudioSticker({ sock, jid, stickerBuffer, audioBuffer, 
 
   installEncodeHook(proto);
 
-  const stickerMedia = await prepareWAMessageMedia(
-    { sticker: { url: webp.buffer } },
-    { upload: sock.waUploadToServer },
-  );
-  const audioMedia = await prepareWAMessageMedia(
-    { audio: { url: audio.buffer }, mimetype: "audio/ogg; codecs=opus", ptt: false },
-    { upload: sock.waUploadToServer },
-  );
+  // [AUDIO-STICKER v8.27.1] خطأ حقيقي كان يمنع الإرسال:
+  // prepareWAMessageMedia يتوقع **مسار ملف** في `url` وليس Buffer
+  // (كان يرمي: "The argument 'path' must be a string … Received <Buffer 52 49 46 46>" = RIFF/WebP).
+  const { stickerMedia, audioMedia } = await withTempDir(async (dir) => {
+    const stickerPath = join(dir, "sticker.webp");
+    const audioPath = join(dir, "audio.ogg");
+    await writeFile(stickerPath, webp.buffer);
+    await writeFile(audioPath, audio.buffer);
+    const stickerMedia = await prepareWAMessageMedia(
+      { sticker: { url: stickerPath } },
+      { upload: sock.waUploadToServer },
+    );
+    const audioMedia = await prepareWAMessageMedia(
+      { audio: { url: audioPath }, mimetype: "audio/ogg; codecs=opus", ptt: false },
+      { upload: sock.waUploadToServer },
+    );
+    return { stickerMedia, audioMedia };
+  });
 
   const stickerMessage = stickerMedia.stickerMessage;
   stickerMessage.width = AUDIO_STICKER_LIMITS.stickerSize;
