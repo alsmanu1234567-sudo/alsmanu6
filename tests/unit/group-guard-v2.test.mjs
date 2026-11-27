@@ -97,7 +97,7 @@ test('اللوحة تعرض المفتاحين الجديدين وتسمح بح�
   const ui = readFileSync(new URL('../../public/groups-guard-web.js', import.meta.url), 'utf8');
   assert.match(ui, /toggleRow\("imageGuard", "منع الصور"/);
   assert.match(ui, /toggleRow\("audioGuard", "منع الصوت"/);
-  assert.match(webapp, /"imageGuard", "audioGuard"/);
+  assert.match(webapp, /"imageGuard", "cardImages", "audioGuard"/);
 });
 
 test('الترحيب يُرسل مرة واحدة بعد 10 ثوانٍ ويُمدَّد 5 ثوانٍ مع كل موجة', () => {
@@ -218,7 +218,7 @@ test('اللوحة تعرض المفتاحين الجديدين وتسمح بح�
   const ui = readFileSync(new URL('../../public/groups-guard-web.js', import.meta.url), 'utf8');
   assert.match(ui, /toggleRow\("imageGuard", "منع الصور"/);
   assert.match(ui, /toggleRow\("audioGuard", "منع الصوت"/);
-  assert.match(webapp, /"imageGuard", "audioGuard"/);
+  assert.match(webapp, /"imageGuard", "cardImages", "audioGuard"/);
 });
 
 test('الترحيب يُرسل مرة واحدة بعد 10 ثوانٍ ويُمدَّد 5 ثوانٍ مع كل موجة', () => {
@@ -280,7 +280,7 @@ test('سجل المطرودين يُسجّل السبب والعدد ويقبل 
   assert.match(guard, /export function listKicked/);
   assert.match(guard, /export function recordKicked/);
   assert.match(guard, /export function removeKicked/);
-  assert.match(guard, /recordKicked\(userId, groupJid, \{ jid: targetJid \|\| memberJid, reason: reasonText, count, name: memberName \}\)/);
+  assert.match(guard, /recordKicked\(userId, groupJid, \{ jid: kickedResult.jid \|\| memberJid, reason: reasonText, count, name: memberName \}\)/);
 });
 
 test('مخالفات العضو تبقى محفوظة عند خروجه وعودته ويُنبَّه بدل الترحيب', () => {

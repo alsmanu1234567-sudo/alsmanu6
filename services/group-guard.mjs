@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { sendInteractive, listButton, extractInteractiveResponseId } from "./interactive.js";
 import { effectiveGuardWords, normalizePresetKeys } from "./wordlist-presets.mjs";
+import { removeParticipant, kickErrorText } from "../dist/lib/wa-kick.mjs";
 
 // [ROBUST-PATHS] لا نعتمد على process.cwd() وحده: تشغيل البوت قد يكون من مجلد مختلف عن مجلد الكود
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -57,6 +58,8 @@ const DEFAULTS = {
   wordPresets: [],
   stickerGuard: false,
   imageGuard: false,
+  // [CARD-IMAGES v8.28.0] تنبيهات التحذير/الطرد بصورة أو نص فقط
+  cardImages: true,
   audioGuard: false,
   // [BUTTON-GUARD v8.20.0] منع الأزرار وأزرار القوائم (رسائل تفاعلية/قوائم) — مطفأ افتراضياً
   buttonGuard: false,
@@ -340,7 +343,7 @@ function fileFor(userId) {
 // نصدّر إعدادات المجموعات فقط: الأعلام والنصوص والقوائم — لا التحذيرات ولا قوائم الطرد
 // ولا سجلات الأعضاء (تلك معلومات شخصية لا تُرفع).
 const BACKUP_CONFIG_KEYS = [
-  "enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "buttonGuard", "reactionGuard", "reactionEmojis", "reactionKickSec",
+  "enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "cardImages", "audioGuard", "buttonGuard", "reactionGuard", "reactionEmojis", "reactionKickSec",
   "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport",
   "maxWarnings", "stickerWarnEvery", "kickDelaySec", "floodCount", "floodWindowSec",
   "dailyReportHour", "words", "blockedDomains", "allowedDomains",
@@ -476,7 +479,7 @@ export function updateGroupConfig(userId, groupJid, patch = {}) {
       next.whitelist = normalizeJidList(value);
     } else if (key === "blockedDomains" || key === "allowedDomains") {
       next[key] = normalizeDomainList(value);
-    } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "buttonGuard", "reactionGuard", "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport"].includes(key)) {
+    } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "cardImages", "audioGuard", "buttonGuard", "reactionGuard", "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport"].includes(key)) {
       next[key] = Boolean(value);
     } else if (key === "reactionEmojis") {
       const list = (Array.isArray(value) ? value : String(value || "").split(/[,\s]+/))
@@ -813,7 +816,12 @@ export function resolveTarget(message, rest) {
   return "";
 }
 
-async function sendCard(sock, groupJid, file, caption, mentions = []) {
+async function sendCard(sock, groupJid, file, caption, mentions = [], options = {}) {
+  // [CARD-IMAGES v8.28.0] options.images === false ⇒ تنبيه نصي بلا صورة
+  if (options && options.images === false) {
+    return sock.sendMessage(groupJid, { text: caption }, mentions.length ? { mentions } : undefined)
+      .catch(() => null);
+  }
   const resolved = resolveCardFile(file, file ? path.basename(file) : "");
   const payload = fs.existsSync(resolved)
     ? { image: fs.readFileSync(resolved), caption }
@@ -985,7 +993,7 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
   }
 
   // [WARN-SILENT] التحذيرات الصامتة (صور/صوت) تكتفي برسالة الحذف وتُظهر الكرت عند الإنذار الأخير فقط
-  if (!silent || level === "final") await sendCard(sock, groupJid, cfg.cards[kind], caption, m.mentions);
+  if (!silent || level === "final") await sendCard(sock, groupJid, cfg.cards[kind], caption, m.mentions, { images: cfg.cardImages !== false });
 
   let kicked = false;
   const pendingKey = `${groupJid}:${targetJid}`;
@@ -1002,10 +1010,17 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
       pendingKicks.delete(pendingKey);
       pendingKicks.delete(pendingKeyRaw);
       try {
-        await sock.groupParticipantsUpdate(groupJid, [targetJid || memberJid], "remove");
+        // [WA-KICK v8.28.0] نجرّب LID ثم رقم الهاتف ونتحقق من status — كان الطرد
+        // يفشل بصمت لأصحاب معرّفات LID ويكتب البوت «تم الطرد».
+        const kickedResult = await removeParticipant(sock, groupJid, [memberJid, targetJid]);
+        if (!kickedResult.ok) {
+          await sock.sendMessage(groupJid, { text: `تعذر طرد ${mention}: ${kickErrorText(kickedResult.status)}` }).catch(() => { });
+          noteGuardEvent(userId, groupJid, "kick-failed", { jid: memberJid, name: memberName, reason: reasonText, status: kickedResult.status });
+          return;
+        }
         kicked = true;
-        recordKicked(userId, groupJid, { jid: targetJid || memberJid, reason: reasonText, count, name: memberName });
-        noteGuardEvent(userId, groupJid, "kicked", { jid: targetJid || memberJid, name: memberName, reason: reasonText });
+        recordKicked(userId, groupJid, { jid: kickedResult.jid || memberJid, reason: reasonText, count, name: memberName });
+        noteGuardEvent(userId, groupJid, "kicked", { jid: kickedResult.jid || memberJid, name: memberName, reason: reasonText });
       } catch (error) {
         await sock.sendMessage(groupJid, { text: `تعذر طرد ${mention}: ${String(error?.message || error).slice(0, 120)}` }).catch(() => { });
       }

@@ -108,6 +108,17 @@ async function showMetaAiPanel(bot2, chatId, userId) {
 }
 
 export async function handleAiCallback2(bot2, chatId, userId, data) {
+  // [AI-CARD-TOGGLE v8.28.0] تشغيل/إيقاف صورة بطاقة ردود الذكاء (كانت تُرسل دائماً)
+  if (data === "ai_card_toggle") {
+    const card = await import("../services/ai-card.mjs");
+    const next = !card.getAiCardConfig().enabled;
+    const config = card.setAiCardEnabled(next);
+    await bot2.sendMessage(chatId, next
+      ? "🎴 ✅ تم تشغيل بطاقة الردود — ستُرسل الصورة مع كل رد للذكاء الاصطناعي."
+      : "🎴 ❌ تم إيقاف بطاقة الردود — سيكون الرد نصاً فقط بلا صورة.",
+      { reply_markup: _deps.aiMenuKeyboard(!!_deps.hasNvidiaKey?.(userId), _deps.getUserSelectedModel?.(userId)) });
+    return true;
+  }
   const { getUser, saveUser, setState, cancelKeyboard, aiMenuKeyboard } = _deps;
   const user = getUser(userId);
   if (data === "ai_metaai") { await showMetaAiPanel(bot2, chatId, userId); return true; }

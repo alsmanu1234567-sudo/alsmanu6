@@ -27,7 +27,7 @@ import { sendInteractiveAutoReply, resolveInteractiveAnswer, resolveInteractiveA
 import { setMessageCutoff, advanceMessageCutoff, setMessageProcessingPaused } from "../engine/message-cutoff.mjs";
 import { isGeneratedAutoReply, protectAutoReplySocket, matchesReplyTarget } from '../services/auto-reply-routing.mjs';
 import { attachGroupGuard, exportGuardSettings, importGuardSettings, listGuardUserIds } from '../services/group-guard.mjs';
-import { sendAiReply } from '../services/ai-card.mjs';
+import { sendAiReply, getAiCardConfig, setAiCardEnabled } from '../services/ai-card.mjs';
 // PATCH_MASTER_FIX_APPLIED
 // PATCH_FIXES_V3_APPLIED
 // RUNTIME_BAILEYS_EXTERNAL_PATCH_V3
@@ -124731,6 +124731,8 @@ function aiMenuKeyboard(hasKey, selectedModel) {
       [{ text: "\u{1F9EA} \u0627\u062E\u062A\u0628\u0627\u0631 \u0627\u0644\u0630\u0643\u0627\u0621", callback_data: "ai_test" }, { text: "\u{1F4CA} \u0625\u062D\u0635\u0627\u0626\u064A\u0627\u062A", callback_data: "ai_stats" }],
       [{ text: "\u{1F321}\uFE0F \u062F\u0631\u062C\u0629 \u0627\u0644\u0625\u0628\u062F\u0627\u0639", callback_data: "ai_set_temp" }, { text: "\u{1F4CF} \u0637\u0648\u0644 \u0627\u0644\u0631\u062F", callback_data: "ai_set_maxtok" }],
       [{ text: "\u{1F6AB} \u0643\u0644\u0645\u0627\u062A \u0645\u062D\u0638\u0648\u0631\u0629", callback_data: "ai_set_blacklist" }, { text: "\u{1F9F9} \u0645\u0633\u062D \u0627\u0644\u0630\u0627\u0643\u0631\u0629", callback_data: "ai_clear_memory" }],
+      // [AI-CARD-TOGGLE v8.28.0] زر تشغيل/إيقاف صورة البطاقة مع ردود الذكاء
+      [{ text: (() => { try { return getAiCardConfig().enabled ? "\u{1F3B4} \u0628\u0637\u0627\u0642\u0629 \u0627\u0644\u0631\u062F\u0648\u062F: \u2705 \u0645\u0641\u0639\u0651\u0644\u0629 \u2014 \u0623\u0648\u0642\u0641\u0647\u0627" : "\u{1F3B4} \u0628\u0637\u0627\u0642\u0629 \u0627\u0644\u0631\u062F\u0648\u062F: \u274C \u0645\u0648\u0642\u0648\u0641\u0629 \u2014 \u0634\u063A\u0651\u0644\u0647\u0627"; } catch { return "\u{1F3B4} \u0628\u0637\u0627\u0642\u0629 \u0627\u0644\u0631\u062F\u0648\u062F"; } })(), callback_data: "ai_card_toggle" }],
       backAndHome()
     ]
   };
@@ -125775,16 +125777,16 @@ async function getAiReply(userId, prompt, senderName, incomingText, conversation
       const notForAccount = response.status === 404 && /not found for account/i.test(errDetail);
       if (notForAccount) {
         // النموذج موجود في كتالوج NVIDIA لكن الحساب لم يفعّله بعد.
-        // لا نُرسل هذا الخطأ للمستخدم النهائي في واتساب — فقط نسجّله للمالك.
-        logger.warn({ model, userId }, "NVIDIA model not available for this account — owner must activate it at build.nvidia.com");
-        return null;
+        // [AI-FALLBACK v8.28.0] بدل إرجاع null (كان الرد لا يصل إطلاقاً) نجرّب Meta/المزوّد بلا مفتاح.
+        logger.warn({ model, userId }, "NVIDIA model not available for this account — falling back to Meta/keyless");
+        return await _freeAiReply(userId, prompt, senderName, incomingText, conversationKey);
       }
-      logger.warn({ status: response.status, model }, "NVIDIA API error");
-      return null;
+      logger.warn({ status: response.status, model }, "NVIDIA API error — falling back to Meta/keyless");
+      return await _freeAiReply(userId, prompt, senderName, incomingText, conversationKey);
     }
     const data = await response.json();
     const reply = data.choices?.[0]?.message?.content?.trim();
-    if (!reply) return null;
+    if (!reply) return await _freeAiReply(userId, prompt, senderName, incomingText, conversationKey);
     const updatedHistory = [
       ...history,
       { role: "user", content: `${senderName}: ${incomingText}` },
@@ -125799,8 +125801,8 @@ async function getAiReply(userId, prompt, senderName, incomingText, conversation
     } catch {}
     return reply;
   } catch (err) {
-    logger.error({ err }, "NVIDIA AI reply error");
-    return null;
+    logger.error({ err }, "NVIDIA AI reply error — falling back to Meta/keyless");
+    return await _freeAiReply(userId, prompt, senderName, incomingText, conversationKey);
   }
 }
 async function getAiReplyForRule(userId, prompt, incomingText) {
@@ -295274,7 +295276,8 @@ function registerMessageHandler(sock, userId) {
           const idx = (inMemoryDB[rotKey] || 0) % msgs.length;
           inMemoryDB[rotKey] = idx + 1;
           try {
-            await sock.sendMessage(jid, { text: msgs[idx] });
+            // [REPLY-QUOTE v8.28.0] الرد التلقائي يقتبس رسالة العضو
+            await sock.sendMessage(jid, { text: msgs[idx] }, { quoted: msg });
           } catch (err) {
             logger.error({ err }, "Rotating reply error");
           }
@@ -295288,18 +295291,19 @@ function registerMessageHandler(sock, userId) {
           try {
             const { readFile: _rfAR } = await import("node:fs/promises");
             const fileBuf = await _rfAR(localPath);
+            const _q = { quoted: msg }; // [REPLY-QUOTE v8.28.0]
             if (reply.replyType === "image") {
-              await sock.sendMessage(jid, { image: fileBuf, caption: "" });
+              await sock.sendMessage(jid, { image: fileBuf, caption: "" }, _q);
             } else if (reply.replyType === "video") {
-              await sock.sendMessage(jid, { video: fileBuf, caption: "" });
+              await sock.sendMessage(jid, { video: fileBuf, caption: "" }, _q);
             } else if (reply.replyType === "document") {
               const fn = reply._fileName || localPath.split("/").pop() || "file";
-              await sock.sendMessage(jid, { document: fileBuf, fileName: fn, mimetype: "application/octet-stream" });
+              await sock.sendMessage(jid, { document: fileBuf, fileName: fn, mimetype: "application/octet-stream" }, _q);
             } else if (reply.replyType === "sticker") {
-              await sock.sendMessage(jid, { sticker: fileBuf });
+              await sock.sendMessage(jid, { sticker: fileBuf }, _q);
             } else if (reply.replyType === "audio") {
               const audioMime = reply._audioMime || "audio/mpeg";
-              await sock.sendMessage(jid, { audio: fileBuf, mimetype: audioMime });
+              await sock.sendMessage(jid, { audio: fileBuf, mimetype: audioMime }, _q);
             }
           } catch (err) {
             logger.error({ err, localPath }, "Local media auto-reply error");
@@ -295315,10 +295319,12 @@ function registerMessageHandler(sock, userId) {
           if (_textRef) {
             try { _replyImage = await _readReplyImage(userId, _textRef); } catch (e) { logger.warn({ e }, 'Reply image skipped'); }
           }
+          // [REPLY-QUOTE v8.28.0] اقتباس رسالة العضو في الرد التلقائي النصي/الصوري
+          const _q = { quoted: msg };
           if (_replyImage?.buffer?.length) {
-            await sock.sendMessage(jid, { image: _replyImage.buffer, caption: responseText, mimetype: _replyImage.mimetype });
+            await sock.sendMessage(jid, { image: _replyImage.buffer, caption: responseText, mimetype: _replyImage.mimetype }, _q);
           } else {
-            await sock.sendMessage(jid, { text: responseText });
+            await sock.sendMessage(jid, { text: responseText }, _q);
           }
         } catch (err) {
           logger.error({ err }, "Error sending WhatsApp reply");
@@ -296819,8 +296825,10 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
           }
           return; // [DISPATCH-FIX]
         }
-        if (myS.aiEnabled && trimmed.startsWith(myS.aiCmd + " ")) {
-          const question = trimmed.slice(myS.aiCmd.length).trim();
+        // [MYMSGS-AI v8.28.0] كان يشترط مسافة بعد الأمر ⇒ «/ai» وحده أو «/ai:سؤال» لا يعمل
+        const _aiCmdHit = myS.aiEnabled ? new RegExp("^" + String(myS.aiCmd).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?:\\s|:|$)([\\s\\S]*)").exec(trimmed) : null;
+        if (_aiCmdHit) {
+          const question = String(_aiCmdHit[1] || "").replace(/^[:\s]+/, "").trim();
           if (!question) {
             try {
               await activeSock.sendMessage(jid, { text: `\u26A0\uFE0F \u0645\u062B\u0627\u0644: ${myS.aiCmd} \u0645\u0627 \u0647\u0648 \u0627\u0644\u0630\u0643\u0627\u0621 \u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064A` });
@@ -299735,8 +299743,10 @@ _\u064A\u0645\u0643\u0646 \u0627\u0633\u062A\u062E\u062F\u0627\u0645_ {name} _\u
     let kicked = 0;
     for (let i = 0; i < others.length; i++) {
       try {
-        await sock.groupParticipantsUpdate?.(groupId, [others[i].id], "remove");
-        kicked++;
+        // [WA-KICK v8.28.0] عدّ النجاح الحقيقي فقط
+        const { removeParticipant } = await import("./lib/wa-kick.mjs");
+        const attempt = await removeParticipant(sock, groupId, [others[i].id, others[i].phoneNumber, others[i].jid]);
+        if (attempt.ok) kicked++;
         if (i % 5 === 0) {
           await bot2.editMessageText(`\u23F3 \u062C\u0627\u0631\u064A \u0637\u0631\u062F \u0627\u0644\u0623\u0639\u0636\u0627\u0621... (${Math.round(i / others.length * 100)}%)`, {
             chat_id: chatId,
@@ -299983,14 +299993,17 @@ async function handleGroupsTextInput(bot2, chatId, userId, text, state) {
     const groupId = state.data.groupId;
     if (!sock) return false;
     const num = text.replace(/\D/g, "");
-    const jid = num + "@s.whatsapp.net";
+    // [WA-KICK v8.28.0] بعض الأعضاء معرّفهم LID؛ كان الطرد يفشل بصمت ويكتب «تم».
     try {
-      await sock.groupParticipantsUpdate?.(groupId, [jid], "remove");
+      const { removeParticipant, resolveGroupMemberJid, kickErrorText } = await import("./lib/wa-kick.mjs");
+      const memberJid = await resolveGroupMemberJid(sock, groupId, num);
+      const attempt = await removeParticipant(sock, groupId, [memberJid, num + "@s.whatsapp.net"]);
+      if (!attempt.ok) throw new Error(kickErrorText(attempt.status));
       inMemoryDB.groupsCache.delete(userId);
       clearState(userId);
       await bot2.sendMessage(chatId, `\u2705 \u062A\u0645 \u0637\u0631\u062F +${num}`, { reply_markup: { inline_keyboard: [[{ text: "\u{1F519} \u0631\u062C\u0648\u0639 \u0644\u0644\u0645\u062C\u0645\u0648\u0639\u0629", callback_data: `grpv2_info_${groupId}` }]] } });
-    } catch {
-      await bot2.sendMessage(chatId, "\u274C \u062A\u0639\u0630\u0631 \u0627\u0644\u0637\u0631\u062F. \u062A\u0623\u0643\u062F \u0645\u0646 \u0623\u0646 \u0627\u0644\u0631\u0642\u0645 \u0641\u064A \u0627\u0644\u0645\u062C\u0645\u0648\u0639\u0629.");
+    } catch (err) {
+      await bot2.sendMessage(chatId, `\u274C \u062A\u0639\u0630\u0631 \u0627\u0644\u0637\u0631\u062F: ${String(err?.message || err).slice(0, 160)}`);
     }
     return true;
   }
@@ -326121,7 +326134,7 @@ init_database();
 init_state();
 init_keyboards();
 async function handleAiCallback2(bot2, chatId, userId, data) {
-  _aiMod.setDeps({ getUser, saveUser, setState, cancelKeyboard, aiMenuKeyboard, init_ai_manager, ai_manager_exports, inMemoryDB, getSock: (uid) => _metaAiSock(uid), freeAiReply: (uid, prompt, text) => _freeAiReply(uid, prompt, "المستخدم", text, `aitest_${uid}`), keylessReply: (uid, prompt, text) => _keylessReply(uid, prompt, "المستخدم", text, `aitest_${uid}`) });
+  _aiMod.setDeps({ getUser, saveUser, setState, cancelKeyboard, aiMenuKeyboard, hasNvidiaKey, getUserSelectedModel, init_ai_manager, ai_manager_exports, inMemoryDB, getSock: (uid) => _metaAiSock(uid), freeAiReply: (uid, prompt, text) => _freeAiReply(uid, prompt, "المستخدم", text, `aitest_${uid}`), keylessReply: (uid, prompt, text) => _keylessReply(uid, prompt, "المستخدم", text, `aitest_${uid}`) });
   return _aiMod.handleAiCallback2(bot2, chatId, userId, data);
 }
 // src/bot/features/groups/index.ts — فُصِل في dist/groups.mjs [PATCH_GROUPS_SPLIT_APPLIED]

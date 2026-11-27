@@ -1504,13 +1504,12 @@ export async function webGuardKick(userId, groupId, memberJid, phoneNumber = nul
   if (!jid || !jid.includes("@")) throw new Error("معرّف العضو غير صالح");
   const sock = await findSocketForGroup(String(userId), id, phoneNumber);
   if (!sock) throw new Error("هذه المجموعة غير متاحة على رقم واتساب المختار");
-  try {
-    await sock.groupParticipantsUpdate(id, [jid], "remove");
-  } catch (error) {
-    throw new Error(String(error?.message || error).slice(0, 160));
-  }
+  // [WA-KICK v8.28.0] تحقق حقيقي: واتساب يرجع {status:'403'} بدل رمي خطأ
+  const { removeParticipant, kickErrorText } = await import("../../dist/lib/wa-kick.mjs");
+  const kick = await removeParticipant(sock, id, [jid]);
+  if (!kick.ok) throw new Error(`تعذّر الطرد: ${kickErrorText(kick.status)}`);
   const guard = await import("../../services/group-guard.mjs");
-  const info = guard.listWarnings(String(userId), id).find((row) => row.jid === jid) || {};
+  const info = guard.listWarnings(String(userId), id).find((row) => row.jid === (kick.jid || jid)) || {};
   guard.recordKicked(String(userId), id, {
     jid,
     name: info.name || "",
@@ -1530,9 +1529,14 @@ export async function webGuardKickOffenders(userId, groupId, phoneNumber = null)
   const rows = guard.listWarnings(String(userId), id);
   const done = [];
   const failed = [];
+  const kickLib = await import("../../dist/lib/wa-kick.mjs");
   for (const row of rows) {
     try {
-      await sock.groupParticipantsUpdate(id, [row.jid], "remove");
+      const attempt = await kickLib.removeParticipant(sock, id, [row.jid]);
+      if (!attempt.ok) {
+        failed.push({ jid: row.jid, error: kickLib.kickErrorText(attempt.status) });
+        continue;
+      }
       guard.recordKicked(String(userId), id, {
         jid: row.jid,
         name: row.name || "",

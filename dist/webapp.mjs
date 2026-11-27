@@ -187,7 +187,7 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     const groupId = guardGroupId(req);
     const patch = req.body?.patch || {};
     const allowed = {};
-    for (const key of ["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "audioGuard", "buttonGuard", "reactionGuard", "reactionEmojis", "reactionKickSec", "kickOnLimit", "maxWarnings", "stickerWarnEvery", "kickDelaySec", "words", "welcome", "goodbye", "floodGuard", "floodCount", "floodWindowSec", "repeatGuard", "autoReKick", "whitelist", "quiet", "blockedDomains", "allowedDomains", "dailyReport", "dailyReportHour"]) {
+    for (const key of ["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "cardImages", "audioGuard", "buttonGuard", "reactionGuard", "reactionEmojis", "reactionKickSec", "kickOnLimit", "maxWarnings", "stickerWarnEvery", "kickDelaySec", "words", "welcome", "goodbye", "floodGuard", "floodCount", "floodWindowSec", "repeatGuard", "autoReKick", "whitelist", "quiet", "blockedDomains", "allowedDomains", "dailyReport", "dailyReportHour"]) {
       if (key in patch) allowed[key] = patch[key];
     }
     return { groupId, config: publicGuardConfig(groupGuard.updateGroupConfig(uid, groupId, allowed)) };

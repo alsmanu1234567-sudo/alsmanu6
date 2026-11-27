@@ -132,8 +132,13 @@
     if(force) backupState.repos=[];
     if(!backupState.repos.length){
       if(hint)hint.textContent='جارٍ تحميل المستودعات…';
-      try{ const list=await api('backup/github/repos'+(force?'?refresh=1':'')); backupState.repos=Array.isArray(list)?list:[]; }
-      catch(err){ fail(err.message); return; }
+      // [BACKUP-REPOS v8.28.0] نفس مسار قسم GitHub العامل أولاً، ثم مسار النسخ الاحتياطي
+      let firstError=null;
+      for(const path of ['repos'+(force?'?refresh=1':''),'backup/github/repos'+(force?'?refresh=1':''),'repos?refresh=1']){
+        try{ const list=await api(path); const arr=Array.isArray(list)?list:[]; if(arr.length){ backupState.repos=arr; break; } backupState.repos=arr; }
+        catch(err){ firstError=firstError||err; }
+      }
+      if(!backupState.repos.length && firstError){ fail(firstError.message); return; }
     }
     const list=backupState.repos;
     if(!list.length){ fail('لا توجد مستودعات ظاهرة لهذا التوكن'); return; }

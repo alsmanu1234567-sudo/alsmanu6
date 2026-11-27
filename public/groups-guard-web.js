@@ -322,6 +322,7 @@
             ${toggleRow("reactionGuard", "منع التفاعل بإيموجي 🖕", "يُحذف التفاعل ويُنبَّه العضو، وإن لم يُزله خلال المدة أدناه يُطرد فوراً", config.reactionGuard)}
             <div class="gg-row"><div><b>الإيموجي الممنوع في التفاعل</b><div class="mut">يمكن أكثر من إيموجي مفصولة بمسافة</div></div><input class="gg-in" style="width:120px" value="${esc((config.reactionEmojis || ["🖕"]).join(" "))}" data-emojis="reactionEmojis" dir="auto"></div>
             <div class="gg-row"><div><b>مهلة إزالة التفاعل (ثانية)</b><div class="mut">0 = طرد فوري</div></div><input class="gg-in" style="width:84px" type="number" min="0" max="600" value="${esc(config.reactionKickSec ?? 30)}" data-num="reactionKickSec"></div>
+            ${toggleRow("cardImages", "صور التنبيهات", "تشغيل: التحذير/الطرد بصورة — إيقاف: نص فقط بلا صور", config.cardImages !== false)}
             ${toggleRow("kickOnLimit", "الطرد عند الحد", "طرد تلقائي بعد بلوغ عدد التحذيرات", config.kickOnLimit)}
           </div>
 
