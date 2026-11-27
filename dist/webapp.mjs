@@ -197,6 +197,14 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     return { ok: true, config: publicGuardConfig(groupGuard.saveCardImage(uid, groupId, String(req.body?.kind || ""), req.body?.dataUrl)) };
   }));
   // ═══ [AI-CARD] كرت ردود الذكاء الاصطناعي ═══
+  // ═══ [COMMANDS-WINDOW v8.29.0] نافذة أوامر مستقلة (بحث/أقسام/نسخ) ═══
+  app.get('/commands-web.js', (_req, res) => { res.setHeader('Content-Type', 'application/javascript; charset=utf-8'); res.setHeader('Cache-Control', 'no-store'); res.end(readFileSync(fileURLToPath(new URL("../public/commands-web.js", import.meta.url)))); });
+  app.get('/api/fw/commands', guard(async (uid) => {
+    const hc = await import("./help-center.mjs");
+    const isDev = String(uid) === String(process.env.DEVELOPER_ID || process.env.OWNER_ID || "");
+    const data = await hc.catalogForWeb(isDev);
+    return { ...data, isDev };
+  }));
   app.get('/ai-card-web.js', (_req, res) => { res.setHeader('Content-Type', 'application/javascript; charset=utf-8'); res.setHeader('Cache-Control', 'no-store'); res.end(readFileSync(fileURLToPath(new URL("../public/ai-card-web.js", import.meta.url)))); });
   app.get('/api/ai/card', guard(async () => {
     const config = aiCard.getAiCardConfig();
@@ -927,6 +935,7 @@ body{background:radial-gradient(ellipse at 5% 0%,rgba(192,141,255,.18),transpare
 </style>
 <script src="/groups-guard-web.js"></script>
 <script src="/ai-card-web.js"></script>
+<script src="/commands-web.js"></script>
 <script>
 const TG = window.Telegram?.WebApp;
 if (TG) { try { TG.ready(); TG.expand(); } catch(e){} }
@@ -1156,7 +1165,7 @@ function renderGroups(v){
   let html = '<div class="gg-toolbar">' +
     '<button class="gg-pill" onclick="refreshGroups(this)"><b>🔄</b> تحديث من واتساب</button>' +
     '<button class="gg-pill" onclick="window.GroupGuardUI&&window.GroupGuardUI.open()"><b>🛡️</b> الحماية</button>' +
-    '<button class="gg-pill" onclick="window.GroupGuardUI&&window.GroupGuardUI.docs()"><b>📖</b> الأوامر</button>' +
+    '<button class="gg-pill" onclick="window.openCommands?window.openCommands():(window.GroupGuardUI&&window.GroupGuardUI.docs())"><b>📖</b> الأوامر</button>' +
     '<span class="gg-count">' + ST.groups.length + ' مجموعة</span></div>';
   if (!items.length) {
     html += '<div class="empty"><div class="big">👥</div>لا توجد مجموعات' + (Q?' مطابقة للبحث':'') + '<br>اضغط "تحديث من واتساب" لجلب مجموعاتك</div>';
@@ -1195,7 +1204,7 @@ function renderGroups(v){
         event.stopPropagation();
         const id = card.dataset.card;
         if (btn.dataset.act === "guard" && window.GroupGuardUI) window.GroupGuardUI.openFor(id);
-        else if (btn.dataset.act === "docs" && window.GroupGuardUI) window.GroupGuardUI.docs();
+        else if (btn.dataset.act === "docs") { if (window.openCommands) window.openCommands(); else if (window.GroupGuardUI) window.GroupGuardUI.docs(); }
         else if (btn.dataset.act === "details") openGroupDetails(id);
       });
     });
@@ -1248,7 +1257,7 @@ function renderGroupDetails(){
       bar.innerHTML = '<button class="gg-pill" data-guard-sheet="1"><b>🛡️</b> الحماية والتحذيرات</button>' +
         '<button class="gg-pill" data-guard-docs="1"><b>📖</b> أوامر المجموعات</button>';
       bar.querySelector("[data-guard-sheet]").onclick = ()=>{ if(window.GroupGuardUI) window.GroupGuardUI.openFor(detail.id); };
-      bar.querySelector("[data-guard-docs]").onclick = ()=>{ if(window.GroupGuardUI) window.GroupGuardUI.docs(); };
+      bar.querySelector("[data-guard-docs]").onclick = ()=>{ if(window.openCommands) window.openCommands(); else if(window.GroupGuardUI) window.GroupGuardUI.docs(); };
       sh.insertBefore(bar, sh.children[1] || null);
     }
   }, 0);

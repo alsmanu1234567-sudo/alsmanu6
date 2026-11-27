@@ -302524,35 +302524,26 @@ ${isDev2 ? "\u{1F451} \u0645\u0637\u0648\u0631: \u0646\u0639\u0645\n" : ""}\u{1F
     { parse_mode: "Markdown", reply_markup: mainMenuKeyboard(user.points || 0, user.tier, isDev2) }
   );
 }
-async function handleHelp(bot2, chatId, userId) {
+async function handleHelp(bot2, chatId, userId, query) {
   init_text_editor();
   const user = getUser(userId);
-  if (texts.help_text !== undefined) {await bot2.sendMessage(chatId,getText('help_text'),{reply_markup:mainMenuKeyboard(user.points||0,user.tier,userId===DEVELOPER_ID)});return;}
   const isDev2 = userId === DEVELOPER_ID;
-  await bot2.sendMessage(
-    chatId,
-    `\u2753 *\u062F\u0644\u064A\u0644 \u0627\u0644\u0627\u0633\u062A\u062E\u062F\u0627\u0645 v7.0*
-
-\u{1F4F1} /link \u2014 \u0631\u0628\u0637 \u0648\u0627\u062A\u0633\u0627\u0628
-\u2699\uFE0F /autoreply \u2014 \u0627\u0644\u0631\u062F\u0648\u062F \u0627\u0644\u062A\u0644\u0642\u0627\u0626\u064A\u0629
-\u{1F465} /groups \u2014 \u0627\u0644\u0645\u062C\u0645\u0648\u0639\u0627\u062A
-\u{1F464} /persons \u2014 \u0627\u0644\u0623\u0634\u062E\u0627\u0635
-\u{1F517} /bridge \u2014 \u0627\u0644\u062C\u0633\u0631
-\u{1F4CA} /status \u2014 \u0627\u0644\u062D\u0627\u0644\u0627\u062A
-\u{1F4C5} /schedule \u2014 \u0627\u0644\u062C\u062F\u0648\u0644\u0629
-\u{1F4DE} /calls \u2014 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A
-\u{1F6E1}\uFE0F /security \u2014 \u0627\u0644\u0623\u0645\u0627\u0646
-\u26A1 /reports \u2014 \u0627\u0644\u0628\u0644\u0627\u063A\u0627\u062A
-\u{1F48E} /points \u2014 \u0627\u0644\u0646\u0642\u0627\u0637
-\u2B50 /features \u2014 \u0627\u0644\u0645\u064A\u0632\u0627\u062A
-\u2139\uFE0F /info \u2014 \u0645\u0639\u0644\u0648\u0645\u0627\u062A\u064A
-\u274C /cancel \u2014 \u0625\u0644\u063A\u0627\u0621
-
-${VARIABLES_HELP}
-
-\u{1F4DE} \u0644\u0644\u062A\u0648\u0627\u0635\u0644: +249114375739`,
-    { parse_mode: "Markdown", reply_markup: mainMenuKeyboard(user.points || 0, user.tier, isDev2) }
-  );
+  const hc = await import("./help-center.mjs");
+  // [HELP-CENTER v8.29.0] بحث مباشر: /help كلمة
+  if (query && String(query).trim()) {
+    const view = await hc.helpSearchView(String(query).trim(), isDev2);
+    await bot2.sendMessage(chatId, view.text, { parse_mode: "Markdown", reply_markup: view.keyboard });
+    return;
+  }
+  // نص مخصص من لوحة المطوّر: يبقى كما هو + زر للدليل التفاعلي
+  if (texts.help_text !== undefined && String(getText("help_text") || "").trim()) {
+    await bot2.sendMessage(chatId, getText("help_text"), {
+      reply_markup: { inline_keyboard: [[{ text: "❓ دليل الأوامر بالأزرار", callback_data: "help_home" }], [{ text: "🏠 القائمة الرئيسية", callback_data: "home" }]] },
+    });
+    return;
+  }
+  const view = await hc.helpHomeView(isDev2);
+  await bot2.sendMessage(chatId, view.text, { parse_mode: "Markdown", reply_markup: view.keyboard });
 }
 async function handleLinkQr(bot2, chatId, userId) {
   const user = getUser(userId);
@@ -326365,26 +326356,8 @@ async function handleCallback(bot2, query) {
   return _cbHandlerMod.handleCallback(bot2, query);
 }
 async function showHelp(bot2, chatId, userId, user, isDev2) {
-  const { helpKeyboard } = await Promise.resolve().then(() => (init_keyboards(), keyboards_exports));
-  await bot2.sendMessage(
-    chatId,
-    `\u2753 *\u0627\u0644\u0645\u0633\u0627\u0639\u062F\u0629*
-
-\u{1F4F1} *\u0627\u0644\u0623\u0648\u0627\u0645\u0631 \u0627\u0644\u0631\u0626\u064A\u0633\u064A\u0629:*
-/start \u2014 \u0627\u0644\u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0631\u0626\u064A\u0633\u064A\u0629
-/link \u2014 \u0631\u0628\u0637 \u0648\u0627\u062A\u0633\u0627\u0628
-/autoreply \u2014 \u0627\u0644\u0631\u062F\u0648\u062F \u0627\u0644\u062A\u0644\u0642\u0627\u0626\u064A\u0629
-/groups \u2014 \u0627\u0644\u0645\u062C\u0645\u0648\u0639\u0627\u062A
-/persons \u2014 \u0627\u0644\u0623\u0634\u062E\u0627\u0635
-/schedule \u2014 \u062C\u062F\u0648\u0644\u0629 \u0631\u0633\u0627\u0626\u0644
-/status \u2014 \u0627\u0644\u062D\u0627\u0644\u0627\u062A
-/points \u2014 \u0627\u0644\u0646\u0642\u0627\u0637
-/security \u2014 \u0627\u0644\u0623\u0645\u0627\u0646
-/ai \u2014 \u0627\u0644\u0630\u0643\u0627\u0621 \u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064A
-
-\u{1F4AC} *\u0627\u0644\u062F\u0639\u0645:* \u062A\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u0645\u0637\u0648\u0631 \u0639\u0628\u0631 "\u0631\u0633\u0627\u0644\u0629 \u0644\u0644\u0645\u0637\u0648\u0631"`,
-    { parse_mode: "Markdown", reply_markup: helpKeyboard ? helpKeyboard() : mainMenuKeyboard(user.points || 0, user.tier, isDev2) }
-  );
+  // [HELP-CENTER v8.29.0] نفس الدليل التفاعلي
+  return handleHelp(bot2, chatId, userId);
 }
 async function showInfo2(bot2, chatId, userId, user, isDev2) {
   const { TIER_NAMES: TIER_NAMES2 } = await Promise.resolve().then(() => (init_constants(), constants_exports));

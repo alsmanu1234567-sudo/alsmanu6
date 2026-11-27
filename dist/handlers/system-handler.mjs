@@ -60,6 +60,11 @@ export async function handleText(bot, msg) {
     await _deps.handleHelp(bot, chatId, userId);
     return true;
   }
+  // [HELP-CENTER v8.29.0] بحث مباشر: /help كلمة
+  if (/^\/(help|help_commands)\s+\S/.test(text)) {
+    await _deps.handleHelp(bot, chatId, userId, text.replace(/^\/(help|help_commands)\s+/, ''));
+    return true;
+  }
   if (text === '/cancel') {
     _deps.clearState(userId);
     await bot.sendMessage(chatId, '\u2705 \u062A\u0645 \u0625\u0644\u063A\u0627\u0621 \u0627\u0644\u0639\u0645\u0644\u064A\u0629', {
@@ -196,6 +201,34 @@ export async function handleCallback(bot, query) {
   if (data === 'menu_help') {
     await _deps.showHelp(bot, chatId, userId, user, isDev);
     return true;
+  }
+  // ═══ [HELP-CENTER v8.29.0] دليل الأوامر التفاعلي ═══
+  if (data === 'help_home' || data.startsWith('help_cat_') || data.startsWith('help_cmd_') || data === 'help_search') {
+    const hc = await import('../help-center.mjs');
+    const edit = async (view) => {
+      const opts = { parse_mode: 'Markdown', reply_markup: view.keyboard };
+      try {
+        if (query.message) await bot.editMessageText(view.text, { chat_id: chatId, message_id: query.message.message_id, ...opts });
+        else await bot.sendMessage(chatId, view.text, opts);
+      } catch {
+        await bot.sendMessage(chatId, view.text, opts);
+      }
+    };
+    try { await bot.answerCbQuery?.(query.id).catch?.(() => {}); } catch {}
+    if (data === 'help_home') { await edit(await hc.helpHomeView(isDev)); return true; }
+    if (data === 'help_search') {
+      await bot.sendMessage(chatId, '🔎 أرسل: `/help كلمة` — مثال: `/help طرد` أو `/help تنزيل`', { parse_mode: 'Markdown' });
+      return true;
+    }
+    if (data.startsWith('help_cat_')) {
+      const [, , catId, page] = data.split('_');
+      await edit(await hc.helpCategoryView(catId, Number(page) || 0, isDev));
+      return true;
+    }
+    if (data.startsWith('help_cmd_')) {
+      await edit(await hc.helpCommandView(data.replace('help_cmd_', ''), isDev));
+      return true;
+    }
   }
   if (data === 'menu_info') {
     await _deps.showInfo2(bot, chatId, userId, user, isDev);
