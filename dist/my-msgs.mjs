@@ -88,6 +88,7 @@ export const COMMAND_CONTROL_FEATURES = [
   { id: "wiki", name: "ويكيبيديا", commandKey: "wikiCmd", defaultCommand: "!wiki", enabledKey: "wikiEnabled", defaultEnabled: false, help: "أرسل الكود ثم الموضوع." },
   { id: "sticker", name: "الملصقات", commandKey: "stickerCmd", defaultCommand: "!sticker", enabledKey: "stickerEnabled", defaultEnabled: false, help: "ردّ على صورة بالكود لتحويلها إلى ملصق، أو أرسل الكود مع موضوع." },
   { id: "locate", name: "تتبع الموقع", commandKey: "locateCmd", defaultCommand: "/locate", enabledKey: "locateEnabled", defaultEnabled: false, help: "أرسل الكود ثم رقم الهاتف مع رمز الدولة." },
+  { id: "audiosticker", name: "ملصق بصوت", commandKey: "audioStickerCmd", defaultCommand: "!as", enabledKey: "audioStickerEnabled", defaultEnabled: false, help: "ردّ على صوت بالأمر لحفظه كصوت للمحادثة، ثم أرسل الأمر مع ملصق/صورة/فيديو ليُرسل كملصق بصوت." },
   { id: "cod", name: "ربط رقم واتساب", commandKey: "codCmd", defaultCommand: "/cod", enabledKey: "codEnabled", defaultEnabled: true, help: "أرسل الكود ثم الرقم المطلوب ربطه." },
   { id: "stt", name: "تحويل الصوت إلى نص", commandKey: "sttCmd", defaultCommand: "/نص", enabledKey: "sttEnabled", defaultEnabled: true, help: "ردّ على رسالة صوتية بالكود لتفريغها نصاً." },
   { id: "tts", name: "تحويل النص إلى صوت", commandKey: "ttsCmd", defaultCommand: "/صوت", enabledKey: "ttsEnabled", defaultEnabled: true, help: "أرسل الكود ثم النص لتحويله إلى صوت." },
@@ -341,7 +342,7 @@ export function myMsgsMenuKeyboard(s) {
       [f(s.spamEnabled ?? false, "\uD83D\uDCA3 \u0633\u0628\u0627\u0645/\u0641\u0644\u0648\u062F", "mymsgs_show_spam")],
       [f(s.translateEnabled ?? false, "\uD83C\uDF10 \u062A\u0631\u062C\u0645\u0629", "mymsgs_show_translate"), f(s.jokeEnabled ?? false, "\uD83D\uDE02 \u0646\u0643\u062A\u0629", "mymsgs_show_joke")],
       [f(s.wikiEnabled ?? false, "\uD83D\uDCDA \u0648\u064A\u0643\u064A\u0628\u064A\u062F\u064A\u0627", "mymsgs_show_wiki")],
-      [f(s.stickerEnabled ?? false, "\uD83C\uDFAD \u0633\u062A\u064A\u0643\u0631", "mymsgs_show_sticker")],
+      [f(s.stickerEnabled ?? false, "\uD83C\uDFAD \u0633\u062A\u064A\u0643\u0631", "mymsgs_show_sticker"), f(s.audioStickerEnabled ?? false, "\uD83C\uDFB5 \u0645\u0644\u0635\u0642 \u0628\u0635\u0648\u062A", "mymsgs_show_audiost")],
       [f(s.locateEnabled ?? false, "\uD83D\uDD75\uFE0F \u062A\u062A\u0628\u0639 \u0627\u0644\u0645\u0648\u0642\u0639", "mymsgs_show_locate"), f(s.sttEnabled ?? true, "\uD83C\uDFA4 \u0635\u0648\u062A\u2190\u0646\u0635", "mymsgs_show_stt")],
       [f(s.ttsEnabled ?? true, "\uD83D\uDD0A \u0646\u0635\u2190\u0635\u0648\u062A", "mymsgs_show_tts"), { text: "\uD83D\uDCCC \u0627\u0644\u0645\u064A\u0632\u0627\u062A \u0643\u0644\u0647\u0627", callback_data: "menu_mymsgs" }],
       [{ text: "\uD83D\uDCD8 \u0627\u0644\u0623\u0643\u0648\u0627\u062F \u0627\u0644\u0645\u0633\u0627\u0639\u062F\u0629", callback_data: "mymsgs_show_help" }],
@@ -376,6 +377,7 @@ export function myMsgsFeatureSubMenu(s, feature) {
     sticker:  { en: s.stickerEnabled ?? false,   cmd: s.stickerCmd ?? "!sticker",name: "\uD83C\uDFAD \u0633\u062A\u064A\u0643\u0631",             tog: "mymsgs_toggle_sticker",   edit: "mymsgs_edit_sticker_cmd" },
     locate:   { en: s.locateEnabled ?? false,   cmd: s.locateCmd ?? "/locate", name: "\uD83D\uDD75\uFE0F \u062A\u062A\u0628\u0639 \u0627\u0644\u0645\u0648\u0642\u0639", tog: "mymsgs_toggle_locate", edit: "mymsgs_edit_locate_cmd" },
     cod:      { en: s.codEnabled !== false,      cmd: s.codCmd ?? "/cod",  name: "\uD83D\uDD17 \u0631\u0628\u0637 \u0631\u0642\u0645",                tog: "mymsgs_toggle_cod",       edit: "mymsgs_edit_cod_cmd" },
+    audiosticker: { en: s.audioStickerEnabled ?? false, cmd: s.audioStickerCmd ?? "!as", name: "\uD83C\uDFB5 \u0645\u0644\u0635\u0642 \u0628\u0635\u0648\u062A", tog: "mymsgs_toggle_audiosticker", edit: "mymsgs_edit_audiosticker_cmd" },
     stt:      { en: s.sttEnabled ?? true,        cmd: s.sttCmd ?? "/\u0646\u0635", name: "\uD83C\uDFA4 \u0635\u0648\u062A\u2190\u0646\u0635 (\u062A\u0641\u0631\u064A\u063A)", tog: "mymsgs_toggle_stt", edit: "mymsgs_edit_stt_cmd" },
     tts:      { en: s.ttsEnabled ?? true,        cmd: s.ttsCmd ?? "/\u0635\u0648\u062A", name: "\uD83D\uDD0A \u0646\u0635\u2190\u0635\u0648\u062A (\u0646\u0637\u0642)", tog: "mymsgs_toggle_tts", edit: "mymsgs_edit_tts_cmd" },
   };
@@ -1010,11 +1012,39 @@ export async function handleMyMsgsCallback(bot2, chatId, userId, data) {
     const ns = saveMyMsgsSettings(userId, { stickerEnabled: !(s.stickerEnabled ?? false) });
     await bot2.sendMessage(chatId, ns.stickerEnabled ? `\u2705 \u0633\u062A\u064A\u0643\u0631 \u0645\u0641\u0639\u0651\u0644 \u2014 \u0627\u0644\u0623\u0645\u0631: *${ns.stickerCmd || "!sticker"}*` : `\u274C \u0633\u062A\u064A\u0643\u0631 \u0645\u0639\u0637\u0651\u0644`, { parse_mode: "Markdown", reply_markup: ((() => { try { const sub = myMsgsFeatureSubMenu(ns, "sticker"); return sub ? sub.keyboard : myMsgsMenuKeyboard(ns); } catch(e) { return myMsgsMenuKeyboard(ns); } })()) }); return;
   }
+  if (data === "mymsgs_show_audiost" || data === "mymsgs_toggle_audiosticker") {
+    const ns = data === "mymsgs_toggle_audiosticker"
+      ? saveMyMsgsSettings(userId, { audioStickerEnabled: !(s.audioStickerEnabled ?? false) })
+      : s;
+    const enabled = ns.audioStickerEnabled ?? false;
+    const cmd = ns.audioStickerCmd || "!as";
+    const text =
+      `\uD83C\uDFB5 *\u0645\u0644\u0635\u0642 \u0628\u0635\u0648\u062A (Audio Sticker)*\n\n` +
+      `\u0627\u0644\u062D\u0627\u0644\u0629: ${enabled ? "\u2705 \u0645\u0641\u0639\u0651\u0644" : "\u26D4 \u0645\u0639\u0637\u0651\u0644"}\n` +
+      `\u0627\u0644\u0623\u0645\u0631: *${cmd}*\n\n` +
+      `*\u0637\u0631\u064A\u0642\u0629 \u0627\u0644\u0627\u0633\u062A\u062E\u062F\u0627\u0645:*\n` +
+      `1\uFE0F\u20E3 \u0631\u062F\u0651 \u0639\u0644\u0649 \u0631\u0633\u0627\u0644\u0629 \u0635\u0648\u062A\u064A\u0629 \u0628\u0640 \`${cmd}\` \u0644\u062D\u0641\u0638 \u0630\u0644\u0643 \u0627\u0644\u0635\u0648\u062A \u0644\u0644\u0645\u062D\u0627\u062F\u062B\u0629.\n` +
+      `2\uFE0F\u20E3 \u0623\u0631\u0633\u0644 \u0645\u0644\u0635\u0642\u0627\u064B/\u0635\u0648\u0631\u0629/\u0641\u064A\u062F\u064A\u0648 \u0645\u0639 \u0627\u0644\u0623\u0645\u0631 (\u0623\u0648 \u0631\u062F\u0651 \u0639\u0644\u064A\u0647 \u0628\u0627\u0644\u0623\u0645\u0631) \u0644\u064A\u064F\u0631\u0633\u0644 \u0645\u0644\u0635\u0642\u0627\u064B \u0628\u0635\u0648\u062A.\n` +
+      `3\uFE0F\u20E3 \u064A\u0639\u0645\u0644 \u0627\u0644\u0635\u0648\u062A \u0639\u0644\u0649 \u062A\u0637\u0628\u064A\u0642 \u0627\u0644\u062C\u0648\u0627\u0644 (Android/iOS) \u2014 \u0648\u0627\u062A\u0633\u0627\u0628 \u0648\u064A\u0628 \u0644\u0627 \u064A\u0634\u063A\u0651\u0644\u0647.\n\n` +
+      `\u2139\uFE0F \u0625\u0646 \u0644\u0645 \u062A\u062D\u0641\u0638 \u0635\u0648\u062A\u0627\u064B \u0641\u0633\u064A\u064F\u0633\u062A\u062E\u062F\u0645 \u0635\u0648\u062A \u0627\u0641\u062A\u0631\u0627\u0636\u064A \u0642\u0635\u064A\u0631.`;
+    await bot2.sendMessage(chatId, text, {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: enabled ? "\u274C \u0625\u064A\u0642\u0627\u0641 \u0627\u0644\u0645\u064A\u0632\u0629" : "\u2705 \u062A\u0634\u063A\u064A\u0644 \u0627\u0644\u0645\u064A\u0632\u0629", callback_data: "mymsgs_toggle_audiosticker" }],
+          [{ text: "\u270F\uFE0F \u062A\u063A\u064A\u064A\u0631 \u0627\u0644\u0623\u0645\u0631", callback_data: "mymsgs_edit_audiosticker_cmd" }],
+          [{ text: "\u25C0\uFE0F \u0631\u062C\u0648\u0639", callback_data: "mymsgs_menu" }],
+        ],
+      },
+    });
+    return;
+  }
   if (data === "mymsgs_toggle_locate") {
     const ns = saveMyMsgsSettings(userId, { locateEnabled: !(s.locateEnabled ?? false) });
     await bot2.sendMessage(chatId, ns.locateEnabled ? `\u2705 \u062A\u062A\u0628\u0639 \u0627\u0644\u0645\u0648\u0642\u0639 \u0645\u0641\u0639\u0651\u0644 \u2014 \u0627\u0644\u0623\u0645\u0631: *${ns.locateCmd || "/locate"}*` : `\u274C \u062A\u062A\u0628\u0639 \u0627\u0644\u0645\u0648\u0642\u0639 \u0645\u0639\u0637\u0651\u0644`, { parse_mode: "Markdown", reply_markup: ((() => { try { const sub = myMsgsFeatureSubMenu(ns, "locate"); return sub ? sub.keyboard : myMsgsMenuKeyboard(ns); } catch(e) { return myMsgsMenuKeyboard(ns); } })()) }); return;
   }
   const editMap = {
+    mymsgs_edit_audiosticker_cmd: { field: "audioStickerCmd", label: "ملصق بصوت", example: "!as" },
     mymsgs_edit_removebg_cmd: {field:"removeBgCmd",label:"إزالة خلفية الصورة",example:"/قص"},
     mymsgs_edit_pic_cmd:      { field: "profilePicCmd",    label: "\u0635\u0648\u0631\u0629 \u0627\u0644\u0628\u0631\u0648\u0641\u0627\u064A\u0644",    example: "/pic \u0623\u0648 \u0635\u0648\u0631\u0629" },
     mymsgs_edit_gm_cmd:       { field: "exportMembersCmd", label: "\u062A\u0635\u062F\u064A\u0631 \u0627\u0644\u0623\u0639\u0636\u0627\u0621", example: "/members \u0623\u0648 \u0623\u0639\u0636\u0627\u0621" },

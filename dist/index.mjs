@@ -124616,6 +124616,7 @@ function mainMenuKeyboard(points, tier, isDev2 = false) {
     [{ text: "💎 النقاط", callback_data: "menu_points" }],
     [{ text: "\u{1F916} \u0627\u0644\u0630\u0643\u0627\u0621 \u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064A", callback_data: "menu_ai" }],
     [{ text: "\u{1F4AC} \u0627\u0644\u0631\u0633\u0627\u0626\u0644", callback_data: "menu_msgs" }, { text: "\u{1F4E4} \u0631\u0633\u0627\u0621\u0644\u064A", callback_data: "menu_mymsgs" }],
+    [{ text: "\u{1F310} \u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u064A\u0628 \u0622\u0628", callback_data: "menu_webapp_link" }],
     [{ text: "\u2B50 \u0645\u064A\u0632\u0627\u062A\u064A", callback_data: "menu_features" }, { text: "\u2753 \u0627\u0644\u0645\u0633\u0627\u0639\u062F\u0629", callback_data: "menu_help" }],
     [{ text: `\u{1F4B0} ${points.toLocaleString()} \u0646\u0642\u0637\u0629 | ${tierEmojis[tier] || "\u{1F193}"} ${tier.toUpperCase()}`, callback_data: "menu_points" }]
   ];
@@ -297470,6 +297471,35 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
           }
           return; // [DISPATCH-FIX]
         }
+        // [AUDIO-STICKER v8.26.0] «ملصق بصوت» — دمج الملصق/الصورة/الفيديو مع الصوت.
+        // ردّ على صوت بالأمر ⇒ يحفظه كصوت افتراضي للمحادثة. الأمر مع ملصق/صورة ⇒ يرسل ملصقاً بصوت.
+        if ((myS.audioStickerEnabled ?? false) && trimmed.startsWith((myS.audioStickerCmd || "!as"))) {
+          try {
+            const { handleAudioStickerCommand } = await import("./lib/audio-sticker-command.mjs");
+            const res = await handleAudioStickerCommand({
+              sock: activeSock,
+              msg,
+              jid,
+              baileys: installedBaileys,
+              logger,
+              dataDir: path3.join(process.cwd(), "bot-data", "audio-sticker"),
+            });
+            if (res?.ok && res.action === "audio-saved") {
+              await activeSock.sendMessage(jid, { text: `\u2705 \u062D\u0641\u0637\u062A \u0627\u0644\u0635\u0648\u062A (${(res.bytes / 1024).toFixed(1)}KB) \u2014 \u0623\u0631\u0633\u0644 \u0627\u0644\u0622\u0646 \u0645\u0644\u0635\u0642\u0627\u064B \u0623\u0648 \u0635\u0648\u0631\u0629 \u0645\u0639 \u0627\u0644\u0623\u0645\u0631 \u0644\u062A\u0635\u064A\u0631\u0647 \u0645\u0644\u0635\u0642\u0627\u064B \u0628\u0635\u0648\u062A.` });
+            } else if (!res?.ok) {
+              const reasons = {
+                "no-media": "\u0623\u0631\u0633\u0644 \u0627\u0644\u0623\u0645\u0631 \u0645\u0639 \u0645\u0644\u0635\u0642/\u0635\u0648\u0631\u0629/\u0641\u064A\u062F\u064A\u0648 \u0623\u0648 \u0631\u062F\u0651 \u0639\u0644\u064A\u0647\u0627\u060C \u0648\u0623\u0631\u0633\u0644 \u0635\u0648\u062A\u0627\u064B \u0645\u0631\u0629 \u0648\u0627\u062D\u062F\u0629 \u0644\u062D\u0641\u0638\u0647.",
+                "too-large": "\u0627\u0644\u0645\u0644\u0641 \u0643\u0628\u064A\u0631 \u062C\u062F\u0627\u064B.",
+                "library": "\u0645\u0643\u062A\u0628\u0629 \u0648\u0627\u062A\u0633\u0627\u0628 \u063A\u064A\u0631 \u0645\u062A\u0627\u062D\u0629 \u0644\u0644\u062A\u0639\u062F\u064A\u0644.",
+              };
+              await activeSock.sendMessage(jid, { text: `\u274C ${reasons[res?.reason] || "\u062A\u0639\u0630\u0651\u0631 \u0627\u0644\u062A\u0646\u0641\u064A\u0630 (" + (res?.reason || "unknown") + ")"}` });
+            }
+          } catch (error) {
+            try { logger.warn({ error: String(error?.message || error).slice(0, 200) }, "[/as] audio sticker failed"); } catch {}
+            try { await activeSock.sendMessage(jid, { text: `\u274C \u062A\u0639\u0630\u0651\u0631 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0645\u0644\u0635\u0642 \u0628\u0635\u0648\u062A: ${String(error?.message || error).slice(0, 120)}` }); } catch {}
+          }
+          return; // [DISPATCH-FIX]
+        }
         if ((myS.stickerEnabled ?? false) && trimmed.startsWith((myS.stickerCmd || "!sticker"))) {
           const stkCtx = msg.message?.extendedTextMessage?.contextInfo || msg.message?.imageMessage?.contextInfo || msg.message?.stickerMessage?.contextInfo;
           const stkQuoted = stkCtx?.quotedMessage;
@@ -331192,6 +331222,9 @@ app.use("/api", routes_default);
 app.use("/bot/api", routes_default);
 // [HEALTHZ-FIX] يمنع health-monitor من إصدار SIGTERM بسبب 404
 app.get("/healthz", (_req, res) => res.status(200).json({ ok: true, ts: Date.now() }));
+// [ROOT-REDIRECT v8.26.0] الرابط العام كان يُفتح على "/" فيرجع 404 ⇒ «الرابط لا يعمل».
+// الآن الجذر يحوّل مباشرة إلى واجهة الويب آب الحقيقية.
+app.get("/", (_req, res) => res.redirect(302, "/webapp"));
 // [NEW-FEATURE-SITEGEN] بوّابة المواقع ��لمؤقتة — تمرّر أي طلب على
 // /tool/<code>/... إلى البورت الداخلي الخاص بذلك الموقع
 app.all("/tool/:code", (req, res) => {
@@ -331409,7 +331442,7 @@ async function main() {
         t.setTunnelUrlHook((url, provider) => {
           // كل رابط يُعلن هنا سبق نجاح فحصه ⇒ لا تحذير مخيف للمستخدم
           const isBackup = String(provider) === "localtunnel";
-          const text = `\u{1F310} *\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u064A\u0628 \u0622\u0628 \u0627\u0644\u062D\u0627\u0644\u064A*\n\n${url}\n\n` +
+          const text = `\u{1F310} *\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u064A\u0628 \u0622\u0628 \u0627\u0644\u062D\u0627\u0644\u064A*\n\n${url}/webapp\n\n` +
             `\u2705 \u0627\u0644\u0631\u0627\u0628\u0637 \u0645\u0641\u062D\u0648\u0635 \u0648\u064A\u0639\u0645\u0644 (${provider}).\n` +
             (isBackup ? `\u2139\uFE0F \u0645\u0632\u0648\u062F \u0627\u062D\u062A\u064A\u0627\u0637\u064A: \u0625\u0646 \u0638\u0647\u0631\u062A \u0635\u0641\u062D\u0629 \u062A\u062D\u0642\u0642 \u0623\u062F\u062E\u0644 IP \u0627\u0644\u062E\u0627\u062F\u0645 \u0643\u0643\u0644\u0645\u0629 \u0645\u0631\u0648\u0631.\n` : "") +
             `\u26A0\uFE0F \u064A\u062A\u063A\u064A\u0631 \u0645\u0639 \u0643\u0644 \u062A\u0634\u063A\u064A\u0644 \u2014 \u0627\u0633\u062A\u062E\u062F\u0645 \u0622\u062E\u0631 \u0631\u0633\u0627\u0644\u0629 \u062F\u0627\u0626\u0645\u0627\u064B.`;

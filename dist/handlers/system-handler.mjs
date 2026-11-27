@@ -140,6 +140,59 @@ export async function handleCallback(bot, query) {
     return true;
   }
 
+  // [WEBAPP-LINK v8.26.0] زر «رابط الويب آب»: يعرض الرابط الحالي بمسار /webapp،
+  // ويعيد إنشاءه إن لم يوجد. سبب الإصلاح: الرابط كان يُفتح على "/" فيرجع 404.
+  if (data === 'menu_webapp_link' || data === 'webapp_link_refresh') {
+    let state = { url: null, provider: null };
+    try {
+      const t = await import('../tunnel.mjs');
+      state = { url: t.tunnelUrl?.() || null, provider: t.tunnelProvider?.() || null };
+    } catch (error) {
+      _deps.logger?.warn?.({ error: String(error?.message || error) }, '[WEBAPP-LINK] تعذّر قراءة النفق');
+    }
+    if (!state.url) {
+      await bot.sendMessage(chatId,
+        '\u{1F310} *\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u064A\u0628 \u0622\u0628*\n\n' +
+        '\u26A0\uFE0F \u0644\u0627 \u064A\u0648\u062C\u062F \u0631\u0627\u0628\u0637 \u0639\u0627\u0645 \u0627\u0644\u0622\u0646 (\u0627\u0644\u0646\u0641\u0642 \u0644\u0645 \u064A\u0628\u062F\u0623 \u0623\u0648 \u0645\u0627\u062A).\n' +
+        '\u0627\u0636\u063A\u0637 \u00AB\u{1F504} \u0625\u0646\u0634\u0627\u0621 \u0631\u0627\u0628\u0637 \u062C\u062F\u064A\u062F\u00BB \u0648\u0633\u064A\u0638\u0647\u0631 \u062e\u0644\u0627\u0644 \u062b\u0648\u0627\u0646\u064d.',
+        {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '\u{1F504} إنشاء رابط جديد', callback_data: 'webapp_link_refresh' }],
+              [{ text: '\u25C0\uFE0F رجوع', callback_data: 'home' }],
+            ],
+          },
+        });
+      return true;
+    }
+    const link = `${state.url}/webapp`;
+    let reachable = null;
+    try {
+      const res = await fetch(link, { method: 'GET', signal: AbortSignal.timeout(8000), redirect: 'follow' });
+      reachable = res.status;
+    } catch { reachable = 0; }
+    const statusLine = reachable === 200
+      ? '\u2705 \u0627\u0644\u0631\u0627\u0628\u0637 \u064A\u0639\u0645\u0644 \u0627\u0644\u0622\u0646'
+      : `\u26A0\uFE0F \u0627\u0644\u0641\u062D\u0635 \u0623\u0631\u062C\u0639 ${reachable === 0 ? '\u0644\u0627 \u0627\u0633\u062A\u062C\u0627\u0628\u0629' : 'HTTP ' + reachable}`;
+    await bot.sendMessage(chatId,
+      '\u{1F310} *\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u064A\u0628 \u0622\u0628 \u0627\u0644\u062D\u0627\u0644\u064A*\n\n' +
+      `${link}\n\n` +
+      `${statusLine}\n` +
+      `\u{1F517} \u0627\u0644\u0645\u0632\u0648\u0651\u062F: ${state.provider || '—'}\n\n` +
+      '\u2139\uFE0F \u0627\u0644\u0631\u0627\u0628\u0637 \u064A\u062A\u063A\u064A\u0631 \u0645\u0639 \u0643\u0644 \u0625\u0639\u0627\u062F\u0629 \u062a\u0634\u063a\u064a\u0644 \u2014 \u0627\u0633\u062a\u062e\u062f\u0645 \u0647\u0630\u0627 \u0627\u0644\u0632\u0631 \u062f\u0627\u0626\u0645\u0627\u064b.',
+      {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '\u{1F310} فتح الويب آب', url: link }],
+            [{ text: '\u{1F504} تحديث / إعادة الفحص', callback_data: 'webapp_link_refresh' }],
+            [{ text: '\u25C0\uFE0F رجوع', callback_data: 'home' }],
+          ],
+        },
+      });
+    return true;
+  }
   if (data === 'menu_help') {
     await _deps.showHelp(bot, chatId, userId, user, isDev);
     return true;

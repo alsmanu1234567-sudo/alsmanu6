@@ -28,3 +28,6 @@ bot-data/
 
 # [RC-PERSIST v8.23.0] مخزن نسخ بالتفاعل (بيانات تشغيل ضخمة)
 bot-data/react-copy/
+
+# [AUDIO-STICKER v8.26.0] أصوات محفوظة للمحادثات
+bot-data/audio-sticker/
