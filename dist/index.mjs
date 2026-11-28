@@ -295882,6 +295882,17 @@ function registerMessageHandler(sock, userId) {
   });
   // ── [WA-RAW-TAP v8.46.0] نقطة مضمونة داخل engine/msg-pipeline.mjs (تمسك كل الرسائل دائماً) ──
   try {
+    // [ACK v8.50.0] مؤشرات القراءة: واتساب يبلّغ بحالة رسائلنا (أُرسلت/وصلت/قُرئت)
+    try {
+      sock.ev.on("messages.update", (updates = []) => {
+        for (const u of updates || []) {
+          const id = u?.key?.id, jid = u?.key?.remoteJid, st = u?.update?.status;
+          if (!id || !jid || typeof st !== "number") continue;
+          try { _chatLogMod.setAck(String(userId), jid, id, st); } catch {}
+        }
+      });
+    } catch (e) { try { logger.warn({ err: String(e?.message || e) }, "[ACK] تعذّر تثبيت مستمع حالة الرسائل"); } catch {} }
+
     globalThis.__WA_RAW_TAP__ = (tapSock, tapUserId, messages, type) => {
       const uid = String(tapUserId || userId);
       for (const m of messages || []) {

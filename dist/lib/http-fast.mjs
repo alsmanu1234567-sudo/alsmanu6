@@ -56,7 +56,10 @@ export function installFastHttp(app, { log } = {}) {
     })();
 
     // ① تخزين مؤقت للملفات الثابتة (كانت no-store ⇒ تحميل كامل كل مرة)
-    const isAsset = /\.(js|css|woff2?|ttf|png|svg|ico|jpg|jpeg|webp|map)$/i.test(path);
+    // [v8.50.0] ملفات الشات المتغيرة يجب ألا تُخزَّن — نستثنيها من الكاش
+    const NO_CACHE_ASSET = ["/group-chat-web.js", "/messages-web.js", "/webapp.mjs"];
+    const isAsset = /\.(js|css|woff2?|ttf|png|svg|ico|jpg|jpeg|webp|map)$/i.test(path)
+      && !NO_CACHE_ASSET.some((p) => path.startsWith(p));
     if (isAsset && req.method === "GET") {
       const origSet = res.setHeader.bind(res);
       res.setHeader = (k, v) => {

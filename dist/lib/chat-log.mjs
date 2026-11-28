@@ -7,7 +7,13 @@
 //
 // كل شيء best-effort: لا يرمي أبداً، وبحدود صريحة لحماية الرام.
 
+import { EventEmitter } from "node:events";
 import { unwrapViewOnce, mediaKindOf } from "./view-once.mjs";
+
+// [v8.50.0] بثّ لحظي: كل رسالة/حالة تُنشر هنا ليصلها الويب آب عبر SSE
+// بدل تحديث كل ٤ ثوانٍ (كان سبب تأخّر ظهور الرسائل).
+export const chatEvents = new EventEmitter();
+try { chatEvents.setMaxListeners(100); } catch {}
 
 export const CHAT_LOG_LIMITS = {
   perChat: 60,   // [v8.48.9] 120 ⇒ 60 (نصف الذاكرة)
@@ -178,11 +184,17 @@ export function recordMessage(uid, jid, msg, { sock = null, groupName = null } =
       hasMedia: Boolean(node?.mediaKey || node?.url || node?.directPath),
       replyTo: ctx?.quotedMessageId || ctx?.stanzaId || null,
       replyPreview: ctx?.quotedMessage ? (textOf(ctx.quotedMessage) || classifyMessage(ctx.quotedMessage).type) : null,
+      // [v8.50.0] مؤشرات القراءة: 0 لا شيء · 1 أُرسلت · 2 وصلت · 3 قُرئت · 4 شُغّلت
+      ack: typeof msg.status === "number" ? msg.status : msg.key?.fromMe ? 1 : 0,
       raw: msg,
     };
     chat.msgs.push(entry);
     if (chat.msgs.length > CHAT_LOG_LIMITS.perChat) chat.msgs.splice(0, chat.msgs.length - CHAT_LOG_LIMITS.perChat);
     prune(map);
+    try {
+      const { raw: _r, ...pub } = entry;
+      chatEvents.emit("entry", { uid: String(uid), jid: String(jid), entry: { ...pub, time: fmtTime(pub.ts) } });
+    } catch {}
     return true;
   } catch { return false; }
 }
@@ -200,6 +212,26 @@ export function listMessages(uid, jid, limit = 80) {
     if (!chat) return [];
     return chat.msgs.slice(-Math.max(1, limit)).map(({ raw, ...rest }) => ({ ...rest, time: fmtTime(rest.ts) }));
   } catch { return []; }
+}
+
+/** [v8.50.0] تحديث مؤشر القراءة لرسالة (✓ ✓✓ باللون الأزرق). */
+export function setAck(uid, jid, id, ack) {
+  try {
+    const chat = bucket(uid).get(String(jid));
+    if (!chat) return false;
+    const e = chat.msgs.find((x) => x.id === String(id));
+    if (!e) return false;
+    const n = Number(ack) || 0;
+    if (n <= (Number(e.ack) || 0)) return false;
+    e.ack = n;
+    try { chatEvents.emit("ack", { uid: String(uid), jid: String(jid), id: e.id, ack: n }); } catch {}
+    return true;
+  } catch { return false; }
+}
+
+/** كل محادثات مستخدم (للبثّ الاختياري). */
+export function chatsOf(uid) {
+  try { return [...bucket(uid).keys()]; } catch { return []; }
 }
 
 /** رسالة كاملة (مع raw) — للاقتباس أو تنزيل الوسائط. */

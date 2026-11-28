@@ -36,6 +36,15 @@
   .gcw-note{font-size:11px;color:#94a3c0;text-align:center;margin-top:6px}
   .gcw-dl{background:#1c2436;border:1px solid #34d39955;color:#34d399;border-radius:8px;padding:2px 7px;font-size:10.5px;cursor:pointer;font-family:inherit}
   .gcw-dl:disabled{opacity:.6}
+  /* [v8.50.0] مؤشرات القراءة: ✓ أُرسلت · ✓✓ وصلت · ✓✓ أزرق = قُرئت */
+  .gcw-tick{display:inline-block;margin-inline-end:4px;font-size:11.5px;color:#94a3c0;letter-spacing:-1px}
+  .gcw-tick.read{color:#53bdeb}
+  .gcw-ico{background:#1c2436;border:1px solid #252e45;color:#eef2fa;border-radius:12px;width:42px;height:42px;font-size:17px;cursor:pointer;flex:none}
+  .gcw-ico:disabled{opacity:.5}
+  .gcw-ico.rec{background:#7f1d1d;border-color:#ef4444;animation:gcw-pulse 1s infinite}
+  @keyframes gcw-pulse{0%,100%{opacity:1}50%{opacity:.45}}
+  .gcw-msg.pending{opacity:.55}
+  .gcw-row{display:flex;gap:7px;align-items:flex-end}
   `;
 
   function ensureStyle() {
@@ -78,7 +87,7 @@
     return base;
   };
 
-  const state = { jid: '', name: '', reply: null, timer: null, lastCount: -1, sending: false };
+  const state = { jid: '', name: '', reply: null, timer: null, lastCount: -1, sending: false, es: null, rec: null };
 
   function el(id) { return document.getElementById(id); }
 
@@ -98,10 +107,13 @@
       '<div class="gcw-foot">' +
         '<div class="gcw-replybar" id="gcw-replybar"><span id="gcw-replytxt"></span><button id="gcw-replycancel">✕</button></div>' +
         '<div class="gcw-row">' +
+          '<button class="gcw-ico" id="gcw-pic" title="إرسال صورة">🖼️</button>' +
+          '<button class="gcw-ico" id="gcw-mic" title="تسجيل رسالة صوتية">🎤</button>' +
           '<textarea class="gcw-in" id="gcw-in" rows="1" placeholder="اكتب رسالة… (إرسال بـ Enter)"></textarea>' +
           '<button class="gcw-send" id="gcw-send">إرسال</button>' +
         '</div>' +
-        '<div class="gcw-note">اضغط على أي رسالة للردّ عليها · تُحدَّث تلقائياً كل ٤ ثوانٍ</div>' +
+        '<input type="file" id="gcw-file" accept="image/*" style="display:none">' +
+        '<div class="gcw-note" id="gcw-note">اضغط على أي رسالة للردّ عليها · وصول الرسائل لحظي من واتساب</div>' +
       '</div>';
     document.body.appendChild(bg);
 
@@ -110,6 +122,13 @@
     el('gcw-test').onclick = () => selftest(true);
     el('gcw-replycancel').onclick = () => setReply(null);
     el('gcw-send').onclick = send;
+    el('gcw-pic').onclick = () => el('gcw-file').click();
+    el('gcw-file').onchange = (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      ev.target.value = '';
+      if (f) uploadFile(f);
+    };
+    el('gcw-mic').onclick = recordVoice;
     el('gcw-in').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
     });
@@ -135,6 +154,9 @@
   const isImage = (m) => m.type === 'image' || (m.type === 'sticker' && (m.mimetype || '').includes('image')) || (m.type === 'sticker' && !(m.mimetype || '').startsWith('audio'));
 
   function mediaBlock(m) {
+    // [v8.50.0] معاينة محلية فورية للوسيط أثناء الإرسال (قبل أن يصبح له معرّف)
+    if (m.localUrl && isAudio(m)) return `<audio controls src="${m.localUrl}" style="width:230px;margin-top:6px"></audio>`;
+    if (m.localUrl && isImage(m)) return `<img class="thumb" data-media="1" data-kind="img" loading="lazy" src="${m.localUrl}" alt="">`;
     if (!m.hasMedia && !m.thumb) return '';
     const src = mediaUrl(m);
     if (isAudio(m)) {
@@ -161,7 +183,9 @@
     const dl = (m.hasMedia || m.viewOnce)
       ? `<button class="gcw-dl" data-dl="${esc(m.id)}" title="تنزيل عبر تيليجرام">⬇️ تيليجرام</button>`
       : '';
-    const tm = `<div class="tm">${esc(m.time || '')}${dl ? ' ' + dl : ''}</div>`;
+    const ac = Number(m.ack) || 0;
+    const tick = m.fromMe ? `<span class="gcw-tick${ac >= 3 ? ' read' : ''}" data-tick="${esc(m.id)}" title="${ac >= 3 ? 'قُرئت' : ac >= 2 ? 'وصلت' : 'أُرسلت'}">${ac >= 2 ? '✓✓' : '✓'}</span>` : '';
+    const tm = `<div class="tm">${tick}${esc(m.time || '')}${dl ? ' ' + dl : ''}</div>`;
     return `<div class="gcw-msg${mine}" data-id="${esc(m.id)}" data-preview="${esc((m.text || m.type || '').slice(0, 80))}">${who}${rep}${kind}${text}${media}${tm}</div>`;
   }
 
@@ -270,6 +294,140 @@
     return out;
   }
 
+  // ══════════ [v8.50.0] بثّ لحظي + إرسال متفائل + وسائط ══════════
+  function tokenOf() {
+    try {
+      return new URLSearchParams(location.search).get('token') || localStorage.getItem('fw_token') || window.TOKEN || '';
+    } catch { return window.TOKEN || ''; }
+  }
+  const nowTime = () => new Date().toLocaleTimeString('ar', { hour: '2-digit', minute: '2-digit' });
+
+  function nearBottom() {
+    const b = el('gcw-body');
+    return b ? b.scrollHeight - b.scrollTop - b.clientHeight < 140 : true;
+  }
+  function appendBubble(m, { pending } = {}) {
+    const body = el('gcw-body');
+    if (!body) return null;
+    const empty = body.querySelector('.gcw-empty');
+    if (empty) empty.remove();
+    const atBottom = nearBottom();
+    const wrap = document.createElement('div');
+    wrap.innerHTML = bubble(m);
+    const node = wrap.firstElementChild;
+    if (!node) return null;
+    if (pending) node.classList.add('pending');
+    node.onclick = (ev) => {
+      if (ev.target.closest('[data-media]') || ev.target.closest('[data-dl]') || ev.target.tagName === 'AUDIO') return;
+      setReply({ id: node.dataset.id, preview: node.dataset.preview, type: m.type });
+    };
+    node.querySelectorAll('[data-media][data-kind]').forEach((n) => {
+      n.onclick = (ev) => { ev.stopPropagation(); openLightbox(n.getAttribute('src'), n.dataset.kind); };
+    });
+    body.appendChild(node);
+    if (atBottom) body.scrollTop = body.scrollHeight;
+    return node;
+  }
+  function applyAck(id, ack) {
+    const n = el('gcw-body')?.querySelector(`[data-tick="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`);
+    if (!n) return;
+    n.textContent = Number(ack) >= 2 ? '✓✓' : '✓';
+    n.classList.toggle('read', Number(ack) >= 3);
+    n.title = Number(ack) >= 3 ? 'قُرئت' : Number(ack) >= 2 ? 'وصلت' : 'أُرسلت';
+  }
+  function onIncoming(m) {
+    if (!m || !m.id) return;
+    const body = el('gcw-body');
+    if (!body) return;
+    if (body.querySelector(`[data-id="${(window.CSS && CSS.escape) ? CSS.escape(m.id) : m.id}"]`)) return;
+    appendBubble(m);
+    state.lastCount = (state.lastCount || 0) + 1;
+    const sub = el('gcw-sub');
+    if (sub) sub.textContent = `${state.lastCount} رسالة معروضة`;
+  }
+  function connectStream() {
+    closeStream();
+    if (!state.jid) return;
+    let es;
+    try {
+      es = new EventSource('/api/wa/chat/stream?jid=' + encodeURIComponent(state.jid) + '&token=' + encodeURIComponent(tokenOf()));
+    } catch { return; }
+    state.es = es;
+    es.onmessage = (ev) => {
+      let d = null;
+      try { d = JSON.parse(ev.data); } catch { return; }
+      if (d.type === 'message') onIncoming(d.message);
+      else if (d.type === 'ack') applyAck(d.id, d.ack);
+    };
+    es.onopen = () => { const n = el('gcw-note'); if (n) n.textContent = '🟢 متصل مباشرة بواتساب — الرسائل تظهر لحظياً'; };
+    es.onerror = () => { const n = el('gcw-note'); if (n) n.textContent = '🟡 إعادة اتصال تلقائي… (تحديث احتياطي كل ٢٠ ثانية)'; };
+  }
+  function closeStream() {
+    if (state.es) { try { state.es.close(); } catch {} state.es = null; }
+  }
+
+  async function uploadFile(file) {
+    const isImg = String(file.type || '').startsWith('image/');
+    if (!isImg) { alert('الصور فقط مدعومة حاليًا (JPG/PNG/WEBP)'); return; }
+    if (file.size > 16 * 1024 * 1024) { alert('الحجم أكبر من 16 ميجابايت'); return; }
+    await uploadBlob(file, 'image', '');
+  }
+  async function uploadBlob(blob, kind, caption) {
+    const q = new URLSearchParams({ jid: state.jid, kind, caption: caption || '', replyTo: state.reply ? state.reply.id : '' });
+    const id = 'tmp-' + Date.now();
+    const localUrl = URL.createObjectURL(blob);
+    const local = String(blob.type || '').startsWith('image/')
+      ? { id, fromMe: true, type: 'image', ts: Date.now(), time: nowTime(), ack: 0, text: caption || '', hasMedia: true, mimetype: blob.type, localUrl, fileName: 'صورة' }
+      : { id, fromMe: true, type: 'ptt', ts: Date.now(), time: nowTime(), ack: 0, text: '', hasMedia: true, mimetype: blob.type, localUrl, fileName: 'رسالة صوتية' };
+    const node = appendBubble(local, { pending: true });
+    if (node) { try { node.classList.add('pending'); } catch {} }
+    try {
+      const r = await fetch('/api/wa/chat/send-media?' + q.toString(), {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream', 'x-mime': blob.type || '', 'x-webapp-token': tokenOf() },
+        body: blob,
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+      if (node && j.message && node.parentNode) {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = bubble(j.message);
+        const fresh = tmp.firstElementChild;
+        if (fresh) { node.replaceWith(fresh); }
+      } else if (node) node.classList.remove('pending');
+      setReply(null);
+    } catch (e) {
+      if (node) node.remove();
+      alert('تعذّر إرسال الوسيط: ' + e.message);
+    }
+  }
+
+  async function recordVoice() {
+    const btn = el('gcw-mic');
+    if (state.rec && state.rec.state === 'recording') { try { state.rec.stop(); } catch {} return; }
+    if (!navigator.mediaDevices || !window.MediaRecorder) { alert('المتصفح لا يدعم التسجيل — استخدم كروم'); return; }
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { alert('تعذّر الوصول للميكروفون: ' + e.message); return; }
+    const types = ['audio/ogg;codecs=opus', 'audio/webm;codecs=opus', 'audio/mp4', 'audio/webm'];
+    const mime = types.find((t) => { try { return MediaRecorder.isTypeSupported(t); } catch { return false; } }) || '';
+    const mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    const chunks = [];
+    mr.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+    mr.onstop = async () => {
+      try { stream.getTracks().forEach((t) => t.stop()); } catch {}
+      btn.textContent = '🎤'; btn.classList.remove('rec'); state.rec = null;
+      const blob = new Blob(chunks, { type: mime || 'audio/webm' });
+      if (blob.size < 900) { alert('التسجيل قصير جداً'); return; }
+      await uploadBlob(blob, 'ptt', '');
+    };
+    state.rec = mr;
+    mr.start();
+    btn.textContent = '⏹'; btn.classList.add('rec');
+    const note = el('gcw-note');
+    if (note) note.textContent = '🔴 جارٍ التسجيل… اضغط ⏹ للإرسال';
+  }
+
   async function load(force) {
     if (!state.jid) return;
     try {
@@ -293,11 +451,19 @@
     state.sending = true;
     el('gcw-send').disabled = true;
     try {
-      await api('/api/wa/chat/send', { jid: state.jid, text, replyTo: state.reply ? state.reply.id : null });
+      const replyId = state.reply ? state.reply.id : null;
+      // [v8.50.0] تظهر الرسالة فوراً (لا انتظار ٤ ثوانٍ) ثم تُستبدل بالنسخة الحقيقية
+      const node = appendBubble({ id: 'tmp-' + Date.now(), fromMe: true, type: 'text', text, ts: Date.now(), time: nowTime(), ack: 0 }, { pending: true });
       box.value = '';
       box.style.height = 'auto';
       setReply(null);
-      await load(true);
+      const out = await api('/api/wa/chat/send', { jid: state.jid, text, replyTo: replyId });
+      if (node && out && out.message && node.parentNode) {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = bubble(out.message);
+        const fresh = tmp.firstElementChild;
+        if (fresh) node.replaceWith(fresh); else node.classList.remove('pending');
+      } else if (node) node.classList.remove('pending');
     } catch (e) {
       alert('تعذّر الإرسال: ' + e.message);
     }
@@ -317,14 +483,19 @@
     el('gcw-body').innerHTML = '<div class="gcw-empty">…جارٍ تحميل الرسائل</div>';
     el('gcw-bg').classList.add('open');
     load(true);
+    connectStream();
     if (state.timer) clearInterval(state.timer);
-    state.timer = setInterval(() => load(false), 4000);
+    // احتياطي بطيء فقط: البثّ اللحظي هو الأساس
+    state.timer = setInterval(() => { if (!state.es || state.es.readyState === 2) load(false); }, 20000);
   }
 
   function close() {
     const bg = el('gcw-bg');
     if (bg) bg.classList.remove('open');
     if (state.timer) { clearInterval(state.timer); state.timer = null; }
+    closeStream();
+    try { if (state.rec && state.rec.state === 'recording') state.rec.stop(); } catch {}
+    state.rec = null;
     state.jid = '';
   }
 

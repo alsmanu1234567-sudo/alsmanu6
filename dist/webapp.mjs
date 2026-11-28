@@ -782,6 +782,46 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
       messages: CL().listMessages(uid, jid, limit),
     };
   }));
+  // [v8.50.0] بثّ لحظي (SSE): البوت يدفع كل رسالة/حالة قراءة فوراً للويب آب
+  app.get("/api/wa/chat/stream", (req, res) => {
+    const uid = resolveUid(req);
+    if (!uid) { res.status(401).json({ error: "غير مصرح" }); return; }
+    const jid = String(req.query?.jid || "").trim();
+    if (!jid.endsWith("@g.us")) { res.status(400).json({ error: "اختر مجموعة أولاً" }); return; }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    try { res.flushHeaders?.(); } catch {}
+    const send = (obj) => { try { res.write("data: " + JSON.stringify(obj) + "\n\n"); } catch {} };
+    send({ type: "hello", jid, at: Date.now() });
+    const onEntry = (p) => {
+      if (String(p.uid) !== String(uid) || String(p.jid) !== jid) return;
+      send({ type: "message", message: p.entry });
+    };
+    const onAck = (p) => {
+      if (String(p.uid) !== String(uid) || String(p.jid) !== jid) return;
+      send({ type: "ack", id: p.id, ack: p.ack });
+    };
+    let alive = true;
+    try {
+      CL().chatEvents.on("entry", onEntry);
+      CL().chatEvents.on("ack", onAck);
+    } catch {}
+    const hb = setInterval(() => { if (alive) { try { res.write(": ping\n\n"); } catch {} } }, 25000);
+    try { hb.unref?.(); } catch {}
+    const done = () => {
+      alive = false;
+      clearInterval(hb);
+      try { CL().chatEvents.off("entry", onEntry); CL().chatEvents.off("ack", onAck); } catch {}
+      try { res.end(); } catch {}
+    };
+    req.on("close", done);
+    req.on("error", done);
+  });
+
   app.post("/api/wa/chat/send", parseJson, guard(async (uid, req) => {
     const jid = String(req.body?.jid || "").trim();
     const text = String(req.body?.text || "").trim();
@@ -802,8 +842,70 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
         pushName: "أنت",
       }, { sock: CL().sockFor(uid, jid) });
     } catch { }
-    return { sent: true, jid, quoted: Boolean(quotedEntry) };
+    // [v8.50.0] نُعيد الرسالة كما سُجّلت ليستبدل العميل الفقاعة المؤقتة فوراً
+    const saved = out?.key?.id ? CL().getMessage(uid, jid, out.key.id) : null;
+    const pubSaved = saved ? Object.fromEntries(Object.entries(saved).filter(([k]) => k !== "raw")) : null;
+    return {
+      sent: true, jid, quoted: Boolean(quotedEntry),
+      message: pubSaved ? { ...pubSaved, time: new Date(pubSaved.ts).toLocaleTimeString("ar", { hour: "2-digit", minute: "2-digit", timeZone: "Africa/Khartoum" }) } : null,
+    };
   }));
+  // [v8.50.0] مُحلّل جسم خام للوسائط (في الرام فقط — لا قرص، حد 16MB)
+  function expressRaw(req, res, next) {
+    const chunks = [];
+    let size = 0;
+    let aborted = false;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > 16 * 1024 * 1024) { aborted = true; try { req.destroy(); } catch {} return; }
+      chunks.push(c);
+    });
+    req.on("end", () => { if (aborted) return; req.body = Buffer.concat(chunks); next(); });
+    req.on("error", () => { if (!aborted) next(); });
+  }
+
+  // [v8.50.0] إرسال صورة أو تسجيل صوتي من الويب آب (في الرام فقط — لا قرص)
+  app.post("/api/wa/chat/send-media", expressRaw, guard(async (uid, req, res) => {
+    const jid = String(req.query?.jid || "").trim();
+    const kind = String(req.query?.kind || "image").toLowerCase();
+    const caption = String(req.query?.caption || "").slice(0, 900);
+    const replyTo = String(req.query?.replyTo || "").trim();
+    if (!jid.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+    const buffer = req.body;
+    if (!buffer?.length) throw new Error("لم يُرسل أي ملف");
+    if (buffer.length > 16 * 1024 * 1024) throw new Error("الحجم أكبر من 16 ميجابايت");
+    const sock = CL().sockFor(uid, jid);
+    if (!sock?.sendMessage) throw new Error("واتساب غير متصل — اربط رقمك أولاً");
+    const quotedEntry = replyTo ? CL().getMessage(uid, jid, replyTo) : null;
+    const quoted = quotedEntry?.raw ? { quoted: quotedEntry.raw } : undefined;
+    const mime = String(req.headers["x-mime"] || "").trim();
+    const isVoice = kind === "ptt" || kind === "voice";
+    const payload = isVoice
+      ? { audio: buffer, mimetype: mime || "audio/ogg; codecs=opus", ptt: true }
+      : { image: buffer, caption: caption || undefined, mimetype: mime || "image/jpeg" };
+    const out = await sock.sendMessage(jid, payload, quoted);
+    const id = out?.key?.id || null;
+    if (id) {
+      try { voRam.setMedia(jid, id, buffer, { kind: isVoice ? "ptt" : "image", mimetype: mime || (isVoice ? "audio/ogg" : "image/jpeg") }); } catch {}
+      try {
+        CL().recordMessage(uid, jid, {
+          key: out.key,
+          status: 1,
+          message: isVoice
+            ? { audioMessage: { mimetype: mime || "audio/ogg; codecs=opus", ptt: true } }
+            : { imageMessage: { mimetype: mime || "image/jpeg", caption: caption || null, fileLength: buffer.length } },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+          pushName: "أنت",
+        }, { sock });
+      } catch {}
+      const saved = CL().getMessage(uid, jid, id);
+      const pubSaved = saved ? Object.fromEntries(Object.entries(saved).filter(([k]) => k !== "raw")) : null;
+      res.json({ sent: true, jid, id, kind: isVoice ? "ptt" : "image", bytes: buffer.length, message: pubSaved });
+      return;
+    }
+    res.json({ sent: true, jid, id: null, kind: isVoice ? "ptt" : "image", bytes: buffer.length, message: null });
+  }));
+
   // [NO-DISK v8.41.0] بثّ الوسائط عند الطلب: من الرام → أو تنزيل لحظي من واتساب (بلا حفظ)
   async function fetchChatMedia(uid, jid, id) {
     const entry = CL().getMessage(uid, jid, id);
@@ -2230,6 +2332,6 @@ async function delRule(){
 load();
 setInterval(()=>{if(!document.hidden)load()}, 30000);
 </script>
-<script defer src="/group-chat-web.js"></script>
+<script defer src="/group-chat-web.js?v=8.50.0"></script>
 </body>
 </html>`;
