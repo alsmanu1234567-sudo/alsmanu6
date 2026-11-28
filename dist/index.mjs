@@ -303891,12 +303891,15 @@ async function sendDevPanel(bot2, chatId, userId) {
     const _b=globalThis.__STABLE_BASE__||globalThis.__FW_PUBLIC_URL||"";
     const _k=globalThis.__DEV_KEY__||"";
     if(_b&&_k){
+      // [v8.48.6] «لوحة المطوّر» = لوحة البوت الحقيقية /developer-console (كان الزر يفتح لوحة أخرى).
+      let _devUrl=null;
+      try{_devUrl=developerConsole.issue(userId);}catch(_e){}
       devKeyboard.inline_keyboard[0]=[
-        {text:'🛠 لوحة المطوّر',url:`${_b}/dev?k=${_k}`},
+        {text:'🛠 لوحة المطوّر',url:_devUrl||`${_b}/dev?k=${_k}`},
         {text:'🖥 لوحة السيرفر',url:(globalThis.__PANEL_ENTRY__?globalThis.__PANEL_ENTRY__():`${_b}/srv?k=${_k}`)},
       ];
       const _web=webappUrlFor(userId)||`${_b}/webapp?token=${tokenForUser(userId)}`;
-      devKeyboard.inline_keyboard.splice(1,0,[{text:'🌐 الويب آب (المجموعات والردود)',url:_web}]);
+      devKeyboard.inline_keyboard.splice(1,0,[{text:'🌐 الويب آب الدائم (المجموعات والردود)',url:_web}],[{text:'📊 أدوات رسائل واتساب',url:`${_b}/dev?k=${_k}`}]);
     } else devKeyboard.inline_keyboard[0]=[{text:'🌐 فتح لوحة المطوّر',url:developerConsole.issue(userId)}];
   }catch{}}
   await bot2.sendMessage(

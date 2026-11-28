@@ -14,12 +14,12 @@ test("بلا نفق: يُستخدم الرابط الثابت http بدل إرج
   delete globalThis.__STABLE_BASE__;
 });
 
-test("وجود https موثوق: يبقى web_app (تيليجرام)", () => {
+test("[v8.48.6] الرابط الدائم يتقدّم على النفق حتى لو كان https", () => {
   globalThis.__FW_PUBLIC_URL = "https://abc.trycloudflare.com";
   globalThis.__FW_PUBLIC_TRUSTED = true;
   globalThis.__STABLE_BASE__ = "http://92.118.206.4:30242";
   const url = webappUrlFor("7428421245");
-  assert.match(url, /^https:\/\/abc\.trycloudflare\.com\/webapp\?token=/);
+  assert.match(url, /^http:\/\/92\.118\.206\.4:30242\/webapp\?token=/);
   delete globalThis.__STABLE_BASE__;
   delete globalThis.__FW_PUBLIC_URL;
   delete globalThis.__FW_PUBLIC_TRUSTED;

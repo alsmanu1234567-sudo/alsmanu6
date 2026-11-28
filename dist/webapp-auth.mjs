@@ -62,16 +62,13 @@ export function webappBaseUrl() {
 
 export function webappUrlFor(uid) {
   const tok = tokenForUser(uid);
-  // [v8.48.1] الأولوية: رابط https الموثوق (نفق/بيئة) لأنه يسمح بأزرار web_app.
-  if (globalThis.__FW_PUBLIC_TRUSTED !== false) {
-    const base = webappBaseUrl();
-    if (base && /^https:\/\//i.test(base)) return `${base}/webapp?token=${tok}`;
-  }
-  // البديل الدائم: منفذ الاستضافة (http) — يعمل في المتصفح ولو مات كل الأنفاق.
+  // [v8.48.6] الرابط الدائم أولاً دائماً — طلب المستخدم: زر واحد يفتح الدائم.
+  // النفق يموت كل دقائق، فلا نضعه في أي زر.
   const stable = globalThis.__STABLE_BASE__;
   if (stable) return `${stable}/webapp?token=${tok}`;
   const base = webappBaseUrl();
-  return base ? `${base}/webapp?token=${tok}` : null;
+  if (base && globalThis.__FW_PUBLIC_TRUSTED !== false) return `${base}/webapp?token=${tok}`;
+  return null;
 }
 
 // رابط محلي (fallback عند غياب رابط عام) — يُعرض كنص للمستخدم

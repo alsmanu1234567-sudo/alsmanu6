@@ -78,6 +78,31 @@ export async function panelPort() {
   return _panelCache.port;
 }
 
+// [v8.48.6] «خليها شغالة دائماً»: نُشغّل اللوحة إن كانت متوقفة، ونراقبها كل دقيقة.
+let _ensureBusy = false;
+let _lastEnsure = 0;
+let _lastStartErr = null;
+export async function ensurePanel(force = false) {
+  let port = await panelPort();
+  if (port && (await _panelAlive(port))) return port;
+  if (_ensureBusy) return port;
+  if (!force && Date.now() - _lastEnsure < 15000) return port;
+  _ensureBusy = true;
+  _lastEnsure = Date.now();
+  try {
+    _lastStartErr = null;
+    await _startPanel();
+  } catch (e) {
+    _lastStartErr = String(e?.message || e);
+  } finally {
+    _ensureBusy = false;
+  }
+  return await panelPort();
+}
+export function panelHealth() {
+  return { port: _panelCache.port || null, lastStartErr: _lastStartErr };
+}
+
 async function _panelAlive(port) {
   if (!port) return false;
   return await new Promise((resolve) => {
@@ -141,9 +166,14 @@ async function _startPanel() {
 
 // ─── الوكيل: /srv/panel/* → لوحة السيرفر الأصلية ──────────────────
 async function _proxy(req, res, prefix) {
-  const port = await panelPort();
-  if (!port) {
-    res.status(503).json({ error: "لوحة السيرفر لا تعمل — شغّلها من زر «تشغيل اللوحة»" });
+  let port = await panelPort();
+  if (!port || !(await _panelAlive(port))) port = await ensurePanel(true);
+  if (!port || !(await _panelAlive(port))) {
+    res.status(503).json({
+      error: `لوحة السيرفر لا تعمل — حاولت تشغيلها تلقائياً${_lastStartErr ? ` وفشلت: ${_lastStartErr}` : " ولم تستجب بعد"}`,
+      panelDir: PANEL_DIR(),
+      hint: "تأكد أن مجلد bol/server-control موجود، أو شغّلها يدوياً من /hub",
+    });
     return;
   }
   const rest = String(req.originalUrl || req.url || "").slice(prefix.length) || "/";
@@ -278,8 +308,9 @@ export function registerServerHub(app, deps = {}) {
 
   // [v8.48.5] /srv = اللوحة الأصلية نفسها (هي التي تتحكم بالسيرفر كاملاً).
   // مركز الحالة/الأزرار الذي بنيته سابقاً انتقل إلى /hub (ثانوي).
-  app.get("/srv", (req, res) => {
+  app.get("/srv", async (req, res) => {
     if (!_keyOk(req)) return res.status(401).send("مفتاح المطوّر مطلوب: أضف ?k=<KEY>");
+    await ensurePanel().catch(() => {});
     const t = panelToken();
     const q = `k=${encodeURIComponent(key)}`;
     res.redirect(302, `/sc?${q}${t ? "#" + t : ""}`);
@@ -406,14 +437,39 @@ export function registerServerHub(app, deps = {}) {
   });
 
   // صفحة اللوحة الأصلية وملفاتها — على /sc (بمفتاح المطوّر)
-  const _panelPage = (req, res) => {
+  const _panelPage = async (req, res) => {
     if (!_keyOk(req)) return res.status(401).send("مفتاح المطوّر مطلوب: أضف ?k=<KEY>");
-    _proxy({ ...req, originalUrl: "/", url: "/" }, res, "").catch(() => {});
+    let port = await panelPort();
+    if (!port || !(await _panelAlive(port))) port = await ensurePanel(true);
+    if (!port) return res.status(503).send("لوحة السيرفر لا تعمل ولم أستطع تشغيلها: " + (_lastStartErr || "سبب غير معروف"));
+    try {
+      const html = await new Promise((resolve, reject) => {
+        const r = http.request({ host: "127.0.0.1", port, path: "/", method: "GET", timeout: 15000, headers: { "x-control-token": panelToken() } }, (up) => {
+          const chunks = [];
+          up.on("data", (c) => chunks.push(c));
+          up.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+        });
+        r.on("error", reject);
+        r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
+        r.end();
+      });
+      // نُعيد كتابة سكربتات اللوحة إلى /sc/* لأن البوت يخدم /server-explorer.js بنفسه
+      const fixed = html
+        .replace(/src="\/app\.js/gi, 'src="/sc/app.js')
+        .replace(/src="\/server-explorer\.js/gi, 'src="/sc/server-explorer.js')
+        .replace(/href="\/styles\.css/gi, 'href="/sc/styles.css')
+        .replace(/href="\/favicon\.ico/gi, 'href="/sc/favicon.ico');
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      res.end(fixed);
+    } catch (e) {
+      res.status(502).send("تعذّر تحميل اللوحة الأصلية: " + (e?.message || e));
+    }
   };
   app.get("/sc", _panelPage);
   app.get("/sc/", _panelPage);
   for (const f of ["/app.js", "/server-explorer.js", "/styles.css", "/favicon.ico"]) {
-    app.get(f, (req, res) => _proxy({ ...req, originalUrl: f, url: f }, res, "").catch(() => {}));
+    app.get("/sc" + f, (req, res) => _proxy({ ...req, originalUrl: f, url: f }, res, "").catch(() => {}));
   }
 
   // رابط دخول جاهز للوحة الأصلية (مفتاح المطوّر + توكن اللوحة في #hash)
@@ -433,6 +489,13 @@ export function registerServerHub(app, deps = {}) {
     if (!_keyOk(req)) return res.status(401).json({ error: "مفتاح غير صحيح" });
     _proxy(req, res, "/srv/panel").catch((e) => { try { res.status(502).json({ error: e?.message }); } catch {} });
   });
+
+  // [v8.48.6] «خليها شغالة دائماً»: فحص كل دقيقة وتشغيل تلقائي عند التوقف.
+  try {
+    const _t = setInterval(() => { ensurePanel().catch(() => {}); }, 60_000);
+    if (typeof _t.unref === "function") _t.unref();
+    setTimeout(() => { ensurePanel().catch(() => {}); }, 8_000);
+  } catch {}
 
   try {
     console.log(`[SERVER-HUB] ✅ لوحة السيرفر الدائمة جاهزة على /srv?k=${key.slice(0, 4)}••••`);
