@@ -13,7 +13,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { devKey } from "./dev-console.mjs";
-import { detectPanelPort, readConfig as readKeepaliveConfig, listListeningPorts } from "./lib/panel-keepalive.mjs";
+import { detectPanelPort, readConfig as readKeepaliveConfig, writeConfig as writeKeepaliveConfig, listListeningPorts } from "./lib/panel-keepalive.mjs";
 
 const PANEL_DIR = () => process.env.BOT_SERVER_CONTROL_DIR || "/home/container/bol/server-control";
 const BOT_DIR = () => process.env.BOT_BASE_DIR || process.cwd();
@@ -196,6 +196,13 @@ a.btn{display:inline-block;text-decoration:none;background:#243052;color:var(--t
 </div>
 
 <div class="card">
+  <b>توكن لوحة السيرفر</b>
+  <div class="mut">الصقه من رابط اللوحة (الجزء بعد #). يُحفظ مرة واحدة ويُستخدم للوكيل.</div>
+  <div class="row"><input id="tok" placeholder="التوكن" style="flex:1;min-width:180px;background:#0f1526;color:#eaf0fb;border:1px solid #26304a;border-radius:10px;padding:10px">
+  <button class="pri" onclick="saveTok()">حفظ</button></div>
+</div>
+
+<div class="card">
   <b>البوت</b>
   <div class="mut">إعادة التشغيل تُقلع نسخة جديدة ثم تُنهي الحالية (تأخذ ~10 ثوانٍ). الإيقاف يُطفئ البوت حتى تعيد تشغيل الحاوية.</div>
   <div class="row">
@@ -216,6 +223,16 @@ a.btn{display:inline-block;text-decoration:none;background:#243052;color:var(--t
 <script>
 const KEY=${JSON.stringify(key)};const P=p=>p+(p.includes('?')?'&':'?')+'k='+encodeURIComponent(KEY);
 const $=i=>document.getElementById(i);
+async function saveTok(){
+  const t=$('tok').value.trim(); if(!t) return;
+  $('out').textContent='جارٍ الحفظ…';
+  try{
+    const r=await fetch(P('/api/srv/config'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token:t})});
+    const j=await r.json();
+    $('out').textContent=j.ok?'✅ حُفظ التوكن — اللوحة '+(j.alive?'تعمل':'لا تستجيب')+' (منفذ '+j.port+')':'فشل: '+JSON.stringify(j);
+    $('tok').value='';refresh();
+  }catch(e){$('out').textContent='فشل: '+e.message}
+}
 async function act(name){
   if(name==='bot-restart' && !confirm('إعادة تشغيل البوت الآن؟')) return;
   $('out').textContent='جارٍ التنفيذ: '+name+' …';
@@ -284,6 +301,28 @@ export function registerServerHub(app, deps = {}) {
       },
       listeningPorts: (() => { try { return listListeningPorts(); } catch { return []; } })(),
     });
+  });
+
+  // [v8.48.2] حفظ توكن لوحة السيرفر (لأن الوكيل يحتاجه) — يُخزَّن في
+  // bot-data/panel-keepalive.json ويُستخدم فوراً بلا إعادة تشغيل.
+  app.post("/api/srv/config", async (req, res) => {
+    if (!_keyOk(req)) return res.status(401).json({ error: "مفتاح غير صحيح" });
+    let body = req.body;
+    if (!body) {
+      let raw = "";
+      await new Promise((r) => {
+        req.on("data", (c) => { raw += c; if (raw.length > 1e5) req.destroy(); });
+        req.on("end", r);
+      });
+      try { body = JSON.parse(raw || "{}"); } catch { body = {}; }
+    }
+    const token = String(body?.token || "").trim();
+    if (!token) return res.status(400).json({ error: "التوكن فارغ" });
+    const cfg = readKeepaliveConfig() || {};
+    const ok = writeKeepaliveConfig({ ...cfg, token });
+    _panelCache = { port: null, at: 0 };
+    const port = await panelPort();
+    res.json({ ok, tokenSet: Boolean(panelToken()), port, alive: await _panelAlive(port) });
   });
 
   app.post("/api/srv/action", async (req, res) => {
