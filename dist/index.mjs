@@ -251,6 +251,30 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
     }
   }
 
+  // ── ④.٥ [v8.45.0] الطبقة الأخيرة: نطلب من الهاتف إرسال تاريخ المحادثة (قد تُسترجع الرسالة نفسها)
+  if (!buffer && !resend.arrived && typeof sock?.fetchMessageHistory === "function") {
+    try {
+      const oldest = msg.key?.id ? { remoteJid: jid, id: msg.key.id, fromMe: Boolean(msg.key.fromMe) } : undefined;
+      await sock.fetchMessageHistory(50, oldest, Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000));
+      resend.requested = true;
+      resend.methods.push("fetchMessageHistory");
+      const richer2 = await _voWaitForRicher(jid, qid, 8000);
+      if (richer2) {
+        resend.arrived = true;
+        chosen = richer2;
+        chosenSource = "history-fetch";
+        sources.historyFetch = { ...nodeFacts(richer2), at: Date.now() };
+        const node3 = nodeOf(richer2);
+        await tryDownload("self-decrypt-after-history", async () => {
+          const i = infoOf(richer2);
+          const out = await _waMediaMod.downloadAndDecryptMedia(node3, { type: i?.kind === "ptt" ? "audio" : (i?.kind || "image"), logger });
+          return out?.buffer;
+        });
+        if (!buffer) await tryDownload("library-after-history", async () => await _reactCopyMod.downloadWithFallbacks(sock, null, { key: { ...(msg.key || {}), id: qid }, message: richer2, sourceJid: jid }, node3));
+      }
+    } catch (err) { resend.methods.push(`fetchMessageHistory ✖ ${String(err?.message || err).slice(0, 80)}`); }
+  }
+
   if (buffer?.length) { try { _voRamMod.setMedia(jid, qid, buffer, { kind: infoOf(chosen)?.kind || null, mimetype: nodeOf(chosen)?.mimetype }); } catch { } }
 
   // ── ⑤ التقرير ───────────────────────────────────────────────────────────
@@ -263,6 +287,14 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
     resend,
     timeline: _forensics.buildTimeline({ id: qid, trace: _voTrace, captures: _voLastCaptures }),
     settings: { copyEnabled: Boolean(myS?.copyEnabled), copyCmd: myS?.copyCmd || "/copy" },
+    runtime: {
+      version: _botVersion(),
+      tapInstalled: Boolean(_waTap),
+      tap: { ..._waTap.types },
+      uptimeSec: Math.round((Date.now() - _waTap.startedAt) / 1000),
+      chatLogChats: (() => { try { return _chatLogMod.listChats(userId).length; } catch { return 0; } })(),
+      ramMediaItems: (() => { try { return _voRamMod.stats().mediaItems; } catch { return 0; } })(),
+    },
   });
   const arabic = _forensics.renderArabicReport(report);
   const stamp = Date.now();
@@ -321,6 +353,15 @@ function _voTraceCapture(rep) {
     _voLastCaptures.unshift(rep);
     if (_voLastCaptures.length > 12) _voLastCaptures.pop();
   } catch { }
+}
+
+let _cachedBotVersion = null;
+/** [v8.45.0] الإصدار الفعلي المشغَّل — حتى نعرف هل النسخة الجديدة منشورة فعلاً */
+function _botVersion() {
+  if (_cachedBotVersion) return _cachedBotVersion;
+  try { _cachedBotVersion = JSON.parse(globalThis.require("node:fs").readFileSync(__botRootJoin(BOT_ROOT, "package.json"), "utf8")).version || "unknown"; }
+  catch { _cachedBotVersion = "unknown"; }
+  return _cachedBotVersion;
 }
 
 function _voNowLabel() {

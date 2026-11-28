@@ -77,6 +77,14 @@ const VERDICTS = {
     ar: "الرابط منتهي الصلاحية (404/410) أو أُعيد تشفير الملف — المفتاح والرابط موجودان لكن واتساب رفض التنزيل.",
     steps: ["البوت يجدّد الرابط عبر updateMediaMessage", "أعد المحاولة بعد لحظات"],
   },
+  "not-seen": {
+    ar: "البوت لم يرَ هذه الرسالة أصلاً: لا أثر لها في سجل المحادثة ولا في كاش الرام. غالباً أُرسلت قبل إعادة تشغيل البوت (والبوت منذ v8.41.0 لا يحفظ شيئاً على القرص) أو أُرسلت والبوت مطفأ — فالنسخة الكاملة ضاعت ولا يمكن استخراجها من الاقتباس.",
+    steps: [
+      "أبقِ البوت شغّالاً ثم أرسل «عرض مرة واحدة» جديداً — الالتقاط يحدث لحظة الوصول ويُرسل لتيليجرام فوراً",
+      "لو أعدت التشغيل، أي رسالة سابقة تضيع (بلا حفظ على القرص بقرارك)",
+      "الأمر /copy_g يخدم التشخيص فقط؛ الاستخراج يعتمد على الالتقاط اللحظي",
+    ],
+  },
   "found-elsewhere": {
     ar: "النسخة الكاملة موجودة في مصدر آخر (سجل المحادثة/الرام) وتم استخدامها بدل الاقتباس الناقص.",
     steps: ["إن فشل التنزيل فراجع مصفوفة المحاولات أدناه"],
@@ -175,7 +183,7 @@ export function analyzeMessage(message) {
  * @param {boolean} o.resendRequested
  * @param {boolean} o.resendArrived
  */
-export function diagnose({ quoted = null, chosen = null, chosenSource = "none", sources = {}, attempts = [], resendRequested = false, resendArrived = false } = {}) {
+export function diagnose({ quoted = null, chosen = null, chosenSource = "none", sources = {}, attempts = [], resendRequested = false, resendArrived = false, runtime = null } = {}) {
   if (!quoted) return build("no-reply", { sources, attempts });
   const msg = chosen || quoted;
   const analyzed = analyzeMessage(msg);
@@ -187,8 +195,13 @@ export function diagnose({ quoted = null, chosen = null, chosenSource = "none", 
   const richSomewhere = Object.entries(sources).some(([name, s]) => name !== "quoted" && s?.found && s?.hasMediaKey);
   const rich = nodeInfo.hasMediaKey && nodeInfo.hasUrl;
 
+  const neverSeen = !sources?.chatLog?.found && !sources?.ramMessage?.found && !sources?.ramMedia?.found && !sources?.legacyStore?.found;
   if (!nodeInfo.hasMediaKey && !nodeInfo.hasUrl) {
-    if (chosenSource === "quoted") return build("quoted-stub", { sources, attempts, analyzed, nodeInfo, richSomewhere });
+    if (chosenSource === "quoted") {
+      // [v8.45.0] نسخة مصغّرة + لم يرها البوت ⇒ السبب الحقيقي: لم تُلتقط أصلاً
+      if (neverSeen) return build("not-seen", { sources, attempts, analyzed, nodeInfo, richSomewhere, runtime });
+      return build("quoted-stub", { sources, attempts, analyzed, nodeInfo, richSomewhere });
+    }
     if (richSomewhere) return build("partial", { sources, attempts, analyzed, nodeInfo, richSomewhere });
     return build("no-keys", { sources, attempts, analyzed, nodeInfo, resendRequested, resendArrived });
   }
@@ -210,6 +223,8 @@ function confidenceFor(code, { richSomewhere, resendRequested, resendArrived }) 
       return 100;
     case "quoted-stub":
       return 95;
+    case "not-seen":
+      return 90;
     case "no-keys":
       return resendArrived ? 70 : 85;
     case "url-missing":
@@ -290,6 +305,9 @@ export function renderArabicReport(report) {
   L.push(`المرسل: ${r.from?.participant || ""}`);
   L.push("");
   L.push(`الحكم: ${d.code} — ثقة ${d.confidence}%`);
+  if (r.runtime) {
+    L.push(`البوت: إصدار ${r.runtime.version}${r.runtime.tapInstalled ? " · صنبور السوكت ✅" : " · صنبور السوكت ❌ (نسخة قديمة!)"} · notify ${r.runtime.tap?.notify ?? 0} / append ${r.runtime.tap?.append ?? 0} · مدة التشغيل ${Math.round((r.runtime.uptimeSec || 0) / 60)} دقيقة`);
+  }
   L.push(`الشرح: ${d.explanation || ""}`);
   L.push("");
   L.push("الأدلة:");
@@ -333,11 +351,11 @@ export function buildReport(input) {
   const {
     generatedAt = new Date().toISOString(),
     from = {}, quoted = null, chosen = null, chosenSource = "quoted",
-    sources = {}, attempts = [], mediaNode = null, download = {}, resend = {}, timeline = [], settings = {},
+    sources = {}, attempts = [], mediaNode = null, download = {}, resend = {}, timeline = [], settings = {}, runtime = null,
   } = input || {};
   const analyzed = analyzeMessage(chosen || quoted);
   const nodeInfo = analyzeNode(analyzed.node);
-  const diagnosis = diagnose({ quoted, chosen, chosenSource, sources, attempts, resendRequested: resend.requested, resendArrived: resend.arrived });
+  const diagnosis = diagnose({ quoted, chosen, chosenSource, sources, attempts, resendRequested: resend.requested, resendArrived: resend.arrived, runtime });
   const detection = {
     topLevelKeys: analyzed.topLevelKeys,
     wrappers: analyzed.wrappers,
@@ -353,7 +371,8 @@ export function buildReport(input) {
   return {
     generatedAt,
     from,
-    version: "8.42.0",
+    version: runtime?.version || "unknown",
+    runtime: runtime || null,
     sourceOfTruth: chosenSource,
     detection,
     nodeInventory: nodeInfo.fields,

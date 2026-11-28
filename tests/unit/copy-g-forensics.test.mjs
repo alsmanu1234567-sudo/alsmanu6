@@ -40,11 +40,22 @@ test("analyzeMessage: يفكّ الأغلفة ويحسب العمق", () => {
   assert.equal(m2.contentKey, "videoMessage");
 });
 
-test("diagnose: اقتباس مصغّر ⇒ quoted-stub بثقة عالية", () => {
-  const d = F.diagnose({ quoted: stub, chosen: stub, chosenSource: "quoted", sources: { quoted: { found: true, hasMediaKey: false } }, attempts: [] });
+test("diagnose: اقتباس مصغّر رآه البوت (سجل موجود) ⇒ quoted-stub", () => {
+  const d = F.diagnose({
+    quoted: stub, chosen: stub, chosenSource: "quoted",
+    sources: { quoted: { found: true, hasMediaKey: false }, chatLog: { found: true, hasMediaKey: false } },
+    attempts: [],
+  });
   assert.equal(d.code, "quoted-stub");
   assert.ok(d.confidence >= 90);
   assert.match(d.explanation, /quotedMessage|مصغّرة/);
+});
+
+test("diagnose: اقتباس مصغّر + لا أثر للرسالة ⇒ not-seen (لم يراها البوت أصلاً)", () => {
+  const d = F.diagnose({ quoted: stub, chosen: stub, chosenSource: "quoted", sources: { quoted: { found: true, hasMediaKey: false } }, attempts: [] });
+  assert.equal(d.code, "not-seen");
+  assert.ok(d.confidence >= 85);
+  assert.match(d.explanation, /لم يرَ|إعادة تشغيل/);
   assert.ok(d.nextSteps.length >= 2);
 });
 
@@ -98,7 +109,7 @@ test("buildReport + renderArabicReport: تقرير كامل بأقسام عرب�
   const report = F.buildReport({
     from: { jid: "120363@g.us", quotedId: "R1", participant: "999@lid" },
     quoted: stub, chosen: stub, chosenSource: "quoted",
-    sources: { quoted: { found: true, hasMediaKey: false }, chatLog: { found: false } },
+    sources: { quoted: { found: true, hasMediaKey: false }, chatLog: { found: true, hasMediaKey: false } },
     attempts: [{ method: "self-decrypt", ok: false, reason: "لا يوجد mediaKey" }],
     mediaNode: { kind: "image" },
     download: { ok: false, via: null, bytes: 0 },
@@ -159,4 +170,39 @@ test("/vodebug يعرض صنبور السوكت وسجل المحادثة وحا
   assert.match(src, /سجل المحادثة \(رام\)/);
   assert.match(src, /حالة المعالجة/);
   assert.match(src, /getProcessingDiagnostics/);
+});
+
+// ── [v8.45.0] حالة البوت داخل التقرير + جلب تاريخ المحادثة ──
+test("buildReport: يحتوي runtime (الإصدار/الصنبور/مدة التشغيل) ويُعرض في التقرير العربي", () => {
+  const report = F.buildReport({
+    from: { jid: "120363@g.us", quotedId: "R2" },
+    quoted: stub, chosen: stub, chosenSource: "quoted",
+    sources: { quoted: { found: true, hasMediaKey: false } },
+    attempts: [], mediaNode: { kind: "image" },
+    runtime: { version: "8.45.0", tapInstalled: true, tap: { notify: 12, append: 3, other: 0 }, uptimeSec: 600 },
+  });
+  assert.equal(report.version, "8.45.0");
+  assert.equal(report.runtime.tapInstalled, true);
+  assert.equal(report.diagnosis.code, "not-seen");
+  const txt = F.renderArabicReport(report);
+  assert.match(txt, /إصدار 8\.45\.0/);
+  assert.match(txt, /صنبور السوكت ✅/);
+  assert.match(txt, /notify 12 \/ append 3/);
+});
+
+test("buildReport: نسخة قديمة (بلا صنبور) تظهر بوضوح", () => {
+  const report = F.buildReport({
+    quoted: stub, chosen: stub, chosenSource: "quoted",
+    sources: { quoted: { found: true } }, attempts: [],
+    runtime: { version: "8.42.0", tapInstalled: false, tap: { notify: 0, append: 0 }, uptimeSec: 60 },
+  });
+  assert.match(F.renderArabicReport(report), /صنبور السوكت ❌ \(نسخة قديمة!\)/);
+});
+
+test("index: يجلب تاريخ المحادثة من الهاتف كطبقة أخيرة ويسجّل runtime", () => {
+  const src = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+  assert.match(src, /fetchMessageHistory/);
+  assert.match(src, /self-decrypt-after-history/);
+  assert.match(src, /_botVersion\(\)/);
+  assert.match(src, /tapInstalled/);
 });
