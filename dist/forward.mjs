@@ -1761,7 +1761,8 @@ const _webGroupSendAt = new Map();
 
 // A Web App request can send exactly one user-authored message to one of the
 // user's own cached groups. Repeated/broadcast sends are intentionally absent.
-export async function webSendGroupMessage(uid, groupId, text, phoneNumber) {
+export async function webSendGroupMessage(uid, groupId, text, phoneNumber, opts = {}) {
+  // [GROUP-CHAT v8.39.0] opts.quoted = رسالة للاقتباس · opts.chat = إرسال من واجهة المحادثة (بلا كولداون الدقيقة)
   uid = String(uid);
   groupId = String(groupId || "").trim();
   text = String(text || "").trim();
@@ -1782,8 +1783,9 @@ export async function webSendGroupMessage(uid, groupId, text, phoneNumber) {
   const key = `${uid}:${_normalizePhone(ownedNumber)}:${groupId}`;
   const now = Date.now();
   const lastSent = _webGroupSendAt.get(key) || 0;
-  if (now - lastSent < WEB_GROUP_SEND_COOLDOWN_MS) {
-    throw new Error("أرسل رسالة واحدة فقط لكل مجموعة كل دقيقة");
+  const _cooldown = opts.chat ? 800 : WEB_GROUP_SEND_COOLDOWN_MS;
+  if (now - lastSent < _cooldown) {
+    throw new Error(opts.chat ? "تمهّل لحظة قبل الرسالة التالية" : "أرسل رسالة واحدة فقط لكل مجموعة كل دقيقة");
   }
 
   // Reserve before awaiting the network call so concurrent clicks cannot
@@ -1795,8 +1797,8 @@ export async function webSendGroupMessage(uid, groupId, text, phoneNumber) {
     }
   }
 
-  await sock.sendMessage(groupId, { text });
-  return { sent: true, groupId, groupName: group.name || groupId };
+  const _sent = await sock.sendMessage(groupId, { text }, opts.quoted ? { quoted: opts.quoted } : undefined);
+  return { sent: true, groupId, groupName: group.name || groupId, key: _sent?.key || null };
 }
 
 export function webCreateRule(uid, payload) {

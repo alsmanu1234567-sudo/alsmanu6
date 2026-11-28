@@ -61,6 +61,7 @@ import * as _metaAssistantMod from './lib/meta-assistant.mjs';
 import * as _viewOnceMod from './lib/view-once.mjs';      // [VIEW-ONCE v8.37.0] فكّ الغلاف + خطة تيليجرام
 import * as _rcStoreMod from './lib/react-copy-store.mjs'; // [VIEW-ONCE v8.37.0] تخزين الوسائط على القرص
 import * as _waMediaMod from './lib/wa-media.mjs';         // [VIEW-ONCE v8.37.0] تنزيل ذاتي بلا مكتبة
+import * as _chatLogMod from './lib/chat-log.mjs';          // [GROUP-CHAT v8.39.0] سجل رسائل للمحادثة في الويب آب
 import * as _arMod from './auto-reply.mjs'; // PATCH_AUTO_REPLY_SPLIT_APPLIED
 import * as _wmMod from './worker-manager.mjs'; // PATCH_WORKER_MANAGER_SPLIT_APPLIED
 import * as _kaMod from './keepalive.mjs'; // PATCH_KEEPALIVE_SPLIT_APPLIED
@@ -89,6 +90,102 @@ globalThis.__dirname = __bannerPath.dirname(globalThis.__filename);
 //   • /peek ‏[اسم المجموعة] يستخرج ويُرسل الآن — حتى لو انتهى الغلاف أو الرابط
 // ═══════════════════════════════════════════════════════════════════════════
 
+
+/**
+ * [/COPY G v8.39.0] تشخيص كامل + إرسال المحتوى كملف داخل واتساب.
+ * يُستدعى عند الردّ على رسالة بـ`/copy g` (أو `/copy_g`): يطبع نوعها وتفاصيلها كلها
+ * في ملف JSON يُرسل في نفس المحادثة، ويُنزّل المحتوى ويُرسله كملف (document).
+ */
+async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
+  const ctxInfo = msg.message?.extendedTextMessage?.contextInfo
+    || msg.message?.imageMessage?.contextInfo
+    || msg.message?.videoMessage?.contextInfo
+    || msg.message?.audioMessage?.contextInfo
+    || msg.message?.documentMessage?.contextInfo
+    || msg.message?.stickerMessage?.contextInfo
+    || msg.message?.viewOnceMessageV2?.message?.imageMessage?.contextInfo
+    || null;
+  const quoted = ctxInfo?.quotedMessage;
+  if (!quoted) {
+    await sock.sendMessage(jid, { text: `⚠️ ردّ على الرسالة أولاً ثم أرسل ${myS.copyCmd || "/copy"} g` });
+    return true;
+  }
+  const info = _viewOnceMod.unwrapViewOnce(quoted);
+  const cls = _chatLogMod.classifyMessage(quoted);
+  const node = info?.node || cls.node || null;
+  const describeNode = (n) => {
+    if (!n || typeof n !== "object") return null;
+    const out = {};
+    for (const [k, v] of Object.entries(n)) {
+      if (v === null || v === undefined) continue;
+      if (Buffer.isBuffer(v) || v?.type === "Buffer") out[k] = `<Buffer ${v?.data?.length || v?.length || 0}b>`;
+      else if (typeof v === "object") out[k] = Array.isArray(v) ? `<array ${v.length}>` : "<object>";
+      else out[k] = v;
+    }
+    return out;
+  };
+  const report = {
+    generatedAt: new Date().toISOString(),
+    from: { jid, quotedId: ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || null, participant: ctxInfo?.participant || null },
+    detection: {
+      topLevelKeys: Object.keys(quoted || {}),
+      viewOnceDetected: Boolean(info?.viewOnce),
+      wrapper: info?.wrapper || null,
+      contentKey: info?.contentKey || cls.contentKey || null,
+      type: info?.kind || cls.type,
+      hasMediaKey: Boolean(node?.mediaKey),
+      hasUrl: Boolean(node?.url || node?.directPath),
+    },
+    mediaNode: describeNode(node),
+    contextInfoKeys: Object.keys(quoted?.extendedTextMessage?.contextInfo || node?.contextInfo || {}),
+    rawTruncated: (() => { try { return JSON.stringify(quoted, (_k, v) => (Buffer.isBuffer(v) || v?.type === "Buffer" ? "<Buffer>" : v)).slice(0, 6000); } catch { return null; } })(),
+  };
+  // تنزيل المحتوى بكل الطرق — نسجّل نتيجة كل طريقة
+  const attempts = [];
+  let buffer = null, via = null;
+  if (node) {
+    try {
+      const own = await _waMediaMod.downloadAndDecryptMedia(node, { type: info?.kind === "ptt" ? "audio" : (info?.kind || "image"), logger });
+      if (own?.buffer?.length) { buffer = own.buffer; via = "self-decrypt"; attempts.push({ method: "self-decrypt", ok: true, bytes: own.buffer.length }); }
+      else attempts.push({ method: "self-decrypt", ok: false, reason: "بايتات فارغة" });
+    } catch (err) { attempts.push({ method: "self-decrypt", ok: false, reason: String(err?.message || err).slice(0, 180) }); }
+    if (!buffer) {
+      try {
+        const buf = await _reactCopyMod.downloadWithFallbacks(sock, null, { key: msg.key, message: quoted, sourceJid: jid }, node);
+        if (buf?.length) { buffer = buf; via = "library"; attempts.push({ method: "library", ok: true, bytes: buf.length }); }
+        else attempts.push({ method: "library", ok: false, reason: "لا بايتات" });
+      } catch (err) { attempts.push({ method: "library", ok: false, reason: String(err?.message || err).slice(0, 180) }); }
+    }
+    if (!buffer) {
+      try { buffer = _rcStoreMod.loadMedia(userId, jid, ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || ""); if (buffer) via = "store"; } catch { }
+      attempts.push({ method: "store", ok: Boolean(buffer) });
+    }
+  }
+  report.download = { ok: Boolean(buffer), via, bytes: buffer?.length || 0, signature: buffer ? _waMediaMod.sniffMediaSignature(buffer) : null, attempts };
+  const reportBuf = Buffer.from(JSON.stringify(report, null, 2), "utf-8");
+  const stamp = Date.now();
+  await sock.sendMessage(jid, {
+    document: reportBuf,
+    mimetype: "application/json",
+    fileName: `copy-diag-${stamp}.json`,
+    caption: `🔎 تشخيص الرسالة\n• النوع: ${report.detection.type}\n• عرض مرة واحدة: ${report.detection.viewOnceDetected ? "نعم" : "لا"}${report.detection.wrapper ? ` (${report.detection.wrapper})` : ""}\n• مفاتيح: ${report.detection.topLevelKeys.join(", ")}\n• التنزيل: ${buffer ? `✅ ${buffer.length} بايت عبر ${via}` : "✖ فشل — انظر attempts"}`,
+  }).catch((err) => logger.warn({ err: String(err?.message || err) }, "[/copy g] تعذّر إرسال تقرير التشخيص"));
+  // إرسال المحتوى نفسه كملف
+  if (buffer?.length) {
+    const kind = info?.kind || cls.type;
+    const mime = node?.mimetype || (kind === "image" ? "image/jpeg" : kind === "video" ? "video/mp4" : "application/octet-stream");
+    await sock.sendMessage(jid, {
+      document: buffer,
+      mimetype: mime,
+      fileName: node?.fileName || `copy-${kind}-${stamp}.${(mime.split("/")[1] || "bin").split(";")[0]}`,
+      caption: `📎 المحتوى كمِلَف (بدون غلاف)${info?.viewOnce ? " — من رسالة عرض مرة واحدة" : ""}`,
+    }).catch((err) => logger.warn({ err: String(err?.message || err) }, "[/copy g] تعذّر إرسال الملف"));
+    try { _rcStoreMod.saveMessage(userId, jid, msg.key, quoted); _rcStoreMod.saveMedia(userId, jid, msg.key?.id || String(stamp), buffer); } catch { }
+  } else {
+    await sock.sendMessage(jid, { text: "⚠️ لم أستطع تنزيل المحتوى — الملف المرفق (JSON) فيه تفاصيل كل المحاولات." }).catch(() => { });
+  }
+  return true;
+}
 // [VOTRACE v8.38.0] آخر ما وصل فعلاً — لتشخيص «البوت ما بينزّل» بأدلة لا بتخمين
 const _voTrace = [];
 const _voLastCaptures = [];
@@ -295555,6 +295652,8 @@ function registerMessageHandler(sock, userId) {
       // ── [VIEW-ONCE-EARLY v8.38.0] أول شيء يحدث: لا يوجد أي return قبله يمكنه ابتلاع «عرض مرة واحدة» ──
       try {
         if (msg.message) {
+          // [GROUP-CHAT v8.39.0] سجل المحادثة: كل رسالة (بكل أنواعها) تُسجَّل لعرضها في الويب آب والرد عليها
+          try { _chatLogMod.recordMessage(userId, jid, msg, { sock, groupName: _voGroupSubject(userId, jid) }); } catch { }
           const _voScan = _viewOnceMod.unwrapViewOnce(msg.message);
           _voTracePush({ ts: Date.now(), jid, id: msg.key?.id, keys: Object.keys(msg.message).slice(0, 8), vo: _voScan ? `${_voScan.kind}${_voScan.viewOnce ? "/vo" : ""}` : null });
           if (_voScan) {
@@ -296321,6 +296420,16 @@ ${nameLine}${statusLine}`;
               await activeSock.sendMessage(jid, { text: "\u26A0\uFE0F \u062E\u0637\u0623 \u0641\u064A \u062A\u0635\u062F\u064A\u0631 \u0627\u0644\u0623\u0639\u0636\u0627\u0621" });
             } catch {
             }
+          }
+          return; // [DISPATCH-FIX]
+        }
+        const _copyG = myS.copyEnabled && (trimmed === `${myS.copyCmd} g` || trimmed === `${myS.copyCmd}_g` || trimmed === "/copy g" || trimmed === "/copy_g");
+        if (_copyG) {
+          // [/COPY G v8.39.0] تشخيص كامل + المحتوى كملف
+          try { await _copyDiagnose({ sock: activeSock, jid, msg, myS, userId }); }
+          catch (err) {
+            logger.warn({ err: String(err?.message || err) }, "[/copy g] failed");
+            try { await activeSock.sendMessage(jid, { text: `⚠️ تعذّر التشخيص: ${String(err?.message || err).slice(0, 200)}` }); } catch { }
           }
           return; // [DISPATCH-FIX]
         }

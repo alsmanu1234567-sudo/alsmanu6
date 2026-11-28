@@ -1,0 +1,138 @@
+// tests/unit/group-chat.test.mjs — [GROUP-CHAT v8.39.0]
+// «فتح المحادثة» في الويب آب + سجل رسائل بكل الأنواع + الاقتباس + ملفات التشخيص (/copy g)
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+import * as chatLog from "../../dist/lib/chat-log.mjs";
+
+const UID = "880001";
+const JID = "120363000000000555@g.us";
+const node = (extra = {}) => ({ mediaKey: Buffer.alloc(32, 2), url: "https://mmg.whatsapp.net/d/y", mimetype: "image/jpeg", fileLength: 4096, ...extra });
+const rawMsg = (id, message, extra = {}) => ({
+  key: { id, remoteJid: JID, fromMe: false, participant: "24911@s.whatsapp.net" },
+  message,
+  messageTimestamp: Math.floor(Date.now() / 1000),
+  pushName: "أحمد",
+  ...extra,
+});
+
+test.beforeEach(() => chatLog._resetChatLog());
+
+test("classifyMessage: نص وصورة وفيديو وملف وصوت وملصق", () => {
+  assert.equal(chatLog.classifyMessage({ conversation: "سلام" }).type, "text");
+  assert.equal(chatLog.classifyMessage({ extendedTextMessage: { text: "x" } }).type, "text");
+  assert.equal(chatLog.classifyMessage({ imageMessage: node() }).type, "image");
+  assert.equal(chatLog.classifyMessage({ videoMessage: node({ mimetype: "video/mp4" }) }).type, "video");
+  assert.equal(chatLog.classifyMessage({ documentMessage: node({ mimetype: "application/pdf", fileName: "a.pdf" }) }).type, "document");
+  assert.equal(chatLog.classifyMessage({ audioMessage: node({ mimetype: "audio/ogg" }) }).type, "audio");
+  assert.equal(chatLog.classifyMessage({ stickerMessage: node({ mimetype: "image/webp" }) }).type, "sticker");
+});
+
+test("classifyMessage: عرض-مرة داخل غلاف يُكشف بنوعه الصحيح", () => {
+  const cls = chatLog.classifyMessage({ viewOnceMessageV2: { message: { imageMessage: node({ caption: "سرّي" }) } } });
+  assert.equal(cls.type, "image");
+  assert.equal(cls.viewOnce, true);
+  assert.ok(cls.node.mediaKey);
+});
+
+test("recordMessage + listMessages: يسجّل النوع والنص والمصغّرة والوقت بلا raw", () => {
+  chatLog.recordMessage(UID, JID, rawMsg("m1", { conversation: "مرحبا" }));
+  chatLog.recordMessage(UID, JID, rawMsg("m2", { imageMessage: node({ caption: "صورة القروب", jpegThumbnail: Buffer.alloc(900, 9) }) }), { groupName: "كيك" });
+  const list = chatLog.listMessages(UID, JID, 10);
+  assert.equal(list.length, 2);
+  assert.equal(list[0].text, "مرحبا");
+  assert.equal(list[1].type, "image");
+  assert.equal(list[1].text, "صورة القروب");
+  assert.equal(list[1].name, "أحمد");
+  assert.ok(list[1].thumb && list[1].thumb.length > 10, "مصغّرة base64 موجودة");
+  assert.equal(list[1].raw, undefined, "لا نُرسل الرسالة الكاملة للواجهة");
+  assert.ok(list[1].time);
+});
+
+test("recordMessage: رسالة عرض-مرة تُسجّل بعلم viewOnce", () => {
+  chatLog.recordMessage(UID, JID, rawMsg("vo1", { viewOnceMessageV2: { message: { videoMessage: node({ mimetype: "video/mp4" }) } } }));
+  const [m] = chatLog.listMessages(UID, JID, 5);
+  assert.equal(m.viewOnce, true);
+  assert.equal(m.type, "video");
+});
+
+test("recordMessage: الاقتباس (replyTo) يُسجّل مع المعاينة", () => {
+  chatLog.recordMessage(UID, JID, rawMsg("q1", {
+    extendedTextMessage: { text: "ردّي", contextInfo: { quotedMessageId: "m1", quotedMessage: { conversation: "الأصل" } } },
+  }));
+  const m = chatLog.listMessages(UID, JID, 5).find((x) => x.id === "q1");
+  assert.equal(m.replyTo, "m1");
+  assert.equal(m.replyPreview, "الأصل");
+});
+
+test("getMessage: يعيد الرسالة الكاملة (raw) للاقتباس في Baileys", () => {
+  chatLog.recordMessage(UID, JID, rawMsg("m9", { conversation: "x" }));
+  const full = chatLog.getMessage(UID, JID, "m9");
+  assert.ok(full?.raw?.key?.id === "m9");
+  assert.equal(chatLog.getMessage(UID, JID, "غير-موجود"), null);
+});
+
+test("groupInfo: يحفظ اسم المجموعة والرقم المستقبِل من السوكت", () => {
+  const sock = { user: { id: "249114375739:12@s.whatsapp.net" }, sendMessage: async () => ({}) };
+  chatLog.recordMessage(UID, JID, rawMsg("m3", { conversation: "a" }), { sock, groupName: "كيك" });
+  const info = chatLog.groupInfo(UID, JID);
+  assert.equal(info.name, "كيك");
+  assert.equal(info.phoneNumber, "249114375739");
+  assert.equal(info.count, 1);
+  assert.ok(chatLog.sockFor(UID, JID));
+});
+
+test("listChats: يرتّب المحادثات بالأحدث", async () => {
+  const past = Math.floor(Date.now() / 1000) - 600;
+  chatLog.recordMessage(UID, JID, { ...rawMsg("a1", { conversation: "قديم" }), messageTimestamp: past });
+  chatLog.recordMessage(UID, "120363000000000777@g.us", { ...rawMsg("b1", { conversation: "جديد" }), messageTimestamp: Math.floor(Date.now() / 1000), key: { id: "b1", remoteJid: "120363000000000777@g.us" } });
+  const chats = chatLog.listChats(UID);
+  assert.equal(chats.length, 2);
+  assert.equal(chats[0].jid, "120363000000000777@g.us");
+});
+
+test("recordMessage: يتجاهل ما لا معرّف له، ويقصّ الطول الأقصى", () => {
+  chatLog.recordMessage(UID, JID, { key: {}, message: { conversation: "بلا معرّف" } });
+  assert.equal(chatLog.listMessages(UID, JID, 5).length, 0);
+  for (let i = 0; i < chatLog.CHAT_LOG_LIMITS.perChat + 15; i++) {
+    chatLog.recordMessage(UID, JID, rawMsg(`x${i}`, { conversation: `رسالة ${i}` }));
+  }
+  const list = chatLog.listMessages(UID, JID, 500);
+  assert.equal(list.length, chatLog.CHAT_LOG_LIMITS.perChat);
+  assert.match(list[list.length - 1].text, /رسالة/);
+});
+
+// ── ربط الواجهة والنقاط الطرفية ─────────────────────────────────────────────
+test("webapp: مسارات المحادثة والزر موجودة في الكود", () => {
+  const src = readFileSync(new URL("../../dist/webapp.mjs", import.meta.url), "utf8");
+  assert.match(src, /\/api\/wa\/chat\/messages/);
+  assert.match(src, /\/api\/wa\/chat\/send/);
+  assert.match(src, /\/api\/wa\/chat\/media/);
+  assert.match(src, /data-act="chat"/);
+  assert.match(src, /group-chat-web\.js/);
+  assert.match(src, /openGroupChat/);
+});
+
+test("group-chat-web.js: يعرّف ChatUI ويتعامل مع الاقتباس والأنواع", () => {
+  const src = readFileSync(new URL("../../public/group-chat-web.js", import.meta.url), "utf8");
+  assert.match(src, /window\.ChatUI/);
+  assert.match(src, /\/api\/wa\/chat\/send/);
+  assert.match(src, /replyTo/);
+  assert.match(src, /عرض مرة واحدة/);
+  assert.match(src, /setInterval/);
+});
+
+test("forward: webSendGroupMessage يقبل الاقتباس ووضع المحادثة", () => {
+  const src = readFileSync(new URL("../../dist/forward.mjs", import.meta.url), "utf8");
+  assert.match(src, /opts\.quoted/);
+  assert.match(src, /opts\.chat/);
+  assert.match(src, /quoted: opts\.quoted/);
+});
+
+test("index: /copy g يوجد في مسار النسخ", () => {
+  const src = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+  assert.match(src, /_copyDiagnose/);
+  assert.match(src, /copy-diag-\$\{stamp\}\.json/);
+  assert.match(src, /_chatLogMod\.recordMessage/);
+});

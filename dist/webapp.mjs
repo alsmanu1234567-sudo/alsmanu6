@@ -51,6 +51,10 @@ import {ludoEngine,loadLudoHtml} from "../services/ludo-game.mjs";
 import { getSharedState, joinShared, moveShared } from "../services/xo-shared.mjs";
 import { getMultiState, moveMulti, acceptMulti } from "../services/xo-multiplayer.mjs";
 import { registerGroupWorldWebApp } from "./group-world-web.mjs";
+// [GROUP-CHAT v8.39.0] فتح المحادثة: سجل الرسائل + الردّ عليها
+import * as chatLog from "./lib/chat-log.mjs";
+import * as reactCopyMod from "./react-copy.mjs";
+import * as reactCopyStore from "./lib/react-copy-store.mjs";
 
 // ─── مصادقة ────────────────────────────────────────────────────────
 function authUid(req) {
@@ -759,6 +763,65 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     res.json({ url: url || null });
   }));
 
+  // ── [GROUP-CHAT v8.39.0] «فتح المحادثة»: عرض رسائل المجموعة بكل أنواعها + الردّ على أي رسالة ──
+  app.get("/group-chat-web.js", (_req, res) => {
+    res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    res.end(readFileSync(fileURLToPath(new URL("../public/group-chat-web.js", import.meta.url))));
+  });
+  app.get("/api/wa/chat/messages", guard(async (uid, req) => {
+    const jid = String(req.query?.jid || "").trim();
+    if (!jid.endsWith("@g.us")) throw new Error("اختر مجموعة أولاً");
+    const limit = Math.min(150, Math.max(10, Number(req.query?.limit) || 80));
+    const info = chatLog.groupInfo(uid, jid);
+    return {
+      group: { jid, name: info.name, phoneNumber: info.phoneNumber, count: info.count },
+      messages: chatLog.listMessages(uid, jid, limit),
+    };
+  }));
+  app.post("/api/wa/chat/send", parseJson, guard(async (uid, req) => {
+    const jid = String(req.body?.jid || "").trim();
+    const text = String(req.body?.text || "").trim();
+    const replyTo = String(req.body?.replyTo || "").trim();
+    if (!jid.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+    if (!text) throw new Error("اكتب رسالة أولاً");
+    const info = chatLog.groupInfo(uid, jid);
+    const quotedEntry = replyTo ? chatLog.getMessage(uid, jid, replyTo) : null;
+    const out = await webSendGroupMessage(uid, jid, text, info.phoneNumber || req.body?.phoneNumber || "", {
+      quoted: quotedEntry?.raw || null,
+      chat: true,
+    });
+    try {
+      chatLog.recordMessage(uid, jid, {
+        key: out?.key || { id: `local-${Date.now()}`, remoteJid: jid, fromMe: true },
+        message: { conversation: text },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        pushName: "أنت",
+      }, { sock: chatLog.sockFor(uid, jid) });
+    } catch { }
+    return { sent: true, jid, quoted: Boolean(quotedEntry) };
+  }));
+  app.get("/api/wa/chat/media", guard(async (uid, req, res) => {
+    const jid = String(req.query?.jid || "").trim();
+    const id = String(req.query?.id || "").trim();
+    const entry = chatLog.getMessage(uid, jid, id);
+    if (!entry) { res.status(404).json({ error: "الرسالة غير مسجّلة" }); return; }
+    let buf = null;
+    try { buf = reactCopyStore.loadMedia(uid, jid, id); } catch { }
+    if (!buf && entry.raw) {
+      try {
+        const cls = chatLog.classifyMessage(entry.raw.message);
+        const sock = chatLog.sockFor(uid, jid);
+        buf = await reactCopyMod.downloadWithFallbacks(sock, null, { key: entry.raw.key, message: entry.raw.message, sourceJid: jid }, cls?.node);
+      } catch { }
+    }
+    if (!buf?.length) { res.status(404).json({ error: "الوسائط غير متاحة — لم تُخزَّن أو انتهى رابط واتساب" }); return; }
+    res.setHeader("Content-Type", entry.mimetype || "application/octet-stream");
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(entry.fileName || entry.id)}"`);
+    res.setHeader("Cache-Control", "no-store");
+    res.end(buf);
+  }));
+
   registerGroupWorldWebApp(app, parseJson, guard);
 
   console.log("[WEBAPP] ✅ واجهة إدارة التحويلات جاهزة على /webapp");
@@ -1219,6 +1282,7 @@ function renderGroups(v){
         '<div class="gc-body"><div class="gc-actions">' +
           '<button class="gc-act" data-act="guard"><b>🛡️</b> الحماية والتحذيرات</button>' +
           '<button class="gc-act" data-act="docs"><b>📖</b> أوامر المجموعات</button>' +
+          '<button class="gc-act" data-act="chat"><b>💬</b> فتح المحادثة</button>' +
           '<button class="gc-act" data-act="details"><b>⚙️</b> تفاصيل وإدارة</button>' +
         '</div></div>' +
       '</div>'
@@ -1244,11 +1308,18 @@ function renderGroups(v){
         const id = card.dataset.card;
         if (btn.dataset.act === "guard" && window.GroupGuardUI) window.GroupGuardUI.openFor(id);
         else if (btn.dataset.act === "docs") { if (window.openCommands) window.openCommands(); else if (window.GroupGuardUI) window.GroupGuardUI.docs(); }
+        else if (btn.dataset.act === "chat") openGroupChat(id);
         else if (btn.dataset.act === "details") openGroupDetails(id);
       });
     });
   });
   lazyPics();
+}
+
+function openGroupChat(groupId){
+  const group = (ST.groups || []).find(item => item.id === groupId);
+  if (window.ChatUI) window.ChatUI.open(groupId, group?.name || "");
+  else toast("❌ واجهة المحادثة لم تُحمَّل — حدّث الصفحة");
 }
 
 async function refreshGroups(btn){
@@ -1293,8 +1364,10 @@ function renderGroupDetails(){
     if (!sh.querySelector("[data-guard-sheet]")) {
       const bar = document.createElement("div");
       bar.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 12px";
-      bar.innerHTML = '<button class="gg-pill" data-guard-sheet="1"><b>🛡️</b> الحماية والتحذيرات</button>' +
+      bar.innerHTML = '<button class="gg-pill" data-chat-sheet="1"><b>💬</b> فتح المحادثة</button>' +
+        '<button class="gg-pill" data-guard-sheet="1"><b>🛡️</b> الحماية والتحذيرات</button>' +
         '<button class="gg-pill" data-guard-docs="1"><b>📖</b> أوامر المجموعات</button>';
+      bar.querySelector("[data-chat-sheet]").onclick = ()=>{ closeSheet(); openGroupChat(detail.id); };
       bar.querySelector("[data-guard-sheet]").onclick = ()=>{ if(window.GroupGuardUI) window.GroupGuardUI.openFor(detail.id); };
       bar.querySelector("[data-guard-docs]").onclick = ()=>{ if(window.openCommands) window.openCommands(); else if(window.GroupGuardUI) window.GroupGuardUI.docs(); };
       sh.insertBefore(bar, sh.children[1] || null);
@@ -2085,5 +2158,6 @@ async function delRule(){
 load();
 setInterval(()=>{if(!document.hidden)load()}, 30000);
 </script>
+<script defer src="/group-chat-web.js"></script>
 </body>
 </html>`;
