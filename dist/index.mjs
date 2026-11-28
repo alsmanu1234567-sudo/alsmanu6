@@ -303662,9 +303662,9 @@ async function openServerControl(bot2,chatId,userId,minutes){
     const base=globalThis.__STABLE_BASE__||globalThis.__FW_PUBLIC_URL||'';
     const key=globalThis.__DEV_KEY__||'';
     if(!base||!key){await bot2.sendMessage(chatId,'⚠️ الرابط الدائم لم يجهز بعد — انتظر ثوانٍ ثم اضغط الزر مرة أخرى.');return;}
-    const panel=`${base}/srv?k=${key}`;
+    const panel=globalThis.__PANEL_ENTRY__?globalThis.__PANEL_ENTRY__():`${base}/srv?k=${key}`;
     await bot2.sendMessage(chatId,
-      '🖥 *لوحة السيرفر — رابط دائم*\n\n'+panel+'\n\n✅ لا ينتهي، ولا يُغلق بعد خمول، ولا يحتاج نفق.\nمنها: إيقاف/تشغيل/إعادة تشغيل + اللوحة الأصلية كاملة + توكن.',
+      '🖥 *لوحة السيرفر الأصلية — رابط دائم*\n\n'+panel+'\n\n✅ نفس لوحتك القديمة (ملفات/طرفية/سجل/تشغيل وإيقاف السيرفر) لكن برابط دائم لا ينتهي ولا يحتاج نفق.',
       {parse_mode:'Markdown',disable_web_page_preview:true,reply_markup:{inline_keyboard:[
         [{text:'🖥 فتح لوحة السيرفر',url:panel}],
         [{text:'🛠 لوحة المطوّر',url:`${base}/dev?k=${key}`}],
@@ -303893,7 +303893,7 @@ async function sendDevPanel(bot2, chatId, userId) {
     if(_b&&_k){
       devKeyboard.inline_keyboard[0]=[
         {text:'🛠 لوحة المطوّر',url:`${_b}/dev?k=${_k}`},
-        {text:'🖥 لوحة السيرفر',url:`${_b}/srv?k=${_k}`},
+        {text:'🖥 لوحة السيرفر',url:(globalThis.__PANEL_ENTRY__?globalThis.__PANEL_ENTRY__():`${_b}/srv?k=${_k}`)},
       ];
       const _web=webappUrlFor(userId)||`${_b}/webapp?token=${tokenForUser(userId)}`;
       devKeyboard.inline_keyboard.splice(1,0,[{text:'🌐 الويب آب (المجموعات والردود)',url:_web}]);

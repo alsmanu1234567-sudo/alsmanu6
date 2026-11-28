@@ -581,7 +581,7 @@ export function panelCommandText({ base, username, key } = {}) {
   const lines = ["🖥️ *روابطك الدائمة*"];
   if (base) {
     lines.push("", `🛠️ *لوحة المطوّر:* ${base}/dev?k=${k}`);
-    lines.push(`🖥️ *لوحة السيرفر (إيقاف/تشغيل):* ${base}/srv?k=${k}`);
+    lines.push(`🖥️ *لوحة السيرفر الأصلية (إيقاف/تشغيل/ملفات):* ${globalThis.__PANEL_ENTRY__ ? globalThis.__PANEL_ENTRY__() : base + "/srv?k=" + k}`);
     let _wt = "";
     try { _wt = tokenForUser(ownerUid()) || ""; } catch { }
     if (_wt) lines.push(`📱 *الويب آب (المجموعات والردود):* ${base}/webapp?token=${_wt}`);

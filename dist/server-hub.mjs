@@ -45,6 +45,17 @@ export function panelToken() {
       if (t) return String(t);
     } catch {}
   }
+  // [v8.48.5] محاولة أخيرة: متغيّرات بيئة عملية اللوحة نفسها
+  try {
+    const pids = _panelPids();
+    for (const pid of pids) {
+      const env = readFileSync(`/proc/${pid}/environ`, "utf8");
+      for (const kv of env.split("\0")) {
+        const m = kv.match(/^(SERVER_CONTROL_TOKEN|CONTROL_TOKEN|PANEL_TOKEN|AUTH_TOKEN)=(.+)$/);
+        if (m && m[2]) return m[2].trim();
+      }
+    }
+  } catch {}
   return "";
 }
 
@@ -265,7 +276,15 @@ export function registerServerHub(app, deps = {}) {
   const key = deps.key || devKey();
   const startedAt = Date.now();
 
+  // [v8.48.5] /srv = اللوحة الأصلية نفسها (هي التي تتحكم بالسيرفر كاملاً).
+  // مركز الحالة/الأزرار الذي بنيته سابقاً انتقل إلى /hub (ثانوي).
   app.get("/srv", (req, res) => {
+    if (!_keyOk(req)) return res.status(401).send("مفتاح المطوّر مطلوب: أضف ?k=<KEY>");
+    const t = panelToken();
+    const q = `k=${encodeURIComponent(key)}`;
+    res.redirect(302, `/sc?${q}${t ? "#" + t : ""}`);
+  });
+  app.get("/hub", (req, res) => {
     if (!_keyOk(req)) return res.status(401).send("مفتاح المطوّر مطلوب: أضف ?k=<KEY>");
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
@@ -368,6 +387,45 @@ export function registerServerHub(app, deps = {}) {
     } catch (e) {
       return res.status(500).json({ error: e?.message || String(e) });
     }
+  });
+
+  // ═══ [v8.48.5] اللوحة الأصلية كما هي، على الرابط الثابت ═══
+  // واجهة bol/server-control تستخدم مسارات مطلقة (/api/...) وتوكن من #hash،
+  // لذلك نُمرّر مساراتها كما هي على الجذر بدل نسخ اللوحة. لا تعارض مع مسارات البوت
+  // (البوت يستخدم /api/fw و/api/wa و/api/dev و/api/srv).
+  const PANEL_PATHS = [
+    "/api/overview", "/api/doctor", "/api/log", "/api/stop", "/api/node",
+    "/api/shell", "/api/server-file", "/api/server-files", "/api/download-repo",
+  ];
+  const isPanelPath = (p) => PANEL_PATHS.some((x) => p === x || p.startsWith(x + "/") || p.startsWith(x + "?"));
+  app.use((req, res, next) => {
+    let p = "";
+    try { p = String(req.originalUrl || req.url || "").split("?")[0]; } catch {}
+    if (isPanelPath(p)) return _proxy(req, res, "").catch(() => {});
+    next();
+  });
+
+  // صفحة اللوحة الأصلية وملفاتها — على /sc (بمفتاح المطوّر)
+  const _panelPage = (req, res) => {
+    if (!_keyOk(req)) return res.status(401).send("مفتاح المطوّر مطلوب: أضف ?k=<KEY>");
+    _proxy({ ...req, originalUrl: "/", url: "/" }, res, "").catch(() => {});
+  };
+  app.get("/sc", _panelPage);
+  app.get("/sc/", _panelPage);
+  for (const f of ["/app.js", "/server-explorer.js", "/styles.css", "/favicon.ico"]) {
+    app.get(f, (req, res) => _proxy({ ...req, originalUrl: f, url: f }, res, "").catch(() => {}));
+  }
+
+  // رابط دخول جاهز للوحة الأصلية (مفتاح المطوّر + توكن اللوحة في #hash)
+  globalThis.__PANEL_ENTRY__ = () => {
+    const base = globalThis.__STABLE_BASE__ || globalThis.__FW_PUBLIC_URL || "";
+    if (!base) return null;
+    const t = panelToken();
+    return `${base}/sc?k=${key}${t ? "#" + t : ""}`;
+  };
+  app.get("/api/srv/panel-entry", (req, res) => {
+    if (!_keyOk(req)) return res.status(401).json({ error: "مفتاح غير صحيح" });
+    res.json({ ok: true, url: globalThis.__PANEL_ENTRY__(), tokenSet: Boolean(panelToken()), port: _panelCache.port || null });
   });
 
   // وكيل كامل للوحة السيرفر الأصلية

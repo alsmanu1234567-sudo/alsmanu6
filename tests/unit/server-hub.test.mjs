@@ -21,6 +21,7 @@ function mkRes() {
     body: null,
     ended: null,
     status(c) { res.statusCode = c; return res; },
+    redirect(c, u) { res.statusCode = c; res.redirectUrl = u; return res; },
     setHeader(k, v) { res.headers[String(k).toLowerCase()] = v; return res; },
     json(o) { res.body = o; return res; },
     end(b) { res.ended = b; return res; },
@@ -57,6 +58,10 @@ test("كل المسارات ترفض بلا مفتاح", async () => {
   registerServerHub(app, { version: "8.48.0" });
   const a = await call(routes, "GET", "/srv");
   assert.equal(a.statusCode, 401);
+  const h = await call(routes, "GET", "/hub");
+  assert.equal(h.statusCode, 401);
+  const sc = await call(routes, "GET", "/sc");
+  assert.equal(sc.statusCode, 401);
   const b = await call(routes, "GET", "/api/srv/state");
   assert.equal(b.statusCode, 401);
   const c = await call(routes, "POST", "/api/srv/action", { body: { name: "panel-stop" } });
@@ -65,11 +70,20 @@ test("كل المسارات ترفض بلا مفتاح", async () => {
   assert.equal(d.statusCode, 401);
 });
 
-test("صفحة /srv تعمل بالمفتاح وتحتوي أزرار الإيقاف والتشغيل", async () => {
+test("/srv يحوّل إلى اللوحة الأصلية (/sc) — لا نسخة بديلة", async () => {
   const key = devKey();
   const { app, routes } = mkApp();
-  registerServerHub(app, { key, version: "8.48.0" });
+  registerServerHub(app, { key, version: "8.48.5" });
   const res = await call(routes, "GET", "/srv", { query: { k: key } });
+  assert.equal(res.statusCode, 302);
+  assert.match(String(res.redirectUrl || ""), /^\/sc\?k=/);
+});
+
+test("مركز الحالة /hub يعمل بالمفتاح ويحتوي أزرار الإيقاف والتشغيل", async () => {
+  const key = devKey();
+  const { app, routes } = mkApp();
+  registerServerHub(app, { key, version: "8.48.5" });
+  const res = await call(routes, "GET", "/hub", { query: { k: key } });
   assert.equal(res.statusCode, 200);
   const html = String(res.ended || "");
   assert.match(html, /panel-stop/);
