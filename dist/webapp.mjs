@@ -56,6 +56,8 @@ import * as chatLog from "./lib/chat-log.mjs";
 import * as reactCopyMod from "./react-copy.mjs";
 import * as reactCopyStore from "./lib/react-copy-store.mjs";
 import * as voRam from "./lib/vo-ram.mjs";
+// [v8.46.0] نستخدم نفس نسخة سجل المحادثة التي يستخدمها البوت (لو مشاركة عبر globalThis)
+const CL = () => globalThis.__CHATLOG__ || chatLog;
 
 // ─── مصادقة ────────────────────────────────────────────────────────
 function authUid(req) {
@@ -774,10 +776,10 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     const jid = String(req.query?.jid || "").trim();
     if (!jid.endsWith("@g.us")) throw new Error("اختر مجموعة أولاً");
     const limit = Math.min(150, Math.max(10, Number(req.query?.limit) || 80));
-    const info = chatLog.groupInfo(uid, jid);
+    const info = CL().groupInfo(uid, jid);
     return {
       group: { jid, name: info.name, phoneNumber: info.phoneNumber, count: info.count },
-      messages: chatLog.listMessages(uid, jid, limit),
+      messages: CL().listMessages(uid, jid, limit),
     };
   }));
   app.post("/api/wa/chat/send", parseJson, guard(async (uid, req) => {
@@ -786,32 +788,32 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     const replyTo = String(req.body?.replyTo || "").trim();
     if (!jid.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
     if (!text) throw new Error("اكتب رسالة أولاً");
-    const info = chatLog.groupInfo(uid, jid);
-    const quotedEntry = replyTo ? chatLog.getMessage(uid, jid, replyTo) : null;
+    const info = CL().groupInfo(uid, jid);
+    const quotedEntry = replyTo ? CL().getMessage(uid, jid, replyTo) : null;
     const out = await webSendGroupMessage(uid, jid, text, info.phoneNumber || req.body?.phoneNumber || "", {
       quoted: quotedEntry?.raw || null,
       chat: true,
     });
     try {
-      chatLog.recordMessage(uid, jid, {
+      CL().recordMessage(uid, jid, {
         key: out?.key || { id: `local-${Date.now()}`, remoteJid: jid, fromMe: true },
         message: { conversation: text },
         messageTimestamp: Math.floor(Date.now() / 1000),
         pushName: "أنت",
-      }, { sock: chatLog.sockFor(uid, jid) });
+      }, { sock: CL().sockFor(uid, jid) });
     } catch { }
     return { sent: true, jid, quoted: Boolean(quotedEntry) };
   }));
   // [NO-DISK v8.41.0] بثّ الوسائط عند الطلب: من الرام → أو تنزيل لحظي من واتساب (بلا حفظ)
   async function fetchChatMedia(uid, jid, id) {
-    const entry = chatLog.getMessage(uid, jid, id);
+    const entry = CL().getMessage(uid, jid, id);
     if (!entry) return { error: "الرسالة غير مسجّلة (سجل المحادثة في الرام فقط)" };
     let buffer = voRam.getMedia(jid, id)?.buffer || null;
     if (!buffer) { try { buffer = reactCopyStore.loadMedia(uid, jid, id); } catch { } }
     if (!buffer && entry.raw) {
       try {
-        const cls = chatLog.classifyMessage(entry.raw.message);
-        const sock = chatLog.sockFor(uid, jid);
+        const cls = CL().classifyMessage(entry.raw.message);
+        const sock = CL().sockFor(uid, jid);
         buffer = await reactCopyMod.downloadWithFallbacks(sock, null, { key: entry.raw.key, message: entry.raw.message, sourceJid: jid }, cls?.node);
         if (buffer?.length) voRam.setMedia(jid, id, buffer, { kind: entry.type, mimetype: entry.mimetype });
       } catch { }
@@ -845,6 +847,20 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     const res = await bridge.sendMedia(uid, out.buffer, kind === "ptt" ? "audio" : kind, caption, out.entry?.mimetype || null, out.entry?.fileName || null);
     if (!res?.ok) throw new Error((res?.errors || ["فشل الإرسال"]).slice(0, 2).join(" | "));
     return { sent: true, via: res.method, bytes: out.buffer.length };
+  }));
+
+  // 🩺 فحص ذاتي: يُثبت هل الرسائل تُسجَّل فعلاً وهل الصنبور يعمل
+  app.get("/api/wa/chat/selftest", guard(async (uid) => {
+    const store = CL();
+    const chats = store.listChats(uid).slice(0, 10);
+    const first = chats[0];
+    return {
+      sameModule: Boolean(globalThis.__CHATLOG__),
+      chats: chats.map((c) => ({ jid: c.jid, name: c.name, count: c.count, lastTs: c.lastTs })),
+      totalMessages: chats.reduce((n, c) => n + (c.count || 0), 0),
+      sample: first ? store.listMessages(uid, first.jid, 5).map((m) => ({ id: m.id, type: m.type, viewOnce: m.viewOnce, text: (m.text || "").slice(0, 40), ts: m.ts })) : [],
+      tap: typeof globalThis.__WA_TAP_STATS__ === "function" ? globalThis.__WA_TAP_STATS__() : null,
+    };
   }));
 
   registerGroupWorldWebApp(app, parseJson, guard);

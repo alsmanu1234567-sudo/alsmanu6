@@ -198,3 +198,33 @@ test("group-chat-web.js: يعرض اسم المفتاح مع «نوع آخر» �
   assert.match(src, /ألبوم صور/);
   assert.match(src, /أزرار\/قائمة/);
 });
+
+// ── [v8.46.0] نقطة التقاط مضمونة داخل الـ pipeline + فحص ذاتي للويب آب ──
+test("pipeline: يستدعي __WA_RAW_TAP__ لكل upsert قبل أي فلتر", () => {
+  const src = readFileSync(new URL("../../engine/msg-pipeline.mjs", import.meta.url), "utf8");
+  assert.match(src, /__WA_RAW_TAP__/);
+  const iTap = src.indexOf("__WA_RAW_TAP__");
+  const iFilter = src.indexOf('if (type !== "notify" && !isNewsletter) return;');
+  assert.ok(iTap > 0 && iFilter > 0 && iTap < iFilter, "الصنبور يجب أن يُستدعى قبل فلتر النوع");
+});
+
+test("index: يسجّل نقطة الالتقاط المضمونة ويشارك السجل والإحصاءات", () => {
+  const src = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+  assert.match(src, /globalThis\.__WA_RAW_TAP__ =/);
+  assert.match(src, /globalThis\.__CHATLOG__ = _chatLogMod/);
+  assert.match(src, /globalThis\.__WA_TAP_STATS__/);
+});
+
+test("webapp: فحص ذاتي + استخدام نفس نسخة السجل", () => {
+  const src = readFileSync(new URL("../../dist/webapp.mjs", import.meta.url), "utf8");
+  assert.match(src, /\/api\/wa\/chat\/selftest/);
+  assert.match(src, /const CL = \(\)/);
+  assert.match(src, /sameModule/);
+});
+
+test("group-chat-web.js: زر 🩺 وعرض نتيجة الفحص", () => {
+  const src = readFileSync(new URL("../../public/group-chat-web.js", import.meta.url), "utf8");
+  assert.match(src, /selftest/);
+  assert.match(src, /فحص الويب آب/);
+  assert.match(src, /gcw-test/);
+});

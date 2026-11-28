@@ -167,6 +167,10 @@ export function setupMsgPipeline(sock, userId, applyForward, mainHandler, hooks 
 
   sock.ev.on("messages.upsert", ({ messages, type }) => {
     _stats.received++;
+    // [WA-RAW-TAP v8.46.0] نقطة التقاط مضمونة: هذه الدالة حيّة دائماً (تمرّ منها كل الأوامر).
+    // أي مستهلك يسجّل نفسه في globalThis.__WA_RAW_TAP__ يرى **كل** رسالة بكل أنواع الإشعارات
+    // (notify / append / history-sync) قبل أي فلتر أو قطع أو طابور.
+    try { globalThis.__WA_RAW_TAP__?.(sock, userId, messages, type); } catch (err) { try { process.stderr.write(`[WA-RAW-TAP] ${String(err?.message || err).slice(0, 160)}\n`); } catch { } }
 
     if (type === "notify") { heartbeat(); resetRetries(); }
 

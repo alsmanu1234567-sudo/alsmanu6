@@ -62,6 +62,18 @@ import * as _viewOnceMod from './lib/view-once.mjs';      // [VIEW-ONCE v8.37.0]
 import * as _rcStoreMod from './lib/react-copy-store.mjs'; // [VIEW-ONCE v8.37.0] تخزين الوسائط على القرص
 import * as _waMediaMod from './lib/wa-media.mjs';         // [VIEW-ONCE v8.37.0] تنزيل ذاتي بلا مكتبة
 import * as _chatLogMod from './lib/chat-log.mjs';          // [GROUP-CHAT v8.39.0] سجل رسائل للمحادثة في الويب آب
+try { globalThis.__CHATLOG__ = _chatLogMod; } catch { }
+try {
+  globalThis.__WA_TAP_STATS__ = () => ({
+    version: _botVersion(),
+    tapInstalled: Boolean(globalThis.__WA_RAW_TAP__),
+    types: { ..._waTap.types },
+    uptimeSec: Math.round((Date.now() - _waTap.startedAt) / 1000),
+    ramMedia: (() => { try { return _voRamMod.stats(); } catch { return null; } })(),
+    last: _waTap.last.slice(-6),
+    errors: _waTap.captureErrors.slice(-3),
+  });
+} catch { }
 import * as _voRamMod from './lib/vo-ram.mjs';              // [NO-DISK v8.41.0] كاش وسائط في الرام فقط
 import * as _forensics from './lib/media-forensics.mjs';  // [COPY-G v8.42.0] محرّك التشخيص العملاق
 import * as _arMod from './auto-reply.mjs'; // PATCH_AUTO_REPLY_SPLIT_APPLIED
@@ -295817,6 +295829,31 @@ function registerMessageHandler(sock, userId) {
       }
     }
   });
+  // ── [WA-RAW-TAP v8.46.0] نقطة مضمونة داخل engine/msg-pipeline.mjs (تمسك كل الرسائل دائماً) ──
+  try {
+    globalThis.__WA_RAW_TAP__ = (tapSock, tapUserId, messages, type) => {
+      const uid = String(tapUserId || userId);
+      for (const m of messages || []) {
+        const jid = m?.key?.remoteJid || "";
+        const id = m?.key?.id || "";
+        if (!jid || !m?.message) continue;
+        _tapCount(type);
+        const scan = (() => { try { return _viewOnceMod.unwrapViewOnce(m.message); } catch { return null; } })();
+        _tapPush({ ts: Date.now(), type, jid, id, keys: Object.keys(m.message).slice(0, 6), vo: scan ? `${scan.kind}${scan.viewOnce ? "/vo" : ""}${scan.hasMediaKey ? "+key" : ""}${scan.hasUrl ? "+url" : ""}` : null });
+        try { _chatLogMod.recordMessage(uid, jid, m, { sock: tapSock || sock, groupName: _voGroupSubject(uid, jid) }); } catch { }
+        if (scan) {
+          const key = `${jid}|${id}`;
+          const already = _voSentIds.get(key);
+          if (!already || Date.now() - already > 6 * 60 * 60 * 1000) {
+            _voSentIds.set(key, Date.now());
+            _captureViewOnce({ sock: tapSock || sock, msg: m, userId: uid, jid, isGroup: jid.endsWith("@g.us"), senderName: m.pushName || String(m.key?.participant || jid).split("@")[0], botRef, deliver: true, retryTries: 4 })
+              .catch((err) => { try { _waTap.captureErrors.push(String(err?.message || err).slice(0, 200)); } catch { } });
+          }
+        }
+      }
+    };
+  } catch { }
+
   // ── [WA-TAP v8.43.0] نرى كل شيء يصل إلى السوكت — حتى رسائل history sync (append) التي تُسقطها الـ pipeline ──
   try {
     sock.ev.on("messages.upsert", (payload = {}) => {

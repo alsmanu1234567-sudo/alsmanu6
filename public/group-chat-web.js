@@ -91,6 +91,7 @@
       '<div class="gcw-head">' +
         '<button class="gcw-x" id="gcw-close">✕</button>' +
         '<div class="t"><b id="gcw-title">المحادثة</b><span id="gcw-sub">—</span></div>' +
+        '<button class="gcw-x" id="gcw-test" title="فحص ذاتي">🩺</button>' +
         '<button class="gcw-x" id="gcw-reload" title="تحديث">⟳</button>' +
       '</div>' +
       '<div class="gcw-body" id="gcw-body"><div class="gcw-empty">…جارٍ التحميل</div></div>' +
@@ -106,6 +107,7 @@
 
     el('gcw-close').onclick = close;
     el('gcw-reload').onclick = () => load(true);
+    el('gcw-test').onclick = () => selftest(true);
     el('gcw-replycancel').onclick = () => setReply(null);
     el('gcw-send').onclick = send;
     el('gcw-in').addEventListener('keydown', (e) => {
@@ -166,7 +168,9 @@
   function render(messages) {
     const body = el('gcw-body');
     if (!messages.length) {
-      body.innerHTML = '<div class="gcw-empty">لا رسائل بعد في هذه المجموعة.<br>الرسائل الجديدة تظهر هنا تلقائياً — اكتب رسالة للتجربة.</div>';
+      body.innerHTML = '<div class="gcw-empty">لا رسائل بعد في هذه المجموعة.<br>الرسائل الجديدة تظهر هنا تلقائياً — اكتب رسالة للتجربة.<br><br><button class="gcw-send" id="gcw-diag" style="height:34px;padding:0 12px">🩺 شخّص السبب</button></div>';
+      const db = el('gcw-diag');
+      if (db) db.onclick = () => selftest(true);
       return;
     }
     const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 120;
@@ -220,6 +224,50 @@
     if (kind === 'video') el.controls = true;
     el.style.cssText = 'max-width:100%;max-height:92vh;border-radius:12px';
     lb.appendChild(el);
+  }
+
+  // 🩺 فحص ذاتي: هل الرسائل تُسجَّل؟ هل الصنبور يعمل؟ أي إصدار يعمل؟
+  async function selftest(show) {
+    let out = null, err = null;
+    try { out = await api('/api/wa/chat/selftest'); } catch (e) { err = e.message; }
+    if (!show) return out;
+    const body = el('gcw-body');
+    if (!body) return out;
+    const lines = [];
+    lines.push('🩺 فحص الويب آب');
+    lines.push('='.repeat(30));
+    if (err) lines.push('❌ فشل الفحص: ' + err);
+    if (out) {
+      lines.push(`نفس نسخة السجل المستخدمة في البوت: ${out.sameModule ? '✅' : '❌ (نسختان مختلفتان!)'}`);
+      lines.push(`محادثات مسجّلة: ${out.chats.length} · رسائل: ${out.totalMessages}`);
+      const t = out.tap;
+      if (t) {
+        lines.push(`الإصدار المشغَّل: ${t.version} · الصنبور: ${t.tapInstalled ? '✅' : '❌ (نسخة قديمة)'}`);
+        lines.push(`notify: ${t.types.notify} · append: ${t.types.append} · أخرى: ${t.types.other} · مدة التشغيل: ${Math.round((t.uptimeSec || 0) / 60)} دقيقة`);
+        lines.push(`آخر ما وصل: ${(t.last || []).slice(-3).map((x) => `${x.type}:${(x.keys || []).join(',')}${x.vo ? '⇒' + x.vo : ''}`).join(' | ') || 'لا شيء'}`);
+        if ((t.errors || []).length) lines.push('أخطاء: ' + t.errors.join(' | '));
+      } else {
+        lines.push('⚠️ الصنبور غير مسجَّل (globalThis) — النسخة المشغَّلة قديمة.');
+      }
+      if ((out.chats || []).length) {
+        lines.push('');
+        lines.push('آخر المحادثات:');
+        for (const c of out.chats.slice(0, 5)) lines.push(`• ${c.name || c.jid.split('@')[0]} — ${c.count}`);
+      }
+      if ((out.sample || []).length) {
+        lines.push('');
+        lines.push('عيّنة رسائل:');
+        for (const m of out.sample) lines.push(`• ${m.type}${m.viewOnce ? ' 👁️' : ''} ${m.text || ''}`);
+      }
+      if (!out.totalMessages) {
+        lines.push('');
+        lines.push('❗️ لا رسائل مسجّلة إطلاقاً:');
+        lines.push('• لو الصنبور ✅ وnotify يزيد ⇒ الرسائل تصل لكن لم تُسجَّل (أبلغني).');
+        lines.push('• لو الصنبور ❌ أو كل الأرقام صفر ⇒ النسخة القديمة تعمل: git pull + إعادة تشغيل.');
+      }
+    }
+    body.innerHTML = `<pre style="white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.7;color:#cbd5e1;background:#0f1524;border:1px solid #252e45;border-radius:12px;padding:12px;direction:ltr;text-align:left">${esc(lines.join('\n'))}</pre>`;
+    return out;
   }
 
   async function load(force) {
