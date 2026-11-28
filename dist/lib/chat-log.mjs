@@ -226,8 +226,7 @@ export function sockFor(uid, jid) {
 }
 
 /** كل المحادثات المسجّلة (للاختيار السريع). */
-export function listChats(uid) {
-  try {
+export function listChats(uid) {  try {
     return [...bucket(uid).entries()].map(([jid, chat]) => ({
       jid,
       name: chat.name,
@@ -235,6 +234,19 @@ export function listChats(uid) {
       count: chat.msgs.length,
       lastTs: chat.msgs[chat.msgs.length - 1]?.ts || 0,
     })).sort((a, b) => b.lastTs - a.lastTs).slice(0, 80);
+  } catch { return []; }
+}
+
+/** كل معرّفات المستخدمين التي عندها رسائل مسجّلة — تستخدمها لوحة المطوّر. */
+export function listUids() {
+  try {
+    const out = [];
+    for (const [uid, map] of _chats) {
+      let n = 0;
+      for (const [, chat] of map) n += (chat.msgs || []).length;
+      if (n > 0) out.push(uid);
+    }
+    return out;
   } catch { return []; }
 }
 

@@ -31,3 +31,5 @@ bot-data/react-copy/
 
 # [AUDIO-STICKER v8.26.0] أصوات محفوظة للمحادثات
 bot-data/audio-sticker/
+data/dev-key.txt
+data/dev-automation.json

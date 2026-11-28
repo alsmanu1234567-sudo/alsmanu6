@@ -436,8 +436,25 @@ async function _voSendToTelegram(bot, chatId, { buffer, kind, caption, mimetype,
     try {
       const extra = {};
       if (method !== "sendSticker") extra.caption = caption;
-      if (method === "sendDocument") extra.filename = filename || _viewOnceMod.fileNameFor(kind, mimetype);
-      await bot[method](chatId, buffer, extra);
+      const _fname = filename || _viewOnceMod.fileNameFor(kind, mimetype);
+      if (method === "sendDocument") extra.filename = _fname;
+      // [v8.47.0] Telegraf يرفض Buffer مجرّداً في sendDocument
+      // ("EFATAL: Unsupported Buffer file-type") ⇒ نجرّب الأشكال الثلاثة.
+      const _shapes = method === "sendDocument"
+        ? [
+            () => bot[method](chatId, { source: buffer, filename: _fname }, extra),
+            () => bot[method](chatId, buffer, { ...extra, filename: _fname }),
+            () => (bot.telegram && typeof bot.telegram[method] === "function"
+              ? bot.telegram[method](chatId, { source: buffer, filename: _fname }, extra)
+              : Promise.reject(new Error("لا واجهة telegram"))),
+          ]
+        : [() => bot[method](chatId, buffer, extra)];
+      let _sent = false;
+      let _lastErr = null;
+      for (const _fn of _shapes) {
+        try { await _fn(); _sent = true; break; } catch (_e) { _lastErr = _e; }
+      }
+      if (!_sent) throw _lastErr || new Error("فشل الإرسال");
       try { logger.info({ method, bytes: buffer.length, kind, chatId }, "[VIEW-ONCE] ✅ أُرسل إلى تيليجرام"); } catch { }
       return { ok: true, method, errors };
     } catch (err) {
@@ -502,10 +519,15 @@ async function _captureViewOnce({ sock, msg, userId, jid, isGroup, senderName, b
   if (!info.hasMediaKey || !info.hasUrl) {
     _voPending.set(`${userId}|${id}`, { jid, ts: Date.now() });
     try {
-      if (typeof sock?.updateMediaMessage === "function") {
+      // [v8.47.0] updateMediaMessage يقرأ mediaKey.length ⇒ يرمي
+      // "Cannot read properties of null (reading 'length')" إذا كانت النسخة بلا مفتاح.
+      const _hasRealKey = Boolean(info?.hasMediaKey && (info?.node?.mediaKey || msg?.message?.mediaKey));
+      if (_hasRealKey && typeof sock?.updateMediaMessage === "function") {
         await sock.updateMediaMessage({ key: msg.key, message: msg.message });
         _voTracePush({ ts: Date.now(), jid, id, keys: ["<resend-requested>"], vo: "mediaKey مفقود ⇒ طُلب إعادة إرسال" });
         try { logger.info({ jid, id }, "[VIEW-ONCE] طلب إعادة إرسال الوسائط (mediaKey/url مفقود)"); } catch { }
+      } else {
+        try { logger.info({ jid, id, hasMediaKey: Boolean(info?.hasMediaKey), hasUrl: Boolean(info?.hasUrl) }, "[VIEW-ONCE] تخطّي updateMediaMessage — النسخة بلا مفتاح وسائط صالح"); } catch { }
       }
     } catch (err) {
       try { logger.warn({ err: String(err?.message || err) }, "[VIEW-ONCE] تعذّر طلب إعادة الإرسال"); } catch { }
@@ -327927,6 +327949,22 @@ async function startBot() {
   });
   bot.on("message", async (msg) => {
     heartbeat();
+    // ═══ [PANEL-CMD v8.47.0] /panel و /start panel — الرابط الحالي + المدخل الثابت ═══
+    try {
+      const _pt = String(msg.text || "").trim();
+      const _isPanel = /^\/(panel|devkey|لوحة|رابط)(@\w+)?(\s|$)/i.test(_pt) || /^\/start\s+panel/i.test(_pt);
+      if (_isPanel && String(msg.from?.id || "") === String(DEVELOPER_ID)) {
+        const SL = await import("./stable-link.mjs");
+        const DC = await import("./dev-console.mjs");
+        let _uname = null;
+        try { _uname = (await bot.getMe())?.username || null; } catch { }
+        const _base = SL.stableBase() || globalThis.__STABLE_BASE__ || globalThis.__FW_PUBLIC_URL || null;
+        await bot.sendMessage(msg.chat.id, DC.panelCommandText({ base: _base, username: _uname, key: DC.devKey() }), { parse_mode: "Markdown", disable_web_page_preview: true });
+        return;
+      }
+    } catch (_pe) {
+      try { logger.warn({ err: _pe?.message }, "[PANEL-CMD] فشل"); } catch { }
+    }
     try {
       // [SCHED-FIX-V2] ── حالة الجدولة تُفحص أولاً (قبل خطاف التحويل) حتى لا
       // يبتلع قسم التحويل رقم الهاتف المُرسَل أثناء خطوات الجدولة ──
@@ -332521,6 +332559,67 @@ async function main() {
       } catch { }
       logger.info({ port }, "Server listening");
       resolve();
+
+      // ═══ [STABLE-LINK v8.47.0] رابط عام ثابت بلا نفق وبلا مكتبات ═══
+      // يشغّل منفذ الاستضافة المخصّص (SERVER_PORT…) على نفس التطبيق، ويتأكد
+      // من وصوله من الخارج عبر IP العام ⇒ رابط لا يتغيّر إلا بتغيّر IP/توقّف البوت.
+      import("./stable-link.mjs").then(async (SL) => {
+        const _pushLink = async (base, kind) => {
+          try {
+            if (!botRef || !DEVELOPER_ID) return;
+            let _uname = null;
+            try { _uname = (await botRef.getMe?.())?.username || null; } catch { }
+            const DC = await import("./dev-console.mjs");
+            const _entry = SL.permanentEntry(_uname);
+            const _txt = "🌐 *رابط لوحة المطوّر*\n\n" + base + "/dev?k=" + DC.devKey()
+              + (_entry ? "\n\n📌 *مدخل ثابت لا يتغيّر أبداً:*\n" + _entry : "")
+              + "\n\n✅ هذا الرابط *ثابت* (منفذ الاستضافة) — لا يموت مثل النفق المجاني.";
+            await botRef.sendMessage(String(DEVELOPER_ID), _txt, { parse_mode: "Markdown", disable_web_page_preview: true });
+          } catch { }
+        };
+        try { SL.setStableHook((base, kind) => { _pushLink(base, kind); }); } catch { }
+        const _st = await SL.startStableLink({
+          app: app_default,
+          port,
+          logger,
+          log: (m) => { try { logger.info(m); } catch { } },
+        });
+        if (_st?.base) {
+          globalThis.__STABLE_BASE__ = _st.base;
+          globalThis.__FW_PUBLIC_URL = _st.base;
+          globalThis.__FW_PUBLIC_TRUSTED = true;
+          try { logger.info({ base: _st.base, kind: _st.kind }, "[STABLE-LINK] ✅ رابط ثابت جاهز"); } catch { }
+          setTimeout(() => { _pushLink(_st.base, _st.kind); }, 8000);
+          return "stable";
+        }
+        try { logger.warn("[STABLE-LINK] لا منفذ عام متاح — سيبقى النفق مسؤولاً عن الرابط"); } catch { }
+        return null;
+      }).then((_r) => {
+        if (_r === "stable") {
+          globalThis.__SKIP_TUNNEL__ = true;
+          try { logger.info("[TUNNEL] تخطّي النفق — لدينا رابط ثابت"); } catch { }
+        }
+      }).catch((e) => { try { logger.warn({ err: e?.message }, "[STABLE-LINK] فشل البدء"); } catch { } });
+
+      // ═══ [DEV-CONSOLE v8.47.0] لوحة المطوّر: تحكم كامل بكل رسالة ═══
+      import("./dev-console.mjs").then((DC) => {
+        try {
+          let _ver = "unknown";
+          try { _ver = JSON.parse(fs6.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version; } catch { }
+          const _out = DC.registerDevConsole(app_default, {
+            version: _ver,
+            sendToTelegram: async (uid, buffer, kind, caption, mimetype, entry) => {
+              const _tg = globalThis.__ALSMANU_TG__;
+              if (!_tg) return { ok: false, errors: ["جسر تيليجرام غير جاهز بعد"] };
+              return await _tg.sendMedia(DEVELOPER_ID, buffer, kind, caption, mimetype, entry?.fileName || null);
+            },
+          });
+          globalThis.__DEV_KEY__ = _out?.key || null;
+          try { logger.info({ path: _out?.path?.replace(/k=.*/, "k=••••") }, "[DEV-CONSOLE] ✅ جاهزة على /dev"); } catch { }
+        } catch (e) {
+          try { logger.warn({ err: e?.message }, "[DEV-CONSOLE] فشل التسجيل"); } catch { }
+        }
+      }).catch(() => {});
     });
   });
   // [PANEL-KEEPALIVE v8.25.0] يُبقي لوحة السيرفر (الرابط العام) حيّة دائماً:
@@ -332541,6 +332640,10 @@ async function main() {
 
   // [TUNNEL] إنشاء رابط عام تلقائياً للاستضافات بدون رابط — يعمل في الخلفية
   // لا يعطّل إقلاع البوت أبداً حتى لو فشل
+  // [v8.47.0] إذا وُجد رابط ثابت (منفذ الاستضافة) لا نُنشئ نفقاً إطلاقاً.
+  if (globalThis.__SKIP_TUNNEL__ || globalThis.__STABLE_BASE__) {
+    try { logger.info("[TUNNEL] تخطّي النفق — يوجد رابط ثابت (منفذ الاستضافة)"); } catch { }
+  } else
   import("./tunnel.mjs")
     .then((t) => {
       // [TUNNEL-STABLE] كل تشغيل/إعادة إنشاء للنفق يعطي نطاقاً جديداً، والرابط القديم
