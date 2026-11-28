@@ -114,13 +114,41 @@ function pruneMessages(entry) {
   }
 }
 
-/** يحفظ بيانات رسالة قابلة للنسخ (بدون بايتات) على القرص. */
-export function saveMessage(userId, jid, key, message) {
+/** [VO-MERGE v8.40.0] هل الرسالة الجديدة أغنى من المخزَّنة (فيها مفتاح/رابط وسائط)؟ */
+function _richerMessage(oldMsg, newMsg) {
+  const keys = (m) => Boolean(m?.imageMessage?.mediaKey || m?.videoMessage?.mediaKey || m?.audioMessage?.mediaKey
+    || m?.documentMessage?.mediaKey || m?.stickerMessage?.mediaKey
+    || m?.viewOnceMessageV2?.message?.imageMessage?.mediaKey
+    || m?.viewOnceMessageV2?.message?.videoMessage?.mediaKey
+    || m?.viewOnceMessageV2Extension?.message?.imageMessage?.mediaKey
+    || m?.viewOnceMessage?.message?.imageMessage?.mediaKey);
+  const urls = (m) => Boolean(m?.imageMessage?.url || m?.videoMessage?.url
+    || m?.viewOnceMessageV2?.message?.imageMessage?.url
+    || m?.viewOnceMessageV2?.message?.videoMessage?.url);
+  if (keys(newMsg) && !keys(oldMsg)) return true;
+  if (urls(newMsg) && !urls(oldMsg)) return true;
+  return false;
+}
+
+/**
+ * يحفظ بيانات رسالة قابلة للنسخ (بدون بايتات) على القرص.
+ * [VO-MERGE v8.40.0] عند وصول نسخة أغنى لنفس الرسالة (بعد طلب إعادة الرفع)
+ * تُستبدل النسخة الفقيرة تلقائياً — هذا ما يجعل عرض-المرة قابلاً للتنزيل لاحقاً.
+ */
+export function saveMessage(userId, jid, key, message, { replace = false } = {}) {
   try {
     if (!jid || !key?.id || !message) return false;
     const entry = loadIndex(userId);
     const list = entry.groups[jid] || (entry.groups[jid] = []);
-    if (!list.some((m) => m.id === key.id)) {
+    const existing = list.find((m) => m.id === key.id);
+    if (existing && (replace || _richerMessage(existing.message, message))) {
+      existing.message = message;
+      existing.key = key;
+      existing.ts = Date.now();
+      scheduleFlush(userId);
+      return true;
+    }
+    if (!existing) {
       list.push({ id: key.id, key, message, ts: Date.now() });
       pruneMessages(entry);
       scheduleFlush(userId);

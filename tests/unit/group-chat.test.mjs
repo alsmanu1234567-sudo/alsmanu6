@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import * as chatLog from "../../dist/lib/chat-log.mjs";
+import * as _storeMod from "../../dist/lib/react-copy-store.mjs";
+const loadStore = () => _storeMod;
 
 const UID = "880001";
 const JID = "120363000000000555@g.us";
@@ -135,4 +137,29 @@ test("index: /copy g يوجد في مسار النسخ", () => {
   assert.match(src, /_copyDiagnose/);
   assert.match(src, /copy-diag-\$\{stamp\}\.json/);
   assert.match(src, /_chatLogMod\.recordMessage/);
+});
+
+// ── [v8.40.0] نسخة الاقتباس فقيرة (بلا mediaKey/url) ⇒ استرجاع الكاملة + طلب إعادة إرسال ──
+test("store: النسخة الأغنى تستبدل الفقيرة تلقائياً (mediaKey/url)", () => {
+  const STORE = loadStore();
+  STORE._resetStoreCache();
+  const poor = { imageMessage: { mimetype: "image/jpeg", viewOnce: true } };
+  const rich = { imageMessage: node({ viewOnce: true }) };
+  STORE.saveMessage(UID, JID, { id: "vo-poor" }, poor);
+  assert.equal(STORE.loadMessage(UID, JID, "vo-poor").message.imageMessage.mediaKey, undefined);
+  STORE.saveMessage(UID, JID, { id: "vo-poor" }, rich, { replace: true });
+  assert.ok(Buffer.isBuffer(STORE.loadMessage(UID, JID, "vo-poor").message.imageMessage.mediaKey));
+  // الاستبدال التلقائي بلا replace عند وصول نسخة أغنى
+  STORE.saveMessage(UID, JID, { id: "vo-poor2" }, poor);
+  STORE.saveMessage(UID, JID, { id: "vo-poor2" }, rich);
+  assert.ok(STORE.loadMessage(UID, JID, "vo-poor2").message.imageMessage.mediaKey);
+});
+
+test("/copy g: يفضّل النسخة الكاملة المخزَّنة ويطلب إعادة الإرسال عند نقص المفتاح", () => {
+  const src = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+  assert.match(src, /sourceOfTruth/);
+  assert.match(src, /resendRequested/);
+  assert.match(src, /updateMediaMessage\(\{/);
+  assert.match(src, /messages\.update/);
+  assert.match(src, /_voPending/);
 });

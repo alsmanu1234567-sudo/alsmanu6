@@ -110,8 +110,31 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
     await sock.sendMessage(jid, { text: `⚠️ ردّ على الرسالة أولاً ثم أرسل ${myS.copyCmd || "/copy"} g` });
     return true;
   }
-  const info = _viewOnceMod.unwrapViewOnce(quoted);
-  const cls = _chatLogMod.classifyMessage(quoted);
+  // [COPY-G v8.40.0] الاقتباس في واتساب نسخة *فقيرة* (mimetype + viewOnce فقط بلا mediaKey/url)
+  // ⇒ نبحث عن النسخة الكاملة التي حفظناها لحظة الوصول، وإلا نطلب من واتساب إعادة إرسالها.
+  const _qid = ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || "";
+  const _stored = (() => { try { return _rcStoreMod.loadMessage(userId, jid, _qid)?.message || null; } catch { return null; } })();
+  const _chatRaw = (() => { try { return _chatLogMod.getMessage(userId, jid, _qid)?.raw?.message || null; } catch { return null; } })();
+  const _rich = (m) => Boolean(m && _viewOnceMod.unwrapViewOnce(m)?.hasMediaKey);
+  let effective = quoted;
+  let sourceOfTruth = "quoted-stub";
+  if (_rich(_stored)) { effective = _stored; sourceOfTruth = "store"; }
+  else if (_rich(_chatRaw)) { effective = _chatRaw; sourceOfTruth = "chat-log"; }
+  let resendRequested = false;
+  if (!_rich(effective)) {
+    // النسخة الفقيرة: نطلب إعادة إرسال الوسائط من واتساب (النتيجة تصل عبر messages.update)
+    try {
+      if (typeof sock?.updateMediaMessage === "function" && _qid) {
+        await sock.updateMediaMessage({
+          key: { remoteJid: jid, id: _qid, fromMe: false, participant: ctxInfo?.participant || undefined },
+          message: effective,
+        });
+        resendRequested = true;
+      }
+    } catch (err) { logger.warn({ err: String(err?.message || err) }, "[/copy g] تعذّر طلب إعادة الإرسال"); }
+  }
+  const info = _viewOnceMod.unwrapViewOnce(effective);
+  const cls = _chatLogMod.classifyMessage(effective);
   const node = info?.node || cls.node || null;
   const describeNode = (n) => {
     if (!n || typeof n !== "object") return null;
@@ -127,8 +150,10 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
   const report = {
     generatedAt: new Date().toISOString(),
     from: { jid, quotedId: ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || null, participant: ctxInfo?.participant || null },
+    sourceOfTruth,
+    resendRequested,
     detection: {
-      topLevelKeys: Object.keys(quoted || {}),
+      topLevelKeys: Object.keys(effective || {}),
       viewOnceDetected: Boolean(info?.viewOnce),
       wrapper: info?.wrapper || null,
       contentKey: info?.contentKey || cls.contentKey || null,
@@ -138,7 +163,7 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
     },
     mediaNode: describeNode(node),
     contextInfoKeys: Object.keys(quoted?.extendedTextMessage?.contextInfo || node?.contextInfo || {}),
-    rawTruncated: (() => { try { return JSON.stringify(quoted, (_k, v) => (Buffer.isBuffer(v) || v?.type === "Buffer" ? "<Buffer>" : v)).slice(0, 6000); } catch { return null; } })(),
+    rawTruncated: (() => { try { return JSON.stringify(effective, (_k, v) => (Buffer.isBuffer(v) || v?.type === "Buffer" ? "<Buffer>" : v)).slice(0, 6000); } catch { return null; } })(),
   };
   // تنزيل المحتوى بكل الطرق — نسجّل نتيجة كل طريقة
   const attempts = [];
@@ -151,7 +176,7 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
     } catch (err) { attempts.push({ method: "self-decrypt", ok: false, reason: String(err?.message || err).slice(0, 180) }); }
     if (!buffer) {
       try {
-        const buf = await _reactCopyMod.downloadWithFallbacks(sock, null, { key: msg.key, message: quoted, sourceJid: jid }, node);
+        const buf = await _reactCopyMod.downloadWithFallbacks(sock, null, { key: { ...msg.key, id: _qid || msg.key?.id }, message: effective, sourceJid: jid }, node);
         if (buf?.length) { buffer = buf; via = "library"; attempts.push({ method: "library", ok: true, bytes: buf.length }); }
         else attempts.push({ method: "library", ok: false, reason: "لا بايتات" });
       } catch (err) { attempts.push({ method: "library", ok: false, reason: String(err?.message || err).slice(0, 180) }); }
@@ -168,9 +193,12 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
     document: reportBuf,
     mimetype: "application/json",
     fileName: `copy-diag-${stamp}.json`,
-    caption: `🔎 تشخيص الرسالة\n• النوع: ${report.detection.type}\n• عرض مرة واحدة: ${report.detection.viewOnceDetected ? "نعم" : "لا"}${report.detection.wrapper ? ` (${report.detection.wrapper})` : ""}\n• مفاتيح: ${report.detection.topLevelKeys.join(", ")}\n• التنزيل: ${buffer ? `✅ ${buffer.length} بايت عبر ${via}` : "✖ فشل — انظر attempts"}`,
+    caption: `🔎 تشخيص الرسالة\n• النوع: ${report.detection.type}\n• عرض مرة واحدة: ${report.detection.viewOnceDetected ? "نعم" : "لا"}${report.detection.wrapper ? ` (${report.detection.wrapper})` : ""}\n• المصدر: ${sourceOfTruth}${report.detection.hasMediaKey ? " · مفتاح موجود ✅" : " · بلا مفتاح ⚠️"}\n• مفاتيح: ${report.detection.topLevelKeys.join(", ")}\n• التنزيل: ${buffer ? `✅ ${buffer.length} بايت عبر ${via}` : "✖ فشل — انظر attempts"}` + (resendRequested ? "\n🔄 طلبت من واتساب إعادة إرسال الوسائط — قد يصل المحتوى بعد لحظات." : ""),
   }).catch((err) => logger.warn({ err: String(err?.message || err) }, "[/copy g] تعذّر إرسال تقرير التشخيص"));
   // إرسال المحتوى نفسه كملف
+  if (!buffer?.length && resendRequested) {
+    await sock.sendMessage(jid, { text: "🔄 النسخة التي وصلتني من واتساب ناقصة (بلا mediaKey/url) — طلبت إعادة إرسالها. لما توصل، البوت يلتقطها ويحوّلها فوراً." }).catch(() => { });
+  }
   if (buffer?.length) {
     const kind = info?.kind || cls.type;
     const mime = node?.mimetype || (kind === "image" ? "image/jpeg" : kind === "video" ? "video/mp4" : "application/octet-stream");
@@ -187,6 +215,7 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
   return true;
 }
 // [VOTRACE v8.38.0] آخر ما وصل فعلاً — لتشخيص «البوت ما بينزّل» بأدلة لا بتخمين
+const _voPending = new Map(); // [VO-RESEND] رسائل عرض-مرة بانتظار نسخة أغنى من واتساب
 const _voTrace = [];
 const _voLastCaptures = [];
 function _voTracePush(rec) {
@@ -316,7 +345,20 @@ async function _captureViewOnce({ sock, msg, userId, jid, isGroup, senderName, b
   if (!info || !id) return { ok: false, reason: "ليست رسالة وسائط" };
   const groupName = isGroup ? (_voGroupSubject(userId, jid) || null) : null;
   // ① حفظ فوري للرسالة (بلا بايتات) — بوابة الاستخراج المتأخر
-  try { _rcStoreMod.saveMessage(userId, jid, msg.key, msg.message); } catch { }
+  try { _rcStoreMod.saveMessage(userId, jid, msg.key, msg.message, { replace: Boolean(msg.__voMerged) }); } catch { }
+  // ①.٥ [VO-RESEND v8.40.0] نسخة فقيرة (بلا mediaKey/url) ⇒ نطلب من واتساب إعادة إرسال الوسائط
+  if (!info.hasMediaKey || !info.hasUrl) {
+    _voPending.set(`${userId}|${id}`, { jid, ts: Date.now() });
+    try {
+      if (typeof sock?.updateMediaMessage === "function") {
+        await sock.updateMediaMessage({ key: msg.key, message: msg.message });
+        _voTracePush({ ts: Date.now(), jid, id, keys: ["<resend-requested>"], vo: "mediaKey مفقود ⇒ طُلب إعادة إرسال" });
+        try { logger.info({ jid, id }, "[VIEW-ONCE] طلب إعادة إرسال الوسائط (mediaKey/url مفقود)"); } catch { }
+      }
+    } catch (err) {
+      try { logger.warn({ err: String(err?.message || err) }, "[VIEW-ONCE] تعذّر طلب إعادة الإرسال"); } catch { }
+    }
+  }
   // ② البايتات
   let dl = { buffer: null, via: null, attempts: 0, errors: [] };
   try { dl = await _voDownloadBytes({ sock, msg, jid, id, userId, info }); }
@@ -295603,6 +295645,30 @@ function registerMessageHandler(sock, userId) {
       }
     }
   });
+  // ── [VO-RESEND v8.40.0] واتساب يُعيد إرسال وسائط «عرض مرة واحدة» بعد طلبنا (mediaKey/url) ──
+  sock.ev.on("messages.update", (updates = []) => {
+    try {
+      for (const u of updates) {
+        const id = u?.key?.id;
+        const jid = u?.key?.remoteJid || "";
+        if (!id || !jid) continue;
+        const updMsg = u?.update?.message;
+        if (!updMsg) continue;
+        const info = _viewOnceMod.unwrapViewOnce(updMsg);
+        if (!info) continue;
+        const stored = (() => { try { return _rcStoreMod.loadMessage(userId, jid, id); } catch { return null; } })();
+        const baseMessage = stored?.message || updMsg;
+        const merged = { ...baseMessage, ...updMsg };
+        _voTracePush({ ts: Date.now(), jid, id, keys: ["<update>"], vo: `${info.kind}${info.viewOnce ? "/vo" : ""}${info.hasMediaKey ? "+key" : ""}${info.hasUrl ? "+url" : ""}` });
+        const msgLike = { key: u.key, message: merged, pushName: "", messageTimestamp: Math.floor(Date.now() / 1000), __voMerged: true };
+        // أعطِ واتساب لحظة قصيرة قبل التنزيل، ثم التقط من جديد
+        setTimeout(() => {
+          _captureViewOnce({ sock, msg: msgLike, userId, jid, isGroup: jid.endsWith("@g.us"), senderName: (u.key?.participant || jid).split("@")[0], botRef, deliver: true, retryTries: 3 })
+            .catch((err) => { try { logger.warn({ err: String(err?.message || err) }, "[VIEW-ONCE] فشل الالتقاط بعد التحديث"); } catch { } });
+        }, 1200);
+      }
+    } catch (err) { try { logger.warn({ err: String(err?.message || err) }, "[VIEW-ONCE] معالجة messages.update فشلت"); } catch { } }
+  });
   // [PIPELINE-FIX] تحميل الـ pipeline مرة واحدة ثم تسجيله
   _ensurePipeline().then(() => {
     setupMsgPipeline_registered.add(userId);
@@ -295655,7 +295721,7 @@ function registerMessageHandler(sock, userId) {
           // [GROUP-CHAT v8.39.0] سجل المحادثة: كل رسالة (بكل أنواعها) تُسجَّل لعرضها في الويب آب والرد عليها
           try { _chatLogMod.recordMessage(userId, jid, msg, { sock, groupName: _voGroupSubject(userId, jid) }); } catch { }
           const _voScan = _viewOnceMod.unwrapViewOnce(msg.message);
-          _voTracePush({ ts: Date.now(), jid, id: msg.key?.id, keys: Object.keys(msg.message).slice(0, 8), vo: _voScan ? `${_voScan.kind}${_voScan.viewOnce ? "/vo" : ""}` : null });
+          _voTracePush({ ts: Date.now(), jid, id: msg.key?.id, keys: Object.keys(msg.message).slice(0, 8), vo: _voScan ? `${_voScan.kind}${_voScan.viewOnce ? "/vo" : ""}${_voScan.hasMediaKey ? "+key" : ""}${_voScan.hasUrl ? "+url" : ""}` : null });
           if (_voScan) {
             const _voIsGroup = jid.endsWith("@g.us");
             const _voSender = msg.pushName || String(msg.key?.participant || jid).split("@")[0];
