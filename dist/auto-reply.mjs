@@ -296,6 +296,48 @@ export async function handleAddReply(bot2, chatId, userId) {
   );
 }
 
+// [REPLY-ADV v8.33.0] أدوات مشتركة بين معالج الأزرار ومعالج النص
+function _advGroups(userId) {
+  try {
+    const cached = _deps.inMemoryDB?.groupsCache?.get?.(String(userId));
+    if (Array.isArray(cached) && cached.length) {
+      return cached
+        .map((g) => ({ id: String(g.id || g.jid || ""), name: String(g.subject || g.name || g.id || "") }))
+        .filter((g) => g.id.endsWith("@g.us"));
+    }
+  } catch { }
+  return [];
+}
+function _advPicker(userId, reply, page = 0, filterText = "") {
+  const all = _advGroups(userId);
+  const excluded = Array.isArray(reply?.excludeGroups) ? reply.excludeGroups : [];
+  const q = String(filterText || "").trim().toLowerCase();
+  const list = q ? all.filter((g) => g.name.toLowerCase().includes(q) || g.id.includes(q)) : all;
+  const size = 6, pages = Math.max(1, Math.ceil(list.length / size));
+  const p = Math.min(Math.max(0, Number(page) || 0), pages - 1);
+  const rows = list.slice(p * size, (p + 1) * size).map((g) => [{
+    text: `${excluded.includes(g.id) ? "🚫" : "✅"} ${g.name.slice(0, 30)}`,
+    callback_data: `reply_adv_gt_${reply.id}_${p}_${encodeURIComponent(g.id).slice(0, 40)}`,
+  }]);
+  if (pages > 1) {
+    const nav = [];
+    if (p > 0) nav.push({ text: "⬅️", callback_data: `reply_adv_gp_${reply.id}_${p - 1}` });
+    nav.push({ text: `${p + 1}/${pages}`, callback_data: `reply_adv_gp_${reply.id}_${p}` });
+    if (p + 1 < pages) nav.push({ text: "➡️", callback_data: `reply_adv_gp_${reply.id}_${p + 1}` });
+    rows.push(nav);
+  }
+  rows.push([{ text: "🔎 بحث", callback_data: `reply_adv_gs_${reply.id}` }, { text: "🙈 إخفاء القائمة", callback_data: `reply_adv_gh_${reply.id}` }]);
+  rows.push([{ text: "🧹 إلغاء كل الاستثناءات", callback_data: `reply_adv_gc_${reply.id}` }, { text: "⬅️ رجوع", callback_data: `reply_adv_${reply.id}` }]);
+  return { rows, list, pages, found: list.length, all: all.length, excluded };
+}
+function _advFmt(secs) {
+  const n = Number(secs) || 0;
+  if (n <= 0) return "لا يُحذف";
+  if (n < 60) return `${n} ثانية`;
+  if (n < 3600) return `${Math.round(n / 60)} دقيقة`;
+  return `${Math.round(n / 3600)} ساعة`;
+}
+
 export async function handleAutoReplyCallback(bot2, chatId, userId, data) {
   const {
     getUser, getUserReplies, saveAutoReply, deleteAutoReply, toggleAutoReply,
@@ -307,6 +349,81 @@ export async function handleAutoReplyCallback(bot2, chatId, userId, data) {
 
   const user = getUser(userId);
   const isDev2 = userId === DEVELOPER_ID;
+
+  // ═══ [REPLY-ADV v8.33.0] خيارات متقدمة لكل رد ═══
+  const saveReplyPatch = (replyId, patch) => {
+    if (typeof _deps.updateAutoReply === "function") return _deps.updateAutoReply(userId, replyId, patch);
+    const list = getUserReplies(userId);
+    const found = list.find((r) => r.id === replyId);
+    if (found) Object.assign(found, patch);
+    return found;
+  };
+  const fmtSecs = (secs) => {
+    const n = Number(secs) || 0;
+    if (n <= 0) return "لا يُحذف";
+    if (n < 60) return `${n} ثانية`;
+    if (n < 3600) return `${Math.round(n / 60)} دقيقة`;
+    return `${Math.round(n / 3600)} ساعة`;
+  };
+  const realGroups = () => {
+    try {
+      const cached = _deps.inMemoryDB?.groupsCache?.get?.(String(userId));
+      if (Array.isArray(cached) && cached.length) return cached.map((g) => ({ id: String(g.id || g.jid || ""), name: String(g.subject || g.name || g.id || "") })).filter((g) => g.id.endsWith("@g.us"));
+    } catch { }
+    return [];
+  };
+  const groupsPicker = (reply, page = 0, filterText = "") => {
+    const all = realGroups();
+    const excluded = Array.isArray(reply.excludeGroups) ? reply.excludeGroups : [];
+    const q = String(filterText || "").trim().toLowerCase();
+    const list = q ? all.filter((g) => g.name.toLowerCase().includes(q) || g.id.includes(q)) : all;
+    const size = 6, pages = Math.max(1, Math.ceil(list.length / size));
+    const p = Math.min(Math.max(0, Number(page) || 0), pages - 1);
+    const slice = list.slice(p * size, (p + 1) * size);
+    const rows = slice.map((g) => [{
+      text: `${excluded.includes(g.id) ? "🚫" : "✅"} ${g.name.slice(0, 30)}`,
+      callback_data: `reply_adv_gt_${reply.id}_${p}_${encodeURIComponent(g.id).slice(0, 40)}`,
+    }]);
+    if (pages > 1) {
+      const nav = [];
+      if (p > 0) nav.push({ text: "⬅️", callback_data: `reply_adv_gp_${reply.id}_${p - 1}` });
+      nav.push({ text: `${p + 1}/${pages}`, callback_data: `reply_adv_gp_${reply.id}_${p}` });
+      if (p + 1 < pages) nav.push({ text: "➡️", callback_data: `reply_adv_gp_${reply.id}_${p + 1}` });
+      rows.push(nav);
+    }
+    rows.push([
+      { text: "🔎 بحث", callback_data: `reply_adv_gs_${reply.id}` },
+      { text: "🙈 إخفاء القائمة", callback_data: `reply_adv_gh_${reply.id}` },
+    ]);
+    rows.push([
+      { text: "🧹 إلغاء كل الاستثناءات", callback_data: `reply_adv_gc_${reply.id}` },
+      { text: "⬅️ رجوع", callback_data: `reply_adv_${reply.id}` },
+    ]);
+    return { rows, list, pages, found: list.length, all: all.length, excluded };
+  };
+  const advMenu = (reply) => {
+    const excluded = Array.isArray(reply.excludeGroups) ? reply.excludeGroups : [];
+    const text = [
+      "⚙️ *خيارات أخرى*",
+      "",
+      `الرد: "${String(reply.trigger || "").slice(0, 30)}"`,
+      "",
+      `⏱️ حذف الرد بعد: *${fmtSecs(reply.deleteAfterSec)}*`,
+      `👤 حد كل شخص: *${reply.perUserLimit || 0}* مرة كل *${Number(reply.perUserWindowHours) || 8}* ساعة`,
+      `🚫 مجموعات مستثناة: *${excluded.length}*`,
+    ].join("\n");
+    return {
+      text,
+      keyboard: {
+        inline_keyboard: [
+          [{ text: `⏱️ حذف الرد بعد: ${fmtSecs(reply.deleteAfterSec)}`, callback_data: `reply_adv_del_${reply.id}` }],
+          [{ text: `👤 مدة حد كل شخص: ${Number(reply.perUserWindowHours) || 8} ساعة`, callback_data: `reply_adv_win_${reply.id}` }],
+          [{ text: `🚫 استثناء مجموعات (${excluded.length})`, callback_data: `reply_adv_grp_${reply.id}` }],
+          [{ text: "⬅️ رجوع", callback_data: `replyitem_${reply.id}` }],
+        ],
+      },
+    };
+  };
 
   if (data === "menu_replies") {
     await showReplies(bot2, chatId, userId);
@@ -330,6 +447,108 @@ export async function handleAutoReplyCallback(bot2, chatId, userId, data) {
       { parse_mode: "Markdown", reply_markup: replyListKeyboard(replies) }
     );
     return true;
+  }
+  // ═══ [REPLY-ADV v8.33.0] منيو الخيارات المتقدمة + منتقي المجموعات ═══
+  if (data.startsWith("reply_adv_gt_")) {
+    const rest = data.slice("reply_adv_gt_".length);
+    const first = rest.indexOf("_");
+    const second = rest.indexOf("_", first + 1);
+    const replyId = rest.slice(0, first);
+    const groupJid = decodeURIComponent(rest.slice(second + 1) || "");
+    const reply = getUserReplies(userId).find((r) => r.id === replyId);
+    if (!reply) { await bot2.sendMessage(chatId, "❌ الرد غير موجود"); return true; }
+    const excluded = new Set(Array.isArray(reply.excludeGroups) ? reply.excludeGroups : []);
+    const full = realGroups().find((g) => g.id === groupJid || g.id.startsWith(groupJid));
+    const target = full?.id || groupJid;
+    if (!target) { await bot2.sendMessage(chatId, "❌ المجموعة غير معروفة"); return true; }
+    if (excluded.has(target)) excluded.delete(target); else excluded.add(target);
+    saveReplyPatch(replyId, { excludeGroups: [...excluded] });
+    const updated = getUserReplies(userId).find((r) => r.id === replyId) || reply;
+    const picker = groupsPicker(updated, 0, "");
+    await bot2.sendMessage(chatId,
+      `${excluded.has(target) ? "🚫 استُثنيت" : "✅ أُعيد تفعيل"} ${full?.name ? `«${full.name.slice(0, 30)}»` : "المجموعة"} — المستثناة الآن ${excluded.size}.`,
+      { reply_markup: { inline_keyboard: picker.rows } });
+    return true;
+  }
+  if (data.startsWith("reply_adv_gp_")) {
+    const rest = data.slice("reply_adv_gp_".length);
+    const idx = rest.lastIndexOf("_");
+    const replyId = rest.slice(0, idx);
+    const page = Number(rest.slice(idx + 1)) || 0;
+    const reply = getUserReplies(userId).find((r) => r.id === replyId);
+    if (!reply) return true;
+    const picker = groupsPicker(reply, page, "");
+    await bot2.sendMessage(chatId, `🚫 *استثناء مجموعات* — صفحة ${page + 1} من ${picker.pages}`, { parse_mode: "Markdown", reply_markup: { inline_keyboard: picker.rows } });
+    return true;
+  }
+  if (data.startsWith("reply_adv_gs_")) {
+    setState(userId, "awaiting_reply_exclude_search", { advReplyId: data.slice("reply_adv_gs_".length) });
+    await bot2.sendMessage(chatId, "🔎 أرسل كلمة من اسم المجموعة للبحث:", { reply_markup: cancelKeyboard() });
+    return true;
+  }
+  if (data.startsWith("reply_adv_gh_")) {
+    const replyId = data.slice("reply_adv_gh_".length);
+    const reply = getUserReplies(userId).find((r) => r.id === replyId);
+    if (!reply) return true;
+    const excluded = Array.isArray(reply.excludeGroups) ? reply.excludeGroups : [];
+    const menu = advMenu(reply);
+    const shown = excluded.slice(0, 10).map((jid) => {
+      const g = realGroups().find((x) => x.id === jid);
+      return `• ${g ? g.name.slice(0, 30) : String(jid).split("@")[0]}`;
+    }).join("\n");
+    await bot2.sendMessage(chatId,
+      `${menu.text}\n\n${excluded.length ? "*المستثناة:*\n" + shown + (excluded.length > 10 ? "\n…" : "") : "لا توجد مجموعات مستثناة."}`,
+      { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+        [{ text: "🚫 عرض/تعديل القائمة", callback_data: `reply_adv_grp_${reply.id}` }],
+        [{ text: "🔎 بحث", callback_data: `reply_adv_gs_${reply.id}` }, { text: "⬅️ رجوع", callback_data: `reply_adv_${reply.id}` }],
+      ] } });
+    return true;
+  }
+  if (data.startsWith("reply_adv_gc_")) {
+    const replyId = data.slice("reply_adv_gc_".length);
+    saveReplyPatch(replyId, { excludeGroups: [] });
+    const updated = getUserReplies(userId).find((r) => r.id === replyId) || { id: replyId, trigger: "", excludeGroups: [] };
+    const menu = advMenu(updated);
+    await bot2.sendMessage(chatId, "🧹 أُلغيت كل الاستثناءات — البوت يرد في جميع المجموعات.", { reply_markup: menu.keyboard });
+    return true;
+  }
+  if (data.startsWith("reply_adv_")) {
+    const rest = data.slice("reply_adv_".length);
+    const kinds = ["del", "win", "grp"];
+    const kind = kinds.find((k) => rest.startsWith(`${k}_`)) || "";
+    const replyId = kind ? rest.slice(kind.length + 1) : rest;
+    const reply = getUserReplies(userId).find((r) => r.id === replyId);
+    if (!reply) { await bot2.sendMessage(chatId, "❌ الرد غير موجود"); return true; }
+    if (!kind) {
+      const menu = advMenu(reply);
+      await bot2.sendMessage(chatId, menu.text, { parse_mode: "Markdown", reply_markup: menu.keyboard });
+      return true;
+    }
+    if (kind === "del") {
+      setState(userId, "awaiting_reply_delete_after", { advReplyId: reply.id });
+      await bot2.sendMessage(chatId,
+        `⏱️ *حذف الرد بعد مدة*\n\nالرد: "${String(reply.trigger).slice(0, 30)}"\nالحالي: ${fmtSecs(reply.deleteAfterSec)}\n\nأرسل المدة بالثواني (30) أو الدقائق (5m) أو الساعات (2h).\n0 = لا يُحذف.`,
+        { parse_mode: "Markdown", reply_markup: cancelKeyboard() });
+      return true;
+    }
+    if (kind === "win") {
+      setState(userId, "awaiting_reply_per_user_window", { advReplyId: reply.id });
+      await bot2.sendMessage(chatId,
+        `👤 *مدة حد كل شخص*\n\nالحالي: ${reply.perUserLimit || 0} مرة كل ${Number(reply.perUserWindowHours) || 8} ساعة.\n\nأرسل عدد الساعات (1، 8، 24…) — عدد المرات يُضبط من «حد كل شخص».`,
+        { parse_mode: "Markdown", reply_markup: cancelKeyboard() });
+      return true;
+    }
+    if (kind === "grp") {
+      const picker = groupsPicker(reply, 0, "");
+      if (!picker.all) {
+        await bot2.sendMessage(chatId, "❌ لا توجد مجموعات محفوظة بعد.\nافتح قسم المجموعات واضغط 🔄 تحديث، ثم أعد المحاولة.");
+        return true;
+      }
+      await bot2.sendMessage(chatId,
+        `🚫 *استثناء مجموعات* — ${picker.all} مجموعة\nاضغط المجموعة لتبديل حالتها:\n✅ يرد فيها · 🚫 مستثناة`,
+        { parse_mode: "Markdown", reply_markup: { inline_keyboard: picker.rows } });
+      return true;
+    }
   }
   if (data === "reply_toggle" || data === "reply_delete" || data === "reply_edit") {
     const replies = getUserReplies(userId);
@@ -1890,6 +2109,62 @@ export async function handleAutoReplyTextInput(bot2, chatId, userId, text, state
     } catch {
       await bot2.sendMessage(chatId, "❌ تنسيق JSON غير صحيح. تأكد من صحة البيانات.");
     }
+    return true;
+  }
+  // ═══ [REPLY-ADV v8.33.0] مدخلات الخيارات المتقدمة ═══
+  if (state.state === "awaiting_reply_delete_after") {
+    const raw = String(text || "").trim().toLowerCase();
+    const num = Number(raw.replace(/[^\d.]/g, ""));
+    if (!Number.isFinite(num) || num < 0) {
+      await bot2.sendMessage(chatId, "❌ أرسل رقماً صحيحاً: 30 (ثانية) · 5m (دقائق) · 2h (ساعات) · 0 للإلغاء", { reply_markup: _deps.cancelKeyboard() });
+      return true;
+    }
+    let seconds = num;
+    if (raw.endsWith("m")) seconds = num * 60;
+    else if (raw.endsWith("h")) seconds = num * 3600;
+    seconds = Math.min(24 * 3600, Math.round(seconds));
+    const replyId = state.data?.advReplyId;
+    const saved = typeof _deps.updateAutoReply === "function"
+      ? _deps.updateAutoReply(userId, replyId, { deleteAfterSec: seconds })
+      : null;
+    clearState(userId);
+    if (!saved) { await bot2.sendMessage(chatId, "❌ الرد غير موجود"); return true; }
+    const fmt = seconds <= 0 ? "لا يُحذف" : seconds < 60 ? `${seconds} ثانية` : seconds < 3600 ? `${Math.round(seconds / 60)} دقيقة` : `${Math.round(seconds / 3600)} ساعة`;
+    await bot2.sendMessage(chatId,
+      `✅ *تم الحفظ*\n\nسيُحذف رد البوت بعد: *${fmt}*\nالرد: "${String(saved.trigger).slice(0, 30)}"`,
+      { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "⚙️ خيارات أخرى", callback_data: `reply_adv_${saved.id}` }], [{ text: "🏠 الرئيسية", callback_data: "home" }]] } });
+    return true;
+  }
+  if (state.state === "awaiting_reply_per_user_window") {
+    const hours = Number(String(text || "").replace(/[^\d.]/g, ""));
+    if (!Number.isFinite(hours) || hours <= 0 || hours > 168) {
+      await bot2.sendMessage(chatId, "❌ أرسل عدد ساعات بين 1 و168 (مثال: 8 أو 24)", { reply_markup: _deps.cancelKeyboard() });
+      return true;
+    }
+    const replyId = state.data?.advReplyId;
+    const saved = typeof _deps.updateAutoReply === "function"
+      ? _deps.updateAutoReply(userId, replyId, { perUserWindowHours: hours })
+      : null;
+    clearState(userId);
+    if (!saved) { await bot2.sendMessage(chatId, "❌ الرد غير موجود"); return true; }
+    await bot2.sendMessage(chatId,
+      `✅ *تم الحفظ*\n\nحد كل شخص: *${saved.perUserLimit || 0}* مرة كل *${hours}* ساعة.`,
+      { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "⚙️ خيارات أخرى", callback_data: `reply_adv_${saved.id}` }], [{ text: "🏠 الرئيسية", callback_data: "home" }]] } });
+    return true;
+  }
+  if (state.state === "awaiting_reply_exclude_search") {
+    const replyId = state.data?.advReplyId;
+    const reply = getUserReplies(userId).find((r) => r.id === replyId);
+    clearState(userId);
+    if (!reply) { await bot2.sendMessage(chatId, "❌ الرد غير موجود"); return true; }
+    const picker = _advPicker(userId, reply, 0, String(text || ""));
+    if (!picker.found) {
+      await bot2.sendMessage(chatId, `🔎 لا نتائج لـ «${String(text).slice(0, 40)}» — جرّب كلمة أخرى.`, { reply_markup: { inline_keyboard: [[{ text: "🔎 بحث آخر", callback_data: `reply_adv_gs_${reply.id}` }], [{ text: "⚙️ خيارات أخرى", callback_data: `reply_adv_${reply.id}` }]] } });
+      return true;
+    }
+    await bot2.sendMessage(chatId,
+      `🔎 *نتائج «${String(text).slice(0, 40)}»* — ${picker.found} مجموعة\nاضغط للتبديل ✅/🚫`,
+      { parse_mode: "Markdown", reply_markup: { inline_keyboard: picker.rows } });
     return true;
   }
   if (state.state === "awaiting_reply_per_user_limit") {

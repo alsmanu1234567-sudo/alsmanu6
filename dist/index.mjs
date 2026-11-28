@@ -124009,6 +124009,29 @@ function loadPersistedData() {
 function persistUsers() {
   saveJson(USERS_FILE, Array.from(inMemoryDB.users.values()));
 }
+// [REPLY-ADV v8.33.0] تحديث رد موجود + حفظ فوري (يُستخدم من قسم الردود)
+function updateAutoReply(userId, replyId, patch = {}) {
+  const replies = getUserReplies(userId);
+  const reply = replies.find((r) => r.id === replyId);
+  if (!reply) return null;
+  Object.assign(reply, patch);
+  persistReplies();
+  return reply;
+}
+// [REPLY-ADV v8.33.0] حذف رد البوت بعد مدة (revoke للجميع)
+const _replyDeleteTimers = new Set();
+function scheduleReplyDelete(sock, jid, sent, seconds) {
+  const secs = Number(seconds) || 0;
+  const key = sent?.key;
+  if (secs <= 0 || !key) return null;
+  const timer = setTimeout(async () => {
+    _replyDeleteTimers.delete(timer);
+    try { await sock.sendMessage(jid, { delete: key }); } catch { }
+  }, Math.min(24 * 3600, Math.max(1, secs)) * 1000);
+  try { timer.unref?.(); } catch { }
+  _replyDeleteTimers.add(timer);
+  return timer;
+}
 function persistReplies() {
   const obj2 = {};
   for (const [k2, v] of inMemoryDB.autoReplies.entries()) {
@@ -125234,6 +125257,8 @@ function singleReplyKeyboard(replyId) {
   return {
     inline_keyboard: [
       [{ text: "\u{1F5D1}\uFE0F \u062D\u0630\u0641", callback_data: `delete_reply_${replyId}` }, { text: "\u25B6\uFE0F \u062A\u0641\u0639\u064A\u0644/\u062A\u0639\u0637\u064A\u0644", callback_data: `toggle_reply_${replyId}` }],
+      // [REPLY-ADV v8.33.0] خيارات متقدمة: حذف بعد مدة · مدة حد الشخص · استثناء مجموعات
+      [{ text: "\u2699\uFE0F خيارات أخرى", callback_data: `reply_adv_${replyId}` }],
       [{ text: "\u{1F519} \u0644\u0644\u0642\u0627\u0626\u0645\u0629", callback_data: "reply_list" }, { text: "\u{1F3E0} \u0627\u0644\u0631\u0626\u064A\u0633\u064A\u0629", callback_data: "home" }]
     ]
   };
@@ -295120,6 +295145,8 @@ function registerMessageHandler(sock, userId) {
         if (!reply.isActive || !matchesReplyTarget(reply, msg)) continue;
         if (reply.scope === "private" && isGroup) continue;
         if ((reply.scope === "groups" || reply.scope === "group") && !isGroup) continue;
+        // [REPLY-ADV v8.33.0] مجموعات مستثناة: البوت لا يرد فيها إطلاقاً
+        if (isGroup && Array.isArray(reply.excludeGroups) && reply.excludeGroups.includes(jid)) continue;
         let matched = false;
         const trigger = reply.caseSensitive ? reply.trigger : reply.trigger.toLowerCase();
         let matchText = text;
@@ -295171,13 +295198,14 @@ function registerMessageHandler(sock, userId) {
         const dailyLimit = reply.dailyLimit || 0;
         if (dailyLimit > 0 && dailyCount >= dailyLimit) continue;
 
-        // حد أقصى لكل شخص كل 8 ساعات
+        // حد أقصى لكل شخص كل مدة (افتراضي 8 ساعات — قابلة للتعديل لكل رد)
         const perUserLim = reply.perUserLimit || 0;
         if (perUserLim > 0) {
           const puKey = `reply_pu_${reply.id}_${senderJid}`;
           const puData = inMemoryDB[puKey] || { count: 0, resetAt: 0 };
           const now8h = Date.now();
-          if (now8h > puData.resetAt) { puData.count = 0; puData.resetAt = now8h + 8 * 60 * 60 * 1000; }
+          const windowMs = Math.max(1, Number(reply.perUserWindowHours) || 8) * 3600 * 1000;
+          if (now8h > puData.resetAt) { puData.count = 0; puData.resetAt = now8h + windowMs; }
           if (puData.count >= perUserLim) continue;
           puData.count++;
           inMemoryDB[puKey] = puData;
@@ -295237,7 +295265,8 @@ function registerMessageHandler(sock, userId) {
             const aiText = await getAiReplyForRule2(userId, aiPromptForRule, text);
             if (aiText) {
               // [AI-CARD] صورة كرت الذكاء + نص الرد في رسالة واحدة، مع اقتباس رسالة العضو
-              await sendAiReply(sock, jid, aiText, { quoted: msg });
+              const _aiSent = await sendAiReply(sock, jid, aiText, { quoted: msg });
+              if (reply.deleteAfterSec > 0) scheduleReplyDelete(sock, jid, _aiSent, reply.deleteAfterSec);
             }
           } catch (err) {
             logger.error({ err }, "AI auto-reply error");
@@ -295280,7 +295309,8 @@ function registerMessageHandler(sock, userId) {
           inMemoryDB[rotKey] = idx + 1;
           try {
             // [REPLY-QUOTE v8.28.0] الرد التلقائي يقتبس رسالة العضو
-            await sock.sendMessage(jid, { text: msgs[idx] }, { quoted: msg });
+            const _rotSent = await sock.sendMessage(jid, { text: msgs[idx] }, { quoted: msg });
+            if (reply.deleteAfterSec > 0) scheduleReplyDelete(sock, jid, _rotSent, reply.deleteAfterSec);
           } catch (err) {
             logger.error({ err }, "Rotating reply error");
           }
@@ -295324,11 +295354,14 @@ function registerMessageHandler(sock, userId) {
           }
           // [REPLY-QUOTE v8.28.0] اقتباس رسالة العضو في الرد التلقائي النصي/الصوري
           const _q = { quoted: msg };
+          let _sentReply = null;
           if (_replyImage?.buffer?.length) {
-            await sock.sendMessage(jid, { image: _replyImage.buffer, caption: responseText, mimetype: _replyImage.mimetype }, _q);
+            _sentReply = await sock.sendMessage(jid, { image: _replyImage.buffer, caption: responseText, mimetype: _replyImage.mimetype }, _q);
           } else {
-            await sock.sendMessage(jid, { text: responseText }, _q);
+            _sentReply = await sock.sendMessage(jid, { text: responseText }, _q);
           }
+          // [REPLY-ADV v8.33.0] حذف الرد بعد المدة التي حدّدها المستخدم
+          if (reply.deleteAfterSec > 0) scheduleReplyDelete(sock, jid, _sentReply, reply.deleteAfterSec);
         } catch (err) {
           logger.error({ err }, "Error sending WhatsApp reply");
         }
@@ -300140,6 +300173,7 @@ var init_auto_reply = __esm({
       saveUser,
       getUserReplies,
       saveAutoReply,
+      updateAutoReply,
       deleteAutoReply,
       toggleAutoReply,
       getReplyStat,
