@@ -303873,7 +303873,20 @@ async function sendDevPanel(bot2, chatId, userId) {
   const unreadMsgs = inMemoryDB.devMessages.filter((m) => !m.replied).length;
   const devKeyboard=devMenuKeyboard(inMemoryDB.users.size,stats.running,stats.stopped);
   if(String(chatId)===String(userId)) devKeyboard.inline_keyboard.splice(1,0,[{text:"🖥 لوحة السيرفر المستقلة",callback_data:"dev_servercontrol"}],[{text:"🔄 رابط جديد للوحة المطور",callback_data:"dev_open_web"},{text:"🔒 إلغاء روابط المطور",callback_data:"dev_revoke_web"}]);
-  if(String(chatId)===String(userId)){try{devKeyboard.inline_keyboard[0]=[{text:'🌐 فتح لوحة المطوّر',url:developerConsole.issue(userId)}]}catch{}}
+  // [v8.48.3] أزرار تفتح مباشرة — بلا أوامر ولا كود: لوحة المطوّر + لوحة السيرفر + الويب آب.
+  // تُبنى من الرابط الدائم (منفذ الاستضافة) فلا تتوقف إن مات النفق.
+  if(String(chatId)===String(userId)){try{
+    const _b=globalThis.__STABLE_BASE__||globalThis.__FW_PUBLIC_URL||"";
+    const _k=globalThis.__DEV_KEY__||"";
+    if(_b&&_k){
+      devKeyboard.inline_keyboard[0]=[
+        {text:'🛠 لوحة المطوّر',url:`${_b}/dev?k=${_k}`},
+        {text:'🖥 لوحة السيرفر',url:`${_b}/srv?k=${_k}`},
+      ];
+      const _web=webappUrlFor(userId)||`${_b}/webapp?token=${tokenForUser(userId)}`;
+      devKeyboard.inline_keyboard.splice(1,0,[{text:'🌐 الويب آب (المجموعات والردود)',url:_web}]);
+    } else devKeyboard.inline_keyboard[0]=[{text:'🌐 فتح لوحة المطوّر',url:developerConsole.issue(userId)}];
+  }catch{}}
   await bot2.sendMessage(
     chatId,
     `\u{1F451} *\u0644\u0648\u062D\u0629 \u062A\u062D\u0643\u0645 \u0627\u0644\u0645\u0637\u0648\u0631 v7.0 - GOD MODE*
