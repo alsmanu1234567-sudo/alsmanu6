@@ -108,3 +108,42 @@ export function registerGlobalSock(uid, phone, sock) {
   if (!(globalThis.__FW_SOCKS instanceof Map)) globalThis.__FW_SOCKS = new Map();
   globalThis.__FW_SOCKS.set(String(uid) + (phone ? `_${phone}` : ""), sock);
 }
+
+/**
+ * يفحص كل السوكتات في العملية بغض النظر عن المستخدم.
+ * مفيد لسيرفر فيه رقم واحد: يبيّن إن كان السوكت موجوداً تحت مفتاح آخر.
+ * @returns {Array<{key:string, owner:string, source:string, state:string, hasUser:boolean}>}
+ */
+export function scanAllSocks({ numberSocks = null, sessions = null, memorySessions = null } = {}) {
+  const out = [];
+  const push = (key, value, source) => {
+    const sock = unwrapSock(value);
+    if (!sock) return;
+    out.push({
+      key: String(key),
+      owner: String(key).split(/[_+\-]/)[0],
+      source,
+      state: socketState(sock),
+      hasUser: Boolean(sock?.user?.id),
+      sock,
+    });
+  };
+  if (numberSocks && typeof numberSocks.forEach === "function") {
+    numberSocks.forEach((inner, uid) => {
+      if (inner && typeof inner.forEach === "function") inner.forEach((value, phone) => push(`${uid}_${phone}`, value, "numberSocks"));
+      else push(uid, inner, "numberSocks");
+    });
+  }
+  for (const [source, map] of [["memorySessions", memorySessions], ["sessions", sessions], ["global", globalThis.__FW_SOCKS]]) {
+    if (!map || typeof map.forEach !== "function") continue;
+    map.forEach((value, key) => push(key, value, source));
+  }
+  const seen = new Set();
+  return out
+    .filter((entry) => {
+      if (seen.has(entry.sock)) return false;
+      seen.add(entry.sock);
+      return true;
+    })
+    .map(({ sock, ...rest }) => rest);
+}

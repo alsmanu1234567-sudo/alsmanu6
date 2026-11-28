@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  scanAllSocks,
   resolveSock,
   resolveSockDetailed,
   socketState,
@@ -93,4 +94,24 @@ test("لوحة التشخيص صارت تستخدم الحلّال ولا تنف
   assert.match(src, /case "rescan-sockets"/);
   assert.match(src, /typeof sock\.groupFetchAllParticipating !== "function"/, "لا استدعاء على null");
   assert.match(src, /سوكتات في الذاكرة/);
+});
+
+test("scanAllSocks: يكشف سوكتاً مسجّلاً تحت مفتاح مستخدم آخر (سبب «0 سوكتات»)", () => {
+  globalThis.__FW_SOCKS = new Map();
+  const s = fakeSock("249114375739");
+  const memorySessions = new Map([["999_+249114375739", s]]);
+  const all = scanAllSocks({ memorySessions });
+  assert.equal(all.length, 1);
+  assert.equal(all[0].state, "open");
+  assert.equal(all[0].owner, "999");
+  // الحلّال للمستخدم 111 لا يجد شيئاً (لأنه مفتاح آخر) لكن scanAllSocks يبيّن السبب
+  assert.equal(resolveSockDetailed("111", { memorySessions }).sock, null);
+});
+
+test("التشخيص يفحص جلسات القرص ويضيف إجراء التوصيل", () => {
+  const src = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+  assert.match(src, /جلسة محفوظة على القرص/);
+  assert.match(src, /case "auto-connect"/);
+  assert.match(src, /reconnectSession\(uid, null\)/);
+  assert.match(src, /scanAllSocks/);
 });

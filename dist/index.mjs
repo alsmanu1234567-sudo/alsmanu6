@@ -302608,6 +302608,28 @@ function createDevDiagService() {
     phone,
   });
   const sockOf = (uid) => sockResolve(uid).sock;
+  // [WA-SOCK v8.31.0] جلسات محفوظة على القرص (wa-sessions/<uid>[_رقم]) مع وجود creds.json
+  const diskSessions = (uid) => {
+    const id = String(uid);
+    const dir = String(globalThis.__FW_WA_SESSIONS_ROOT || WA_SESSIONS_ROOT || "");
+    const out = { root: dir, keys: [] };
+    if (!dir) return out;
+    try {
+      const fsMod = require("fs");
+      const pathMod = require("path");
+      out.keys = fsMod.readdirSync(dir)
+        .filter((name) => {
+          if (!(name === id || name.startsWith(`${id}_`) || name.startsWith(`${id}-`))) return false;
+          try { return fsMod.statSync(pathMod.join(dir, name)).isDirectory(); } catch { return false; }
+        })
+        .map((name) => {
+          let hasCreds = false;
+          try { hasCreds = fsMod.existsSync(pathMod.join(dir, name, "creds.json")); } catch { }
+          return { key: name, hasCreds };
+        });
+    } catch { }
+    return out;
+  };
   const sockState = (sock) => _waSockMod.socketState(sock);
   async function overview(uid) {
     devOnly(uid);
@@ -302687,14 +302709,38 @@ function createDevDiagService() {
           catch (e) { out.push({ name: "قراءة من واتساب", ok: false, detail: String(e?.message || e).slice(0, 120) }); }
         }
         out.push({ name: "سوكتات في الذاكرة", ok: _res.all.length > 0, detail: _res.all.length ? `${_res.all.length} سوكت · ${_res.all.filter((x) => x.state === "open").length} مفتوح` : "لا يوجد أي سوكت مسجّل" });
+        // [WA-SOCK v8.31.0] هل الجلسة موجودة على القرص؟ (توضيح: المشكلة اتصال لا بيانات)
+        const _disk = diskSessions(uid);
+        const _creds = _disk.keys.filter((k) => k.hasCreds);
+        out.push({ name: "جلسة محفوظة على القرص", ok: _creds.length > 0, detail: _creds.length ? `${_creds.length} جلسة: ${_creds.map((k) => k.key).slice(0, 3).join(" · ")}${_disk.keys.length > 3 ? " …" : ""}` : `لا توجد جلسة محفوظة (${_disk.keys.length} مجلد بلا creds) — اربط الرقم من البوت` });
+        // سوكتات العملية كلها: قد يكون السوكت تحت مفتاح مختلف
+        const _allSocks = _waSockMod.scanAllSocks({ numberSocks: _numberSocks, sessions, memorySessions: inMemoryDB.sessions });
+        out.push({ name: "سوكتات العملية", ok: _allSocks.length > 0, detail: _allSocks.length ? `${_allSocks.length} سوكت (${_allSocks.filter((x) => x.state === "open").length} مفتوح) · مفاتيح: ${_allSocks.slice(0, 3).map((x) => x.key).join(" · ")}` : "لا يوجد أي سوكت في العملية — اضغط «توصيل من الجلسة المحفوظة»" });
         let p = {}; try { p = (await import('../engine/msg-pipeline.mjs')).getPipelineStats(); } catch { }
         out.push({ name: "طابور الإشعارات", ok: (p.lanes?.notify?.pending || 0) < 200, detail: `${p.lanes?.notify?.pending || 0} منتظرة / ${p.lanes?.notify?.running || 0} تعمل` });
         return { ok: true, checks: out, message: out.every((c) => c.ok) ? "كل الفحوصات سليمة" : "توجد فحوصات فاشلة" };
       }
       // [WA-SOCK v8.30.0] إصلاح السجل: يبحث عن السوكت الحيّ ويعيد تسجيله في كل الخانات
       case "rescan-sockets": {
-        const res = sockResolve(uid);
-        if (!res.sock) return { ok: false, message: "لا يوجد أي سوكت حيّ في الذاكرة — اضغط «إعادة الاتصال»" };
+        let res = sockResolve(uid);
+        // [WA-SOCK v8.31.0] سيرفر برقم واحد: لو السوكت مسجّل بمفتاح آخر نتبنّاه بدل الفشل
+        if (!res.sock) {
+          const all = _waSockMod.scanAllSocks({ numberSocks: _numberSocks, sessions, memorySessions: inMemoryDB.sessions });
+          const open = all.find((x) => x.state === "open") || all[0];
+          if (open) {
+            const adopted = _waSockMod.resolveSockDetailed(open.owner, { numberSocks: _numberSocks, sessions, memorySessions: inMemoryDB.sessions });
+            if (adopted.sock) res = { ...adopted, source: `adopted:${open.source}` };
+          }
+        }
+        if (!res.sock) {
+          const _d = diskSessions(uid);
+          const _hasCreds = _d.keys.some((k) => k.hasCreds);
+          if (_hasCreds) {
+            await reconnectSession(uid, null);
+            return { ok: true, message: `لا سوكت في الذاكرة، لكن هناك ${_d.keys.length} جلسة محفوظة — بدأ الاتصال من الجلسة المحفوظة. انتظر 20 ثانية ثم أعد الفحص.` };
+          }
+          return { ok: false, message: "لا سوكت في الذاكرة ولا جلسة محفوظة على القرص — اربط الرقم من البوت (QR أو رقم)." };
+        }
         const me = String(res.sock.user?.id || "").split(":")[0];
         try { inMemoryDB.sessions.set(String(uid), res.sock); } catch { }
         if (me) {
@@ -302704,6 +302750,14 @@ function createDevDiagService() {
         }
         try { _waSockMod.registerGlobalSock(uid, me ? `+${me.replace(/\D/g, "")}` : null, res.sock); } catch { }
         return { ok: true, message: `تم العثور على السوكت (${res.source}) وإعادة ربطه${me ? " — الرقم " + me : ""}` };
+      }
+      // [WA-SOCK v8.31.0] توصيل مباشر من الجلسات المحفوظة على القرص
+      case "auto-connect": {
+        const _d = diskSessions(uid);
+        const _creds = _d.keys.filter((k) => k.hasCreds);
+        if (!_creds.length) return { ok: false, message: `لا توجد جلسة محفوظة لهذا الحساب (${_d.root || "مسار غير معروف"}). اربط الرقم من البوت: QR أو رقم الهاتف.` };
+        await reconnectSession(uid, null);
+        return { ok: true, message: `بدأ الاتصال من ${_creds.length} جلسة محفوظة: ${_creds.map((k) => k.key).join(" · ")} — انتظر ~20 ثانية ثم أعد الفحص.` };
       }
       case "clear-trace": { _diag.trace.length = 0; _diag.conn.length = 0; return { ok: true, message: "تم تفريغ سجل التشخيص" }; }
       default: throw Error("إجراء غير معروف");

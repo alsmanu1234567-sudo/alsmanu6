@@ -32,6 +32,7 @@
    <button class="secondary" data-rd="clear-dedup">🗂 تفريغ ذاكرة التكرار</button>
    <button class="secondary" data-rd="refresh-groups">👥 اختبار قراءة المجموعات</button>
    <button class="secondary" data-rd="self-check">🩺 فحص شامل</button>
+   <button class="primary" data-rd="auto-connect">🔌 توصيل من الجلسة المحفوظة</button>
    <button class="secondary" data-rd="rescan-sockets">🧷 فحص وإصلاح السوكتات</button>
    <button class="secondary" data-rd="clear-trace">♻️ تفريغ السجل</button>
   </div><div id="rd-checks" class="list"></div></section>
