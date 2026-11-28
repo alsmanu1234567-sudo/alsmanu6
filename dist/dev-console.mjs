@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import * as chatLogMod from "./lib/chat-log.mjs";
 import * as voRam from "./lib/vo-ram.mjs";
+import { tokenForUser, ownerUid } from "./webapp-auth.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, "..", "data");
@@ -179,7 +180,7 @@ function _extFor(kind, mimetype) {
 }
 
 // ─── الصفحة ────────────────────────────────────────────────────────
-function pageHtml(key) {
+function pageHtml(key, opts = {}) {
   return `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>لوحة المطوّر</title>
 <style>
@@ -206,7 +207,19 @@ img,vid{max-width:100%;border-radius:10px;margin-top:6px}
 <div class="mut" id="state">جارٍ التحميل…</div>
 <div class="tabs">
 <button data-t="chats" class="on">المحادثات</button><button data-t="view">الرسائل</button>
-<button data-t="send">إرسال</button><button data-t="auto">أتمتة</button><button data-t="diag">تشخيص</button>
+<button data-t="send">إرسال</button><button data-t="groups">إعدادات المجموعة</button><button data-t="auto">أتمتة</button><button data-t="diag">تشخيص</button><button data-t="srv">السيرفر</button>
+</div>
+<div id="tab-groups" class="card" style="display:none">
+  <div class="row"><b>إعدادات المجموعة (كيك وغيرها)</b>
+    <a class="btn" style="text-decoration:none;background:#243052;color:#eaf0fb;border-radius:10px;padding:9px 13px;font-weight:700;font-size:13px" href="${opts.groupsUrl || '#'}" target="_blank" rel="noopener">فتح بإطار كامل</a>
+  </div>
+  <div class="mut" style="margin:6px 0">هنا نفس لوحة «عالم المجموعات»: الحماية، الترحيب، الفلاتر، الردود، النشر التلقائي…</div>
+  <iframe id="gframe" src="${opts.groupsUrl || 'about:blank'}" style="width:100%;height:70vh;border:0;border-radius:12px;background:#0f1526"></iframe>
+</div>
+<div id="tab-srv" class="card" style="display:none">
+  <b>لوحة السيرفر الدائمة</b>
+  <div class="mut" style="margin:6px 0">إيقاف/تشغيل/إعادة تشغيل + وكيل كامل للوحة الأصلية + مسارات الملفات.</div>
+  <a class="btn" style="text-decoration:none;background:#34d399;color:#05281c;border-radius:10px;padding:11px 15px;font-weight:700" href="${opts.srvUrl || '#'}" target="_blank" rel="noopener">🖥️ فتح لوحة السيرفر</a>
 </div>
 <div id="tab-chats" class="card"><div class="row"><input id="q" placeholder="فلترة بالاسم/المعرّف" class="grow"><button class="sec" onclick="loadChats()">تحديث</button></div><div id="chats" style="margin-top:10px"></div></div>
 <div id="tab-view" class="card" style="display:none">
@@ -243,7 +256,7 @@ let CHATS=[];
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
-  ['chats','view','send','auto','diag'].forEach(t=>$('tab-'+t).style.display=(t===b.dataset.t?'':'none'));
+  ['chats','view','send','groups','auto','diag','srv'].forEach(t=>$('tab-'+t).style.display=(t===b.dataset.t?'':'none'));
   if(b.dataset.t==='auto')loadRules();if(b.dataset.t==='chats')loadChats();
 });
 async function boot(){
@@ -371,7 +384,14 @@ export function registerDevConsole(app, deps = {}) {
     }
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
-    res.end(pageHtml(key));
+    // [v8.48.0] إعدادات المجموعة داخل اللوحة + رابط لوحة السيرفر الدائم
+    let _webToken = "";
+    try { _webToken = tokenForUser(ownerUid()) || ""; } catch { }
+    const _base = globalThis.__STABLE_BASE__ || globalThis.__FW_PUBLIC_URL || "";
+    res.end(pageHtml(key, {
+      groupsUrl: _base && _webToken ? `${_base}/group-world?token=${_webToken}` : "",
+      srvUrl: `${_base || ""}/srv?k=${key}`,
+    }));
   });
 
   app.get("/api/dev/state", wrap(async () => {
@@ -558,8 +578,14 @@ export function registerDevConsole(app, deps = {}) {
 export function panelCommandText({ base, username, key } = {}) {
   const k = key || devKey();
   const entry = username ? `https://t.me/${String(username).replace(/^@/, "")}?start=panel` : null;
-  const lines = ["🖥️ *رابط لوحة التحكم*"];
-  if (base) lines.push("", `🌐 اللوحة الكاملة: ${base}/dev?k=${k}`);
+  const lines = ["🖥️ *روابطك الدائمة*"];
+  if (base) {
+    lines.push("", `🛠️ *لوحة المطوّر:* ${base}/dev?k=${k}`);
+    lines.push(`🖥️ *لوحة السيرفر (إيقاف/تشغيل):* ${base}/srv?k=${k}`);
+    let _wt = "";
+    try { _wt = tokenForUser(ownerUid()) || ""; } catch { }
+    if (_wt) lines.push(`📱 *الويب آب (المجموعات والردود):* ${base}/webapp?token=${_wt}`);
+  }
   else lines.push("", "⚠️ لا يوجد رابط عام الآن — البوت يحاول إنشاء واحد، وسيصلك تلقائياً.");
   if (entry) lines.push("", `📌 *مدخل ثابت لا يتغيّر أبداً:* ${entry}`, "افتحه في أي وقت وسيرسل لك الرابط الحالي.");
   lines.push("", "ℹ️ الرابط الثابت (منفذ الاستضافة) لا يتغيّر إلا عند تغيّر IP السيرفر أو توقّف البوت.");

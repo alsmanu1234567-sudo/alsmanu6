@@ -332642,6 +332642,14 @@ async function main() {
             },
           });
           globalThis.__DEV_KEY__ = _out?.key || null;
+          // ═══ [SERVER-HUB v8.48.0] لوحة السيرفر الدائمة (إيقاف/تشغيل/وكيل) ═══
+          import("./server-hub.mjs").then((SH) => {
+            try {
+              SH.registerServerHub(app_default, { key: _out?.key || DC.devKey(), version: _ver });
+            } catch (e2) {
+              try { logger.warn({ err: e2?.message }, "[SERVER-HUB] فشل التسجيل"); } catch { }
+            }
+          }).catch(() => {});
           try { logger.info({ path: _out?.path?.replace(/k=.*/, "k=••••") }, "[DEV-CONSOLE] ✅ جاهزة على /dev"); } catch { }
         } catch (e) {
           try { logger.warn({ err: e?.message }, "[DEV-CONSOLE] فشل التسجيل"); } catch { }
