@@ -62,6 +62,7 @@ import * as _viewOnceMod from './lib/view-once.mjs';      // [VIEW-ONCE v8.37.0]
 import * as _rcStoreMod from './lib/react-copy-store.mjs'; // [VIEW-ONCE v8.37.0] تخزين الوسائط على القرص
 import * as _waMediaMod from './lib/wa-media.mjs';         // [VIEW-ONCE v8.37.0] تنزيل ذاتي بلا مكتبة
 import * as _chatLogMod from './lib/chat-log.mjs';          // [GROUP-CHAT v8.39.0] سجل رسائل للمحادثة في الويب آب
+import * as _voRamMod from './lib/vo-ram.mjs';              // [NO-DISK v8.41.0] كاش وسائط في الرام فقط
 import * as _arMod from './auto-reply.mjs'; // PATCH_AUTO_REPLY_SPLIT_APPLIED
 import * as _wmMod from './worker-manager.mjs'; // PATCH_WORKER_MANAGER_SPLIT_APPLIED
 import * as _kaMod from './keepalive.mjs'; // PATCH_KEEPALIVE_SPLIT_APPLIED
@@ -208,7 +209,8 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
       fileName: node?.fileName || `copy-${kind}-${stamp}.${(mime.split("/")[1] || "bin").split(";")[0]}`,
       caption: `📎 المحتوى كمِلَف (بدون غلاف)${info?.viewOnce ? " — من رسالة عرض مرة واحدة" : ""}`,
     }).catch((err) => logger.warn({ err: String(err?.message || err) }, "[/copy g] تعذّر إرسال الملف"));
-    try { _rcStoreMod.saveMessage(userId, jid, msg.key, quoted); _rcStoreMod.saveMedia(userId, jid, msg.key?.id || String(stamp), buffer); } catch { }
+    // [NO-DISK v8.41.0] لا حفظ: البايتات تبقى في الرام فقط ثم تُحرَّر
+    try { _voRamMod.setMedia(jid, _qid || String(stamp), buffer, { kind: info?.kind || cls.type, mimetype: node?.mimetype }); } catch { }
   } else {
     await sock.sendMessage(jid, { text: "⚠️ لم أستطع تنزيل المحتوى — الملف المرفق (JSON) فيه تفاصيل كل المحاولات." }).catch(() => { });
   }
@@ -307,7 +309,7 @@ async function _voSendToTelegram(bot, chatId, { buffer, kind, caption, mimetype,
 /** تنزيل بايتات «عرض مرة واحدة» بسلّم المصادر + تكرار. */
 async function _voDownloadBytes({ sock, msg, jid, id, userId, info }) {
   const kind = info?.kind || "image";
-  const stored = () => _rcStoreMod.loadMedia(userId, jid, id);
+  const stored = () => _voRamMod.getMedia(jid, id)?.buffer || _rcStoreMod.loadMedia(userId, jid, id);
   const library = async () => {
     const original = { key: msg?.key, message: msg?.message, sourceJid: jid };
     return await _reactCopyMod.downloadWithFallbacks(sock, null, original, info?.node);
@@ -345,7 +347,8 @@ async function _captureViewOnce({ sock, msg, userId, jid, isGroup, senderName, b
   if (!info || !id) return { ok: false, reason: "ليست رسالة وسائط" };
   const groupName = isGroup ? (_voGroupSubject(userId, jid) || null) : null;
   // ① حفظ فوري للرسالة (بلا بايتات) — بوابة الاستخراج المتأخر
-  try { _rcStoreMod.saveMessage(userId, jid, msg.key, msg.message, { replace: Boolean(msg.__voMerged) }); } catch { }
+  // [NO-DISK v8.41.0] لا حفظ على القرص: الرسالة في الرام فقط (٣٠ دقيقة) لخدمة الويب آب و/copy
+  try { _voRamMod.setMessage(jid, id, msg.message, msg.key); } catch { }
   // ①.٥ [VO-RESEND v8.40.0] نسخة فقيرة (بلا mediaKey/url) ⇒ نطلب من واتساب إعادة إرسال الوسائط
   if (!info.hasMediaKey || !info.hasUrl) {
     _voPending.set(`${userId}|${id}`, { jid, ts: Date.now() });
@@ -364,7 +367,7 @@ async function _captureViewOnce({ sock, msg, userId, jid, isGroup, senderName, b
   try { dl = await _voDownloadBytes({ sock, msg, jid, id, userId, info }); }
   catch (err) { dl.errors.push(String(err?.message || err).slice(0, 160)); }
   if (dl.buffer?.length) {
-    try { _rcStoreMod.saveMedia(userId, jid, id, dl.buffer); } catch { }
+    try { _voRamMod.setMedia(jid, id, dl.buffer, { kind: info.kind, mimetype: info.node?.mimetype }); } catch { }
     try { logger.info({ jid, id, kind: info.kind, via: dl.via, bytes: dl.buffer.length, attempts: dl.attempts }, "[VIEW-ONCE] ✅ تم استخراج المحتوى بدون غلاف"); } catch { }
   } else {
     try { logger.warn({ jid, id, kind: info.kind, errors: dl.errors.slice(-4) }, "[VIEW-ONCE] ✖ تعذّر التنزيل — الرسالة محفوظة وسيُعاد المحاولة"); } catch { }
@@ -417,10 +420,11 @@ async function _peekViewOnce(userId, query, bot, chatId) {
     }
     scope = [hit];
   }
+  // [NO-DISK v8.41.0] المصدر: سجل المحادثة في الرام (+ رام الكاش) — لا ملفات
   const candidates = [];
   for (const g of scope) {
     let items = [];
-    try { items = _rcStoreMod.listMessages(userId, g.jid, { limit: 80 }); } catch { }
+    try { items = _chatLogMod.listMessages(userId, g.jid, 80).map((m) => ({ id: m.id, key: m.raw?.key || { id: m.id, remoteJid: g.jid }, message: m.raw?.message || {}, ts: m.ts })); } catch { }
     const picked = _viewOnceMod.pickNewestViewOnce(items);
     if (picked) candidates.push({ jid: g.jid, groupName: g.subject, ...picked });
   }
@@ -438,7 +442,7 @@ async function _peekViewOnce(userId, query, bot, chatId) {
   if (!dl.buffer?.length) {
     return { ok: false, text: `⚠️ وجدت الرسالة في «${target.groupName || target.jid}» (${_viewOnceMod.describeViewOnce(target.info)}) لكن تعذّر تنزيل بايتاتها:\n${(dl.errors || []).slice(-3).map((e) => `• ${e}`).join("\n") || "• سبب غير معروف"}\n\nℹ️ البايتات تُحفظ عند وصول الرسالة فقط — إن كانت وصلت قبل التحديث فلن تُستعاد من واتساب.` };
   }
-  try { _rcStoreMod.saveMedia(userId, target.jid, target.item.id, dl.buffer); } catch { }
+  try { _voRamMod.setMedia(target.jid, target.item.id, dl.buffer, { kind: target.info.kind, mimetype: target.info.node?.mimetype }); } catch { }
   const caption = _viewOnceMod.buildViewOnceCaption({ kind: target.info.kind, groupName: target.groupName || target.jid, sender: null, when: _voNowLabel(), source: "peek" });
   const sent = await _voSendToTelegram(bot, tgChatId, { buffer: dl.buffer, kind: target.info.kind, caption, mimetype: target.info.node?.mimetype });
   if (!sent.ok) {
@@ -293676,6 +293680,14 @@ function shouldSendReconnectNotice(sessKey, number) {
 
 function setBotRef(bot2) {
   botRef = bot2;
+  // [WEB-BRIDGE v8.41.0] جسر للإرسال إلى تيليجرام من الويب آب (زر «تنزيل ⇒ تيليجرام»)
+  try {
+    globalThis.__ALSMANU_TG__ = {
+      sendMedia: async (chatId, buffer, kind, caption, mimetype, filename) =>
+        _voSendToTelegram(botRef, Number(chatId), { buffer, kind, caption, mimetype, filename }),
+      sendText: async (chatId, text) => { try { await botRef.sendMessage(Number(chatId), text); return { ok: true }; } catch (err) { return { ok: false, errors: [String(err?.message || err)] }; } },
+    };
+  } catch { }
   // ── [DUP-INSTANCE] كشف تشغيل نسختين بنفس توكن تيليجرام ──────────────────
   // عند وجود سيرفرين (قديم + جديد) بنفس التوكن، تيليجرام يعطي 409 Conflict،
   // والنسخة القديمة هي التي ترد على المستخدم — فيبدو كأن الجلسة/الرقم قديم.
@@ -327508,6 +327520,8 @@ async function startBot() {
       logger.error({ err }, "Watchdog restart failed");
     }
   });
+  // [NO-DISK v8.41.0] لا رسائل ولا وسائط محفوظة على السيرفر: نمسح بقايا النسخ السابقة مرة واحدة عند الإقلاع
+  try { const _wiped = _rcStoreMod.wipeMedia(); if (_wiped) logger.info({ removed: _wiped }, "[NO-DISK] حُذفت ملفات وسائط قديمة من القرص"); } catch { }
   startKeepalive();
   // ── Phase 3: تهيئة الراوتر والمنتقل [PATCH_ROUTER_INIT_APPLIED] ─────────────────────────
   _routerMod.setDeps({ logger });

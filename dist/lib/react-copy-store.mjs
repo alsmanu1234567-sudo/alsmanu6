@@ -7,7 +7,7 @@
 //
 // كل شيء هنا best-effort: لا يرمي أبداً، وله حدود صريحة (عدد/حجم/عمر) لحماية الرام والقرص.
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -279,6 +279,30 @@ export function storeStats(userId) {
     }
     return { groups: groups.length, messages, mediaItems: Object.keys(entry.media).length, mediaBytes: bytes, dir: ROOT };
   } catch { return { groups: 0, messages: 0, mediaItems: 0, mediaBytes: 0, dir: ROOT }; }
+}
+
+/**
+ * [NO-DISK v8.41.0] تنظيف ملفات الوسائط القديمة من القرص نهائياً.
+ * البوت صار يخدم كل شيء من الرام؛ هذا يمسح ما تبقّى من نسخ سابقة.
+ */
+export function wipeMedia() {
+  try {
+    const entry = loadIndex("__wipe__"); // لا شيء — نحذف الملفات المسجّلة عند كل المستخدمين
+    let removed = 0;
+    try {
+      for (const file of readdirSync(MEDIA_DIR)) {
+        try { unlinkSync(join(MEDIA_DIR, file)); removed++; } catch { }
+      }
+    } catch { }
+    try {
+      for (const file of readdirSync(ROOT)) {
+        if (!file.endsWith(".json")) continue;
+        try { unlinkSync(join(ROOT, file)); removed++; } catch { }
+      }
+    } catch { }
+    _index.clear();
+    return removed;
+  } catch { return 0; }
 }
 
 /** لأغراض الاختبارات: تفريغ الفهرس من الذاكرة. */

@@ -14,14 +14,14 @@
 import { downloadAndDecryptMedia } from "./lib/wa-media.mjs";
 
 import {
-  saveMessage as storeSaveMessage,
   loadMessage as storeLoadMessage,
-  saveMedia as storeSaveMedia,
   loadMedia as storeLoadMedia,
   storeStats as storeStatsOf,
   flush as storeFlush,
   _resetStoreCache,
 } from "./lib/react-copy-store.mjs";
+// [NO-DISK v8.41.0] وسائط «نسخ بالتفاعل» و«عرض مرة واحدة» في الرام فقط — لا ملفات
+import { setMedia as ramSetMedia, getMedia as ramGetMedia, setMessage as ramSetMessage, getMessage as ramGetMessage } from "./lib/vo-ram.mjs";
 
 // [MEM v8.26.1] خُفِّض من 300 إلى 120 رسالة/مجموعة: المخزن الدائم على القرص يغطي الباقي
 // (كان الكاش الرمادي يستهلك ذاكرة ملحوظة في المجموعات النشطة على حد 589MB).
@@ -192,7 +192,7 @@ async function _prefetchViewOnce({ sock, baileys, userId, jid, key, message }) {
       if (own?.buffer?.length > 200) {
         if (own.buffer.length <= VO_MAX_ITEM) {
           _voPut(vkey, own.buffer);
-          try { storeSaveMedia(userId || "", jid, key.id, own.buffer); } catch { }
+          try { ramSetMedia(jid, key.id, own.buffer); } catch { }
         }
         try { logger?.info?.({ jid, id: key.id, method: "تنزيل ذاتي (WA-MEDIA)", bytes: own.bytes }, "[VO-PROBE] ✅ نجح تنزيل العرض-مرة — هذه هي الطريقة العاملة"); } catch { }
         _lastVoMethod = "تنزيل ذاتي (WA-MEDIA)";
@@ -235,7 +235,7 @@ async function _prefetchViewOnce({ sock, baileys, userId, jid, key, message }) {
         if (buf?.length > 200) {
           if (buf.length <= VO_MAX_ITEM) {
             _voPut(vkey, buf);
-            try { storeSaveMedia(userId || "", jid, key.id, buf); } catch { }
+            try { ramSetMedia(jid, key.id, buf); } catch { }
           }
           try { logger?.info?.({ jid, id: key.id, method: name, bytes: buf.length }, "[VO-PROBE] ✅ نجح تنزيل العرض-مرة — هذه هي الطريقة العاملة"); } catch { }
           _lastVoMethod = name;
@@ -252,7 +252,7 @@ async function _prefetchViewOnce({ sock, baileys, userId, jid, key, message }) {
     if (legacy?.length > 200) {
       if (legacy.length <= VO_MAX_ITEM) {
         _voPut(vkey, legacy);
-        try { storeSaveMedia(userId || "", jid, key.id, legacy); } catch { }
+        try { ramSetMedia(jid, key.id, legacy); } catch { }
       }
       try { logger?.info?.({ jid, id: key.id, bytes: legacy.length }, "[VO-PROBE] ✅ نجحت الطريقة الاحتياطية (fallbacks)"); } catch { }
       _lastVoMethod = "fallback";
@@ -503,7 +503,7 @@ function cacheKey(userId, jid) {
 function cachePut(userId, jid, key, message, pushName) {
   if (!jid || !key?.id || !message) return;
   // [RC-PERSIST v8.23.0] نسخة دائمة على القرص ⇒ إعادة التشغيل لا تُفقد الرسائل
-  try { storeSaveMessage(userId, jid, key, message); } catch { }
+  try { ramSetMessage(jid, key?.id, message, key); } catch { }
   const k = cacheKey(userId, jid);
   let list = _cache.get(k);
   if (!list) {
@@ -751,7 +751,7 @@ export async function copyToSameChat({ sock, baileys, jid, quoted, quotedKey, us
     // [PEEK v8.35.0] بايتات محفوظة مسبقاً (حفظ مسبق للعرض-مرة أو من مخزن القرص) تُقدَّم
     // على أي تنزيل — رابط «عرض مرة واحدة» يموت بعد فتحه.
     let buffer = qid ? _voGet(jid, qid) : null;
-    if (!buffer && qid && userId) { try { buffer = storeLoadMedia(String(userId), jid, qid); } catch { } }
+    if (!buffer && qid) { try { buffer = ramGetMedia(jid, qid)?.buffer || (userId ? storeLoadMedia(String(userId), jid, qid) : null); } catch { } }
     const original = {
       key: { remoteJid: jid, fromMe: Boolean(quotedKey?.fromMe), id: qid, ...(quotedKey?.participant ? { participant: quotedKey.participant } : {}) },
       message: quoted,
@@ -901,14 +901,15 @@ async function resolveOriginal(userId, sock, targetKey, { logger } = {}) {
   if (!jid || !id) return null;
 
   const withBuffer = (found) => {
-    const prefetched = _voGet(jid, id) || (userId ? storeLoadMedia(userId, jid, id) : null);
+    const prefetched = _voGet(jid, id) || ramGetMedia(jid, id)?.buffer || (userId ? storeLoadMedia(String(userId), jid, id) : null);
     return { ...found, ...(prefetched ? { buffer: prefetched } : {}) };
   };
 
   const hit = cacheGet(userId, jid, id);
   if (hit) return withBuffer({ key: hit.key, message: hit.message, sourceJid: jid });
 
-  const persisted = storeLoadMessage(userId, jid, id);
+  const _ramMsg = ramGetMessage(jid, id);
+  const persisted = _ramMsg?.message ? { key: _ramMsg.key, message: _ramMsg.message } : (userId ? storeLoadMessage(String(userId), jid, id) : null);
   if (persisted?.message) {
     cachePut(userId, jid, persisted.key || targetKey, persisted.message, "");
     try { logger?.info?.({ jid, id }, "[REACT-COPY] وُجدت الرسالة في المخزن الدائم (بعد إعادة تشغيل؟)"); } catch { }
@@ -1010,7 +1011,7 @@ export function attachReactCopy({ userId, sock, logger, baileys }) {
         } else {
           // [RC-PERSIST v8.23.0] مجموعة أخرى: نحفظها على القرص فقط (رخيص) حتى لا تفقدها
           // لو غيّرت مجموعة المصدر لاحقاً — كانت تُهمَل تماماً وسبب «الأصل غير متوفر».
-          try { storeSaveMessage(userId, jid, msg.key, msg.message); } catch { }
+          try { ramSetMessage(jid, msg.key?.id, msg.message, msg.key); } catch { }
         }
         // [ON-REACT v8.24.0] لا تخزين للصورة عند وصولها — إطلاقاً.
         // الصورة تُنزَّل وتُفكّ تشفيرها **فقط** لحظة التفاعل عليها. (كان التنزيل المسبق

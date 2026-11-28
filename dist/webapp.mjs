@@ -55,6 +55,7 @@ import { registerGroupWorldWebApp } from "./group-world-web.mjs";
 import * as chatLog from "./lib/chat-log.mjs";
 import * as reactCopyMod from "./react-copy.mjs";
 import * as reactCopyStore from "./lib/react-copy-store.mjs";
+import * as voRam from "./lib/vo-ram.mjs";
 
 // ─── مصادقة ────────────────────────────────────────────────────────
 function authUid(req) {
@@ -801,25 +802,49 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     } catch { }
     return { sent: true, jid, quoted: Boolean(quotedEntry) };
   }));
-  app.get("/api/wa/chat/media", guard(async (uid, req, res) => {
-    const jid = String(req.query?.jid || "").trim();
-    const id = String(req.query?.id || "").trim();
+  // [NO-DISK v8.41.0] بثّ الوسائط عند الطلب: من الرام → أو تنزيل لحظي من واتساب (بلا حفظ)
+  async function fetchChatMedia(uid, jid, id) {
     const entry = chatLog.getMessage(uid, jid, id);
-    if (!entry) { res.status(404).json({ error: "الرسالة غير مسجّلة" }); return; }
-    let buf = null;
-    try { buf = reactCopyStore.loadMedia(uid, jid, id); } catch { }
-    if (!buf && entry.raw) {
+    if (!entry) return { error: "الرسالة غير مسجّلة (سجل المحادثة في الرام فقط)" };
+    let buffer = voRam.getMedia(jid, id)?.buffer || null;
+    if (!buffer) { try { buffer = reactCopyStore.loadMedia(uid, jid, id); } catch { } }
+    if (!buffer && entry.raw) {
       try {
         const cls = chatLog.classifyMessage(entry.raw.message);
         const sock = chatLog.sockFor(uid, jid);
-        buf = await reactCopyMod.downloadWithFallbacks(sock, null, { key: entry.raw.key, message: entry.raw.message, sourceJid: jid }, cls?.node);
+        buffer = await reactCopyMod.downloadWithFallbacks(sock, null, { key: entry.raw.key, message: entry.raw.message, sourceJid: jid }, cls?.node);
+        if (buffer?.length) voRam.setMedia(jid, id, buffer, { kind: entry.type, mimetype: entry.mimetype });
       } catch { }
     }
-    if (!buf?.length) { res.status(404).json({ error: "الوسائط غير متاحة — لم تُخزَّن أو انتهى رابط واتساب" }); return; }
-    res.setHeader("Content-Type", entry.mimetype || "application/octet-stream");
-    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(entry.fileName || entry.id)}"`);
+    if (!buffer?.length) return { error: "تعذّر جلب الوسائط من واتساب — قد تكون انتهت أو لم تُنزَّل بعد", entry };
+    return { buffer, entry };
+  }
+
+  app.get("/api/wa/chat/media", guard(async (uid, req, res) => {
+    const jid = String(req.query?.jid || "").trim();
+    const id = String(req.query?.id || "").trim();
+    const out = await fetchChatMedia(uid, jid, id);
+    if (out.error) { res.status(404).json({ error: out.error }); return; }
+    const mime = out.entry?.mimetype || (out.entry?.type === "image" ? "image/jpeg" : out.entry?.type === "video" ? "video/mp4" : out.entry?.type === "audio" || out.entry?.type === "ptt" ? "audio/ogg" : "application/octet-stream");
+    res.setHeader("Content-Type", mime);
+    res.setHeader("Content-Disposition", `${req.query?.dl === "1" ? "attachment" : "inline"}; filename="${encodeURIComponent(out.entry?.fileName || out.entry?.id || "media")}"`);
     res.setHeader("Cache-Control", "no-store");
-    res.end(buf);
+    res.end(out.buffer);
+  }));
+
+  // زر «تنزيل» في الويب آب ⇒ يُرسل الوسيط إلى محادثة تيليجرام الخاصة بالمالك
+  app.post("/api/wa/chat/to-telegram", parseJson, guard(async (uid, req) => {
+    const jid = String(req.body?.jid || "").trim();
+    const id = String(req.body?.id || "").trim();
+    const out = await fetchChatMedia(uid, jid, id);
+    if (out.error) throw new Error(out.error);
+    const bridge = globalThis.__ALSMANU_TG__;
+    if (!bridge?.sendMedia) throw new Error("جسر تيليجرام غير جاهز — أعد تشغيل البوت");
+    const kind = out.entry?.viewOnce && (out.entry?.type === "image" || out.entry?.type === "video") ? out.entry.type : (out.entry?.type || "document");
+    const caption = `📥 من الويب آب — «${out.entry?.name || ""}»${out.entry?.viewOnce ? " · 👁️ عرض مرة واحدة (بدون غلاف)" : ""}\n${new Date().toLocaleString("ar", { timeZone: "Africa/Khartoum" })}`;
+    const res = await bridge.sendMedia(uid, out.buffer, kind === "ptt" ? "audio" : kind, caption, out.entry?.mimetype || null, out.entry?.fileName || null);
+    if (!res?.ok) throw new Error((res?.errors || ["فشل الإرسال"]).slice(0, 2).join(" | "));
+    return { sent: true, via: res.method, bytes: out.buffer.length };
   }));
 
   registerGroupWorldWebApp(app, parseJson, guard);

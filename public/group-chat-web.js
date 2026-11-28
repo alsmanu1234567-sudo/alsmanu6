@@ -34,6 +34,8 @@
   .gcw-send:disabled{opacity:.5}
   .gcw-empty{color:#94a3c0;text-align:center;padding:30px 10px;font-size:13px;line-height:1.7}
   .gcw-note{font-size:11px;color:#94a3c0;text-align:center;margin-top:6px}
+  .gcw-dl{background:#1c2436;border:1px solid #34d39955;color:#34d399;border-radius:8px;padding:2px 7px;font-size:10.5px;cursor:pointer;font-family:inherit}
+  .gcw-dl:disabled{opacity:.6}
   `;
 
   function ensureStyle() {
@@ -115,15 +117,39 @@
     el('gcw-in').focus();
   }
 
+  const mediaUrl = (m, dl) => `/api/wa/chat/media?jid=${encodeURIComponent(m.jid || state.jid)}&id=${encodeURIComponent(m.id)}${dl ? '&dl=1' : ''}`;
+  const isAudio = (m) => m.type === 'audio' || m.type === 'ptt' || (m.mimetype || '').startsWith('audio/');
+  const isImage = (m) => m.type === 'image' || (m.type === 'sticker' && (m.mimetype || '').includes('image')) || (m.type === 'sticker' && !(m.mimetype || '').startsWith('audio'));
+
+  function mediaBlock(m) {
+    if (!m.hasMedia && !m.thumb) return '';
+    const src = mediaUrl(m);
+    if (isAudio(m)) {
+      return `<audio controls preload="none" data-media="1" data-id="${esc(m.id)}" src="${src}" style="width:230px;margin-top:6px"></audio>`;
+    }
+    if (isImage(m)) {
+      const thumb = m.thumb ? ` poster="data:image/jpeg;base64,${m.thumb}"` : '';
+      return `<img class="thumb" data-media="1" data-kind="img" data-id="${esc(m.id)}" loading="lazy" src="${src}"${thumb} alt="">`;
+    }
+    if (m.type === 'video' || m.type === 'ptv') {
+      return `<video controls preload="none" data-media="1" data-kind="video" data-id="${esc(m.id)}" src="${src}" style="max-width:230px;border-radius:10px;margin-top:6px"></video>`;
+    }
+    return '';
+  }
+
   function bubble(m) {
     const mine = m.fromMe ? ' me' : '';
-    const kind = m.type && m.type !== 'text' ? `<div class="kind${m.viewOnce ? ' vo' : ''}">${m.viewOnce ? '👁️ عرض مرة واحدة · ' : ''}${KIND_ICON[m.type] || m.type}${m.fileName ? ' · ' + esc(m.fileName) : ''}${m.seconds ? ' · ' + m.seconds + 'ث' : ''}</div>` : (m.viewOnce ? '<div class="kind vo">👁️ عرض مرة واحدة</div>' : '');
-    const thumb = m.thumb ? `<img class="thumb" loading="lazy" src="data:image/jpeg;base64,${m.thumb}" alt="">` : '';
+    const kindLabel = m.type && m.type !== 'text' ? `${KIND_ICON[m.type] || m.type}${m.fileName ? ' · ' + esc(m.fileName) : ''}${m.seconds ? ' · ' + m.seconds + 'ث' : ''}` : '';
+    const kind = kindLabel || m.viewOnce ? `<div class="kind${m.viewOnce ? ' vo' : ''}">${m.viewOnce ? '👁️ عرض مرة واحدة · ' : ''}${kindLabel || 'وسائط'}</div>` : '';
     const rep = m.replyTo ? `<div class="rep">↩ ${esc(m.replyPreview || m.replyTo)}</div>` : '';
     const text = m.text ? `<div>${esc(m.text).replace(/\n/g, '<br>')}</div>` : '';
     const who = !m.fromMe && m.name ? `<div class="who">${esc(m.name)}</div>` : '';
-    const tm = `<div class="tm">${esc(m.time || '')}</div>`;
-    return `<div class="gcw-msg${mine}" data-id="${esc(m.id)}" data-preview="${esc((m.text || m.type || '').slice(0, 80))}">${who}${rep}${kind}${text}${thumb}${tm}</div>`;
+    const media = mediaBlock(m);
+    const dl = (m.hasMedia || m.viewOnce)
+      ? `<button class="gcw-dl" data-dl="${esc(m.id)}" title="تنزيل عبر تيليجرام">⬇️ تيليجرام</button>`
+      : '';
+    const tm = `<div class="tm">${esc(m.time || '')}${dl ? ' ' + dl : ''}</div>`;
+    return `<div class="gcw-msg${mine}" data-id="${esc(m.id)}" data-preview="${esc((m.text || m.type || '').slice(0, 80))}">${who}${rep}${kind}${text}${media}${tm}</div>`;
   }
 
   function render(messages) {
@@ -135,13 +161,54 @@
     const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 120;
     body.innerHTML = messages.map(bubble).join('');
     body.querySelectorAll('.gcw-msg').forEach((n) => {
-      n.onclick = () => {
+      n.onclick = (ev) => {
+        // الضغط على وسيط ميديا أو زر تنزيل لا يعني «ردّ»
+        if (ev.target.closest('[data-media]') || ev.target.closest('[data-dl]') || ev.target.tagName === 'AUDIO') return;
         const m = messages.find((x) => x.id === n.dataset.id) || null;
         setReply(m ? { id: m.id, preview: n.dataset.preview, type: m.type } : null);
       };
     });
+    // عرض الصور/الفيديو بالحجم الكامل عند الضغط
+    body.querySelectorAll('[data-media][data-kind]').forEach((el) => {
+      el.onclick = (ev) => { ev.stopPropagation(); openLightbox(el.getAttribute('src'), el.dataset.kind); };
+    });
+    // زر التنزيل ⇒ يرسل الوسيط لتيليجرام
+    body.querySelectorAll('[data-dl]').forEach((btn) => {
+      btn.onclick = async (ev) => {
+        ev.stopPropagation();
+        btn.disabled = true;
+        const old = btn.textContent;
+        btn.textContent = '…جارٍ الإرسال';
+        try {
+          await api('/api/wa/chat/to-telegram', { jid: state.jid, id: btn.dataset.dl });
+          btn.textContent = '✅ أُرسل';
+          setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 2500);
+        } catch (e) {
+          btn.textContent = '❌ فشل';
+          alert('تعذّر الإرسال إلى تيليجرام: ' + e.message);
+          setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 2500);
+        }
+      };
+    });
     if (atBottom || state.lastCount !== messages.length) body.scrollTop = body.scrollHeight;
     state.lastCount = messages.length;
+  }
+
+  function openLightbox(src, kind) {
+    let lb = document.getElementById('gcw-lb');
+    if (!lb) {
+      lb = document.createElement('div');
+      lb.id = 'gcw-lb';
+      lb.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.94);z-index:9999;display:flex;align-items:center;justify-content:center;padding:12px';
+      lb.onclick = () => lb.remove();
+      document.body.appendChild(lb);
+    }
+    lb.innerHTML = '';
+    const el = document.createElement(kind === 'video' ? 'video' : 'img');
+    el.src = src;
+    if (kind === 'video') el.controls = true;
+    el.style.cssText = 'max-width:100%;max-height:92vh;border-radius:12px';
+    lb.appendChild(el);
   }
 
   async function load(force) {
