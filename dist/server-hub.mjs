@@ -148,6 +148,11 @@ async function _stopPanel() {
 }
 
 async function _startPanel() {
+  // [v8.48.8] لا نولّد عملية جديدة إن كانت هناك عملية لوحة قائمة أصلاً
+  // (حتى لو لم تستجب بعد) — كان التوليد المتكرر يستهلك الرام ويخنق السيرفر.
+  const _existing = _panelPids();
+  if (_existing.length) return { started: null, reused: _existing[0], port: _panelCache.port || null, alive: false };
+
   const dir = PANEL_DIR();
   const entry = ["server.mjs", "index.mjs", "app.mjs"].map((f) => join(dir, f)).find((p) => existsSync(p));
   if (!entry) throw new Error(`لم أجد ملف تشغيل اللوحة في ${dir}`);
@@ -161,7 +166,13 @@ async function _startPanel() {
   await new Promise((r) => setTimeout(r, 3000));
   _panelCache = { port: null, at: 0 };
   const port = await panelPort();
-  return { started: child.pid || null, port, alive: await _panelAlive(port) };
+  const alive = await _panelAlive(port);
+  // إن فشلت الإقلاع نقتل العملية بدل ترك عمليات متراكمة
+  if (!alive) {
+    try { if (child.pid) process.kill(child.pid, "SIGKILL"); } catch {}
+    _lastStartErr = _lastStartErr || "العملية أقُلعت لكن اللوحة لم تستجب على أي منفذ";
+  }
+  return { started: child.pid || null, port, alive };
 }
 
 // ─── الوكيل: /srv/panel/* → لوحة السيرفر الأصلية ──────────────────
@@ -492,9 +503,18 @@ export function registerServerHub(app, deps = {}) {
 
   // [v8.48.6] «خليها شغالة دائماً»: فحص كل دقيقة وتشغيل تلقائي عند التوقف.
   try {
-    const _t = setInterval(() => { ensurePanel().catch(() => {}); }, 60_000);
+    // [v8.48.8] سقف ٣ محاولات تشغيل في الساعة + تهدئة تصاعدية: منع توليد عمليات لا نهائية.
+    let _attempts = [];
+    const _guardedEnsure = () => {
+      const now = Date.now();
+      _attempts = _attempts.filter((t) => now - t < 60 * 60 * 1000);
+      if (_attempts.length >= 3) return;
+      _attempts.push(now);
+      ensurePanel().catch(() => {});
+    };
+    const _t = setInterval(_guardedEnsure, 3 * 60_000);
     if (typeof _t.unref === "function") _t.unref();
-    setTimeout(() => { ensurePanel().catch(() => {}); }, 8_000);
+    setTimeout(_guardedEnsure, 10_000);
   } catch {}
 
   try {

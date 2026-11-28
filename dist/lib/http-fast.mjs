@@ -17,9 +17,20 @@ const SAMPLE = 120;
 const timings = [];
 const counters = { requests: 0, gzip: 0, rawBytes: 0, gzipBytes: 0 };
 
+// [v8.48.8] الضغط على قائمة سماح صريحة فقط. الاعتراض العام لـ res.end
+// سبّب تعليق الردود (السيرفر لا يرد إطلاقاً) — لا نكرّره أبداً.
+const COMPRESS_ALLOW = [
+  "/webapp",
+  "/dev",
+  "/hub",
+  "/group-world",
+  "/developer-console",
+  "/sc",
+  "/__speed",
+];
 const SKIP_PREFIX = [
-  "/srv",            // وكيل لوحة السيرفر (بثّ)
-  "/api/server-file", // تنزيل/رفع ملفات
+  "/srv",
+  "/api/server-file",
   "/api/dev/media",
   "/api/wa/chat/media",
   "/steam-games",
@@ -59,7 +70,9 @@ export function installFastHttp(app, { log } = {}) {
 
     // ② قياس الزمن + الضغط
     const accept = String(req.headers["accept-encoding"] || "");
-    const canGzip = req.method === "GET" && /\bgzip\b/i.test(accept) && !_skip(path);
+    const allowed = COMPRESS_ALLOW.some((p) => path === p || path.startsWith(p + "/") || path.startsWith(p));
+    // [v8.48.8] ضغط فقط لصفحات HTML المعروفة، وبشرط عدم وجود بثّ/تنزيل.
+    const canGzip = allowed && req.method === "GET" && /\bgzip\b/i.test(accept) && !_skip(path);
     const done = () => {
       const ms = Number(process.hrtime.bigint() - t0) / 1e6;
       timings.push({ path, ms: Math.round(ms), status: res.statusCode, gz: res.getHeader("Content-Encoding") === "gzip" });
@@ -74,6 +87,12 @@ export function installFastHttp(app, { log } = {}) {
 
     const chunks = [];
     const origEnd = res.end.bind(res);
+    let gifted = false;
+    // شبكة أمان: إن لم يُغلق الردّ خلال ٢٠ ثانية نُنهيه فارغاً بدل تعليق المتصفح
+    const _guard = setTimeout(() => {
+      if (!gifted) { try { res.destroy?.(); } catch { } }
+    }, 20000);
+    if (typeof _guard.unref === "function") _guard.unref();
     let handed = false;
 
     res.write = function (chunk, enc, cb) {
@@ -86,6 +105,8 @@ export function installFastHttp(app, { log } = {}) {
     res.end = function (chunk, enc, cb) {
       if (handed) return res;
       handed = true;
+      gifted = true;
+      try { clearTimeout(_guard); } catch { }
       if (chunk && typeof chunk !== "function") {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, typeof enc === "string" ? enc : "utf8"));
       }
@@ -98,6 +119,11 @@ export function installFastHttp(app, { log } = {}) {
       const ct = String(res.getHeader("Content-Type") || "");
       const compressible = /^(text\/|application\/(json|javascript|ecmascript|xml|x-www-form-urlencoded)|image\/svg)/i.test(ct);
       const already = res.getHeader("Content-Encoding");
+      if (!compressible || already || body.length <= 600) {
+        try { res.removeHeader("Content-Length"); res.setHeader("Content-Length", body.length); } catch {}
+        res.on("finish", done);
+        return origEnd(body);
+      }
       if (compressible && !already && body.length > 600) {
         try {
           const gz = zlib.gzipSync(body, { level: 6 });
