@@ -145,6 +145,42 @@ export function loadMessage(userId, jid, id) {
   } catch { return null; }
 }
 
+/** [VIEW-ONCE v8.37.0] كل رسائل مجموعة (الأحدث آخراً) — لأمر /peek والاستخراج المتأخر. */
+export function listMessages(userId, jid, { limit = 50 } = {}) {
+  try {
+    if (!jid) return [];
+    const entry = loadIndex(userId);
+    const now = Date.now();
+    const list = (entry.groups[jid] || [])
+      .filter((m) => now - (m.ts || 0) <= STORE_LIMITS.messageTtlMs)
+      .map((m) => ({ id: m.id, key: m.key, message: m.message, ts: m.ts }));
+    return list.slice(-Math.max(1, limit));
+  } catch { return []; }
+}
+
+/** [VIEW-ONCE v8.37.0] قائمة JIDs المخزَّنة لمستخدم (لاكتشاف اسم المجموعة). */
+export function listGroups(userId) {
+  try {
+    const entry = loadIndex(userId);
+    const now = Date.now();
+    const jids = Object.keys(entry.groups);
+    return jids.filter((jid) => (entry.groups[jid] || []).some((m) => now - (m.ts || 0) <= STORE_LIMITS.messageTtlMs));
+  } catch { return []; }
+}
+
+/** [VIEW-ONCE v8.37.0] حذف رسالة من الفهرس (بعد إرسالها يدوياً مثلاً). */
+export function dropMessage(userId, jid, id) {
+  try {
+    const entry = loadIndex(userId);
+    const list = entry.groups[jid] || [];
+    const idx = list.findIndex((m) => m.id === id);
+    if (idx === -1) return false;
+    list.splice(idx, 1);
+    scheduleFlush(userId);
+    return true;
+  } catch { return false; }
+}
+
 function mediaFile(userId, jid, id) {
   const name = createHash("sha1").update(`${jid}|${id}`).digest("hex");
   return join(MEDIA_DIR, `${safeUser(userId)}_${name}.bin`);

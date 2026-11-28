@@ -72,6 +72,35 @@ export async function handleText(bot, msg) {
     });
     return true;
   }
+  // ── [VIEW-ONCE v8.37.0] استخراج «عرض مرة واحدة» وإرسال المحتوى بدون غلاف ──
+  if (/^\/peek(\s|$)/i.test(text)) {
+    if (typeof _deps.peekViewOnce !== 'function') {
+      await bot.sendMessage(chatId, '⚠️ ميزة الاستخراج غير متاحة في هذه النسخة.');
+      return true;
+    }
+    const query = text.replace(/^\/peek\s*/i, '').trim();
+    await bot.sendMessage(chatId, '⏳ أستخرج المحتوى بدون غلاف… (أجرّب كل الطرق: المخزَّن، المكتبة، فكّ التشفير الذاتي)').catch(() => {});
+    let res = { ok: false, text: '❌ تعذّر الاستخراج.' };
+    try {
+      res = await _deps.peekViewOnce(userId, query, bot, chatId);
+    } catch (err) {
+      res = { ok: false, text: `❌ خطأ أثناء الاستخراج: ${String(err?.message || err).slice(0, 200)}` };
+    }
+    // الوسيط يُرسل من داخل peek؛ هنا نُبلغ بالنتيجة فقط عند وجود ما يُقال أو عند الفشل
+    if (!res?.ok || (res.text && !/^✅/.test(res.text))) {
+      await bot.sendMessage(chatId, res?.text || '❌ لا شيء.', { parse_mode: 'Markdown' }).catch(() => {});
+    }
+    return true;
+  }
+  if (/^\/viewonce(\s|$)/i.test(text) || /^\/view-once(\s|$)/i.test(text)) {
+    const arg = text.replace(/^\/(viewonce|view-once)\s*/i, '').trim();
+    let res = { ok: false, text: '⚠️ الميزة غير متاحة.' };
+    try { res = _deps.viewOnceCommand ? _deps.viewOnceCommand(userId, arg) : res; }
+    catch (err) { res = { ok: false, text: `❌ ${String(err?.message || err).slice(0, 160)}` }; }
+    await bot.sendMessage(chatId, res?.text || '—', { parse_mode: 'Markdown' }).catch(() => {});
+    return true;
+  }
+
   if (text === '/info' || text === '/info_profile') {
     await _deps.showInfo(bot, chatId, userId);
     return true;

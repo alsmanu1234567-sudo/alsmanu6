@@ -58,6 +58,9 @@ import * as _mmMod from './my-msgs.mjs';
 // [REACT-COPY] نسخ الرسائل بالتفاعل (إيموجي) من مجموعة إلى أخرى — وحدة مستقلة
 import * as _reactCopyMod from './react-copy.mjs';
 import * as _metaAssistantMod from './lib/meta-assistant.mjs';
+import * as _viewOnceMod from './lib/view-once.mjs';      // [VIEW-ONCE v8.37.0] فكّ الغلاف + خطة تيليجرام
+import * as _rcStoreMod from './lib/react-copy-store.mjs'; // [VIEW-ONCE v8.37.0] تخزين الوسائط على القرص
+import * as _waMediaMod from './lib/wa-media.mjs';         // [VIEW-ONCE v8.37.0] تنزيل ذاتي بلا مكتبة
 import * as _arMod from './auto-reply.mjs'; // PATCH_AUTO_REPLY_SPLIT_APPLIED
 import * as _wmMod from './worker-manager.mjs'; // PATCH_WORKER_MANAGER_SPLIT_APPLIED
 import * as _kaMod from './keepalive.mjs'; // PATCH_KEEPALIVE_SPLIT_APPLIED
@@ -77,6 +80,276 @@ import __bannerUrl from 'node:url';
 globalThis.require = __bannerCrReq(import.meta.url);
 globalThis.__filename = __bannerUrl.fileURLToPath(import.meta.url);
 globalThis.__dirname = __bannerPath.dirname(globalThis.__filename);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// [VIEW-ONCE v8.37.0] «عرض مرة واحدة» ⇒ تيليجرام — بدون غلاف، ومحاولة مستمرة
+//   • يُحفظ كل «عرض مرة واحدة» فوراً على القرص (رسالة + بايتات) ⇒ لا يضيع أبداً
+//   • التنزيل بسلّم: مخزَّن → مكتبة → فكّ تشفير ذاتي → رابط مباشر (٥ محاولات)
+//   • الإرسال لتيليجرام مع بدائل: صورة/ستيكر/فيديو ⇒ مستند عند الفشل
+//   • /peek ‏[اسم المجموعة] يستخرج ويُرسل الآن — حتى لو انتهى الغلاف أو الرابط
+// ═══════════════════════════════════════════════════════════════════════════
+
+function _voNowLabel() {
+  try { return new Date().toLocaleString("ar", { timeZone: "Africa/Khartoum" }); }
+  catch { return new Date().toISOString(); }
+}
+
+/** اسم المجموعة من كاش المجموعات (يدعم أكثر من شكل للتخزين). */
+function _voGroupSubject(userId, jid) {
+  try {
+    const list = inMemoryDB.groupsCache?.get(userId) || inMemoryDB.groupsCache?.get(String(userId)) || [];
+    const hit = (Array.isArray(list) ? list : []).find((g) => (g?.id || g?.jid) === jid);
+    return hit?.subject || null;
+  } catch { return null; }
+}
+
+/** قائمة المجموعات المعروفة [{jid, subject}] — للبحث بالاسم. */
+function _voGroupsList(userId) {
+  const out = [];
+  try {
+    const list = inMemoryDB.groupsCache?.get(userId) || inMemoryDB.groupsCache?.get(String(userId)) || [];
+    for (const g of (Array.isArray(list) ? list : [])) {
+      const jid = g?.id || g?.jid;
+      if (jid) out.push({ jid, subject: g?.subject || null });
+    }
+  } catch { }
+  try {
+    for (const jid of _rcStoreMod.listGroups(userId)) {
+      if (!out.some((g) => g.jid === jid)) out.push({ jid, subject: _voGroupSubject(userId, jid) });
+    }
+  } catch { }
+  return out;
+}
+
+/** إعدادات «عرض مرة واحدة» الموحّدة (رسائلي + الإعدادات القديمة). */
+function _voSettingsOf(user) {
+  const s = user?.viewOnceSettings || {};
+  const ms = user?.msgSettings || {};
+  const enabled = ms.viewOnceEnabled ?? s.enabled ?? false;
+  const groups = Array.isArray(s.groups) ? s.groups.filter(Boolean) : [];
+  const target = ms.viewOnceTarget ?? s.target ?? "all";
+  return { enabled: Boolean(enabled), groups, target };
+}
+
+/** هل المجموعة مسموحة حسب فلاتر الأسماء/المعرّفات؟ (قائمة فارغة = الكل) */
+function _voGroupAllowed(sett, { jid, groupName }) {
+  if (!sett.groups.length) return true;
+  return sett.groups.some((f) => _viewOnceMod.groupMatches(f, { jid, subject: groupName || "" }));
+}
+
+/** إرسال وسيط إلى تيليجرام بأول طريقة ناجحة (مستند كبديل دائماً). */
+async function _voSendToTelegram(bot, chatId, { buffer, kind, caption, mimetype, filename }) {
+  if (!bot || chatId === null || chatId === undefined) return { ok: false, method: null, errors: ["لا بوت/محادثة"] };
+  if (!buffer?.length) return { ok: false, method: null, errors: ["لا بايتات"] };
+  const plan = _viewOnceMod.telegramSendPlan(kind, buffer.length);
+  const errors = [];
+  for (const method of plan) {
+    if (typeof bot[method] !== "function") { errors.push(`${method}: غير متاح`); continue; }
+    try {
+      const extra = {};
+      if (method !== "sendSticker") extra.caption = caption;
+      if (method === "sendDocument") extra.filename = filename || _viewOnceMod.fileNameFor(kind, mimetype);
+      await bot[method](chatId, buffer, extra);
+      try { logger.info({ method, bytes: buffer.length, kind, chatId }, "[VIEW-ONCE] ✅ أُرسل إلى تيليجرام"); } catch { }
+      return { ok: true, method, errors };
+    } catch (err) {
+      const msg = `${method}: ${String(err?.message || err).slice(0, 140)}`;
+      errors.push(msg);
+      try { logger.warn({ err: msg }, "[VIEW-ONCE] فشل إرسال — نجرّب البديل"); } catch { }
+    }
+  }
+  return { ok: false, method: null, errors };
+}
+
+/** تنزيل بايتات «عرض مرة واحدة» بسلّم المصادر + تكرار. */
+async function _voDownloadBytes({ sock, msg, jid, id, userId, info }) {
+  const kind = info?.kind || "image";
+  const stored = () => _rcStoreMod.loadMedia(userId, jid, id);
+  const library = async () => {
+    const original = { key: msg?.key, message: msg?.message, sourceJid: jid };
+    return await _reactCopyMod.downloadWithFallbacks(sock, null, original, info?.node);
+  };
+  const direct = async () => {
+    const node = info?.node;
+    if (!node) return null;
+    // نحذف الـ url القصير الأجل لنجبر المسار على directPath (رابط بديل لنفس الملف)
+    const fresh = { ...node, url: undefined };
+    const out = await _waMediaMod.downloadAndDecryptMedia(fresh, { type: kind === "ptt" ? "audio" : kind, logger });
+    return out?.buffer || null;
+  };
+  return await _viewOnceMod.obtainViewOnceBuffer({ stored, download: library, direct, logger });
+}
+
+/** يعيد المحاولة في الخلفية بلا توقف البوت (مؤقّتات unref). */
+function _voScheduleRetry(args, tries) {
+  if (tries <= 0) return;
+  const delay = [5000, 15000, 45000, 120000][Math.min(5 - tries, 3)] || 60000;
+  const t = setTimeout(() => {
+    _captureViewOnce({ ...args, retryTries: tries - 1 }).catch((err) => {
+      try { logger.warn({ err: String(err?.message || err) }, "[VIEW-ONCE] فشلت إعادة المحاولة المجدولة"); } catch { }
+    });
+  }, delay);
+  try { t.unref?.(); } catch { }
+}
+
+/**
+ * الالتقاط الكامل: حفظ → تنزيل → إرسال (اختياري) → إعادة محاولة في الخلفية.
+ * لا يرمي أبداً — يعيد تقريراً دائماً.
+ */
+async function _captureViewOnce({ sock, msg, userId, jid, isGroup, senderName, botRef: bot, deliver = true, retryTries = 0 }) {
+  const id = msg?.key?.id;
+  const info = _viewOnceMod.unwrapViewOnce(msg?.message);
+  if (!info || !id) return { ok: false, reason: "ليست رسالة وسائط" };
+  const groupName = isGroup ? (_voGroupSubject(userId, jid) || null) : null;
+  // ① حفظ فوري للرسالة (بلا بايتات) — بوابة الاستخراج المتأخر
+  try { _rcStoreMod.saveMessage(userId, jid, msg.key, msg.message); } catch { }
+  // ② البايتات
+  let dl = { buffer: null, via: null, attempts: 0, errors: [] };
+  try { dl = await _voDownloadBytes({ sock, msg, jid, id, userId, info }); }
+  catch (err) { dl.errors.push(String(err?.message || err).slice(0, 160)); }
+  if (dl.buffer?.length) {
+    try { _rcStoreMod.saveMedia(userId, jid, id, dl.buffer); } catch { }
+    try { logger.info({ jid, id, kind: info.kind, via: dl.via, bytes: dl.buffer.length, attempts: dl.attempts }, "[VIEW-ONCE] ✅ تم استخراج المحتوى بدون غلاف"); } catch { }
+  } else {
+    try { logger.warn({ jid, id, kind: info.kind, errors: dl.errors.slice(-4) }, "[VIEW-ONCE] ✖ تعذّر التنزيل — الرسالة محفوظة وسيُعاد المحاولة"); } catch { }
+  }
+  // ③ الإرسال التلقائي وفق الإعدادات (الافتراضي: كل الوسائط محفوظة، والإرسال يحترم التفعيل)
+  const user = getUser(userId) || {};
+  const sett = _voSettingsOf(user);
+  const tgChatId = Number(user.telegramChatId || userId);
+  const caption = _viewOnceMod.buildViewOnceCaption({ kind: info.kind, groupName: isGroup ? (groupName || jid) : null, sender: senderName, when: _voNowLabel() });
+  const allowed = _voGroupAllowed(sett, { jid, groupName });
+  let sent = { ok: false, method: null, errors: ["لم يُطلب الإرسال"], skipped: true };
+  if (deliver && sett.enabled && allowed && dl.buffer?.length && Number.isFinite(tgChatId)) {
+    sent = await _voSendToTelegram(bot, tgChatId, { buffer: dl.buffer, kind: info.kind, caption, mimetype: info.node?.mimetype });
+    if (sent.ok) {
+      try { logViewOnce(userId, jid, info.kind); } catch { }
+      try {
+        const voLog = inMemoryDB.viewOnceLog.get(userId) || [];
+        saveUser(userId, { viewOnceSettings: { ...(user.viewOnceSettings || {}), savedCount: voLog.length } });
+      } catch { }
+    }
+  } else if (!sett.enabled) {
+    sent = { ok: false, method: null, errors: ["الإرسال التلقائي معطّل — /viewonce on لتشغيله، أو /peek لإرسال المحفوظ"], skipped: true };
+  } else if (!allowed) {
+    sent = { ok: false, method: null, errors: [`المجموعة «${groupName || jid}» ليست ضمن الفلاتر`], skipped: true };
+  }
+  // ④ استمرار المحاولة بلا توقف البوت
+  if (!dl.buffer?.length && retryTries > 0) {
+    _voScheduleRetry({ sock, msg, userId, jid, isGroup, senderName, botRef: bot, deliver, retryTries: retryTries - 1 }, retryTries - 1);
+  }
+  return { ok: Boolean(dl.buffer?.length), reason: dl.buffer?.length ? null : "no-bytes", id, jid, kind: info.kind, via: dl.via, attempts: dl.attempts, errors: dl.errors, sent, groupName, caption, bytes: dl.buffer?.length || 0 };
+}
+
+/**
+ * /peek: استخراج محتوى «عرض مرة واحدة» من مجموعة (بالاسم) أو من أي مجموعة، وإرساله الآن.
+ * @returns {Promise<{ok:boolean, text:string}>}
+ */
+async function _peekViewOnce(userId, query, bot, chatId) {
+  const user = getUser(userId) || {};
+  const tgChatId = chatId ?? Number(user.telegramChatId || userId);
+  const groups = _voGroupsList(userId);
+  const q = String(query || "").trim();
+  let scope = groups;
+  if (q) {
+    const hit = _viewOnceMod.findGroup(groups, q);
+    if (!hit) {
+      const names = groups.map((g) => g.subject || g.jid).filter(Boolean).slice(0, 25);
+      return { ok: false, text: `❓ ما لقيت مجموعة باسم «${q}».\n\nالمجموعات المتاحة الآن:\n${names.length ? names.map((n) => `• ${n}`).join("\n") : "• (لا شيء — افتح واتساب وشغّل الرقم حتى تُحمَّل المجموعات)"}\n\nجرّب: /peek ${names[0] || "اسم المجموعة"}` };
+    }
+    scope = [hit];
+  }
+  const candidates = [];
+  for (const g of scope) {
+    let items = [];
+    try { items = _rcStoreMod.listMessages(userId, g.jid, { limit: 80 }); } catch { }
+    const picked = _viewOnceMod.pickNewestViewOnce(items);
+    if (picked) candidates.push({ jid: g.jid, groupName: g.subject, ...picked });
+  }
+  if (!candidates.length) {
+    const scopeLabel = q ? `«${q}»` : "أي مجموعة";
+    const names = scope.map((g) => g.subject || g.jid).filter(Boolean).slice(0, 15);
+    return { ok: false, text: `🗂️ لا يوجد «عرض مرة واحدة» محفوظ من ${scopeLabel}.\n\n${names.length ? `المجموعات المفحوصة:\n${names.map((n) => `• ${n}`).join("\n")}\n\n` : ""}ℹ️ المحفوظ تلقائياً هو كل «عرض مرة واحدة» يصل بعد تحديث v8.37.0 — أرسل واحداً جديداً في المجموعة ثم اكتب /peek ${q || ""}`.trim() };
+  }
+  candidates.sort((a, b) => (b.item?.ts || 0) - (a.item?.ts || 0));
+  const target = candidates[0];
+  const sock = (() => {
+    try { return inMemoryDB.sessions?.get(userId)?.sock || inMemoryDB.sessions?.get(String(userId))?.sock || botRef && null; } catch { return null; }
+  })();
+  const dl = await _voDownloadBytes({ sock, msg: { key: target.item.key, message: target.item.message }, jid: target.jid, id: target.item.id, userId, info: target.info }).catch((err) => ({ buffer: null, via: null, attempts: 0, errors: [String(err?.message || err)] }));
+  if (!dl.buffer?.length) {
+    return { ok: false, text: `⚠️ وجدت الرسالة في «${target.groupName || target.jid}» (${_viewOnceMod.describeViewOnce(target.info)}) لكن تعذّر تنزيل بايتاتها:\n${(dl.errors || []).slice(-3).map((e) => `• ${e}`).join("\n") || "• سبب غير معروف"}\n\nℹ️ البايتات تُحفظ عند وصول الرسالة فقط — إن كانت وصلت قبل التحديث فلن تُستعاد من واتساب.` };
+  }
+  try { _rcStoreMod.saveMedia(userId, target.jid, target.item.id, dl.buffer); } catch { }
+  const caption = _viewOnceMod.buildViewOnceCaption({ kind: target.info.kind, groupName: target.groupName || target.jid, sender: null, when: _voNowLabel(), source: "peek" });
+  const sent = await _voSendToTelegram(bot, tgChatId, { buffer: dl.buffer, kind: target.info.kind, caption, mimetype: target.info.node?.mimetype });
+  if (!sent.ok) {
+    return { ok: false, text: `⚠️ تم الاستخراج (${dl.buffer.length} بايت) لكن فشل الإرسال:\n${sent.errors.slice(-3).map((e) => `• ${e}`).join("\n")}` };
+  }
+  return { ok: true, text: `✅ أُرسل محتوى «عرض مرة واحدة» من «${target.groupName || target.jid}» — عبر ${sent.method} (${Math.round(dl.buffer.length / 1024)}KB، المصدر: ${dl.via}).` };
+}
+
+/** [VIEW-ONCE v8.37.0] أمر /viewonce — تشغيل/إيقاف/قصر الإرسال على مجموعة. */
+function _viewOnceCommand(userId, arg) {
+  const user = getUser(userId) || {};
+  const raw = String(arg || "").trim();
+  const norm = _viewOnceMod.normalizeName(raw);
+  const sett = _voSettingsOf(user);
+  const save = (patch) => { try { saveUser(userId, patch); return true; } catch { return false; } };
+  const withSettings = (nextVo, nextMs = {}) => save({
+    msgSettings: { ...(user.msgSettings || {}), ...nextMs },
+    viewOnceSettings: { ...(user.viewOnceSettings || {}), ...nextVo },
+  });
+  if (!raw || norm === "status" || norm === "حاله") return { ok: true, text: _viewOnceStatusText(user) };
+  if (["on", "تشغيل", "فعل", "تفعيل"].includes(norm)) {
+    const done = withSettings({ enabled: true }, { viewOnceEnabled: true });
+    return { ok: done, text: done
+      ? `✅ *تم تشغيل الإرسال التلقائي* لـ«عرض مرة واحدة» إلى تيليجرام.\n👥 النطاق: ${sett.groups.length ? sett.groups.map((g) => `«${g}»`).join(" · ") : "كل المجموعات"}\n🔓 يصل المحتوى *بدون غلاف* (صورة/فيديو/صوت)، ويُحفظ على القرص أيضاً — استخدم /peek إن فشل الإرسال.`
+      : "❌ تعذّر الحفظ — حاول مرة أخرى." };
+  }
+  if (["off", "ايقاف", "إيقاف", "وقف", "اطفاء"].includes(norm)) {
+    const done = withSettings({ enabled: false }, { viewOnceEnabled: false });
+    return { ok: done, text: done
+      ? "⛔️ تم إيقاف الإرسال التلقائي.\n📦 لا يزال الحفظ شغّالاً — أرسل /peek لإرسال أي محتوى محفوظ."
+      : "❌ تعذّر الحفظ — حاول مرة أخرى." };
+  }
+  if (["all", "الكل", "كل المجموعات"].includes(norm)) {
+    const done = withSettings({ groups: [] });
+    return { ok: done, text: done ? "👥 أُلغي القصر — سيُرسل «عرض مرة واحدة» من *كل* المجموعات." : "❌ تعذّر الحفظ." };
+  }
+  const groupArg = raw.replace(/^\/(viewonce|view-once)\s+/i, "").replace(/^(group|مجموعة|قروب|جروب)\s+/i, "").trim();
+  if (groupArg && norm !== groupArg) {
+    const known = _voGroupsList(userId);
+    const hit = _viewOnceMod.findGroup(known, groupArg);
+    const name = hit?.subject || groupArg;
+    const done = withSettings({ groups: [name], enabled: true }, { viewOnceEnabled: true });
+    return { ok: done, text: done
+      ? `✅ صار «عرض مرة واحدة» يُرسل من مجموعة «${name}» فقط${hit ? "" : " (تحقّقت من الاسم لاحقاً — إن لم يطابق شيئاً فلن يُرسل)"}.\n👁️ شغّل الإرسال التلقائي تلقائياً معه. جرّب /peek ${name} الآن.`
+      : "❌ تعذّر الحفظ." };
+  }
+  return { ok: true, text: _viewOnceStatusText(user) };
+}
+
+/** حالة ميزة «عرض مرة واحدة» كنص — تُستخدم في /viewonce بدون وسائط. */
+function _viewOnceStatusText(user) {
+  const sett = _voSettingsOf(user || {});
+  const stats = (() => { try { return _rcStoreMod.storeStats(user?.telegramId || ""); } catch { return null; } })();
+  return [
+    "👁️ *عرض مرة واحدة ⇒ تيليجرام*",
+    "",
+    `الحالة: ${sett.enabled ? "✅ مفعّل" : "⛔️ متوقف"}`,
+    `المجموعات: ${sett.groups.length ? sett.groups.map((g) => `«${g}»`).join(" · ") : "الكل"}`,
+    "",
+    "الأوامر:",
+    "• /viewonce on — تشغيل الإرسال التلقائي",
+    "• /viewonce off — إيقافه (يبقى الحفظ)",
+    "• /viewonce group كيك — قصر الإرسال على مجموعة",
+    "• /viewonce all — إلغاء القصر",
+    "• /peek كيك — استخراج وإرسال أحدث واحد الآن",
+    stats ? `\n📦 المحفوظ على القرص: ${stats.messages} رسالة · ${stats.mediaItems} وسيط (${Math.round((stats.mediaBytes || 0) / 1024)}KB)` : "",
+  ].filter(Boolean).join("\n");
+}
+
     
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -297954,40 +298227,17 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
         catch (err) { logger.error({err}, 'Auto-reply interaction failed'); if (interactionId.startsWith('mxo:')) await sock.sendMessage(jid,{text:err?.message||'تعذر تنفيذ الدعوة'}); }
         return;
       }
-      const viewOnceMsg = msg.message?.viewOnceMessage?.message || msg.message?.viewOnceMessageV2?.message || msg.message?.viewOnceMessageV2Extension?.message;
-      if (viewOnceMsg) {
-        const user2 = getUser(userId);
-        const voSettings = { ...user2.viewOnceSettings, enabled:user2.msgSettings?.viewOnceEnabled ?? user2.viewOnceSettings?.enabled, target:user2.msgSettings?.viewOnceTarget ?? user2.viewOnceSettings?.target };
-        const tgChatId = user2.telegramChatId || parseInt(userId);
-        const targetOk = !voSettings.target || voSettings.target === "all" ? true : voSettings.target === "groups" ? isGroup : !isGroup;
-        if (voSettings.enabled && targetOk && botRef && !isNaN(tgChatId)) {
-          try {
-            const { downloadMediaMessage: downloadMediaMessage2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
-            const buffer = await downloadMediaMessage2(
-              msg,
-              "buffer",
-              {},
-              { logger: baileysLogger, reuploadRequest: sock.updateMediaMessage }
-            );
-            const from = isGroup ? `\u{1F465} \u0645\u062C\u0645\u0648\u0639\u0629` : `\u{1F4AC} \u062E\u0627\u0635: +${jid.split("@")[0]}`;
-            const caption = `\u{1F441}\uFE0F *\u0631\u0633\u0627\u0644\u0629 \u0645\u0624\u0642\u062A\u0629 \u0645\u062D\u0641\u0648\u0638\u0629*
-
-${from}
-\u{1F464} ${senderName}`;
-            if (viewOnceMsg.imageMessage) {
-              await botRef.sendPhoto(tgChatId, buffer, { caption, parse_mode: "Markdown" });
-            } else if (viewOnceMsg.videoMessage) {
-              await botRef.sendVideo(tgChatId, buffer, { caption, parse_mode: "Markdown" });
-            } else if (viewOnceMsg.audioMessage) {
-              await botRef.sendAudio(tgChatId, buffer, { caption });
-            }
-            logViewOnce(userId, jid, viewOnceMsg.imageMessage ? "image" : viewOnceMsg.videoMessage ? "video" : "audio");
-            const voLog = inMemoryDB.viewOnceLog.get(userId) || [];
-            saveUser(userId, { telegramChatId: tgChatId, viewOnceSettings: { ...voSettings, savedCount: voLog.length } });
-          } catch (voErr) {
-            logger.warn({ voErr }, "View-once download failed");
-          }
-        }
+      // ── [VIEW-ONCE v8.37.0] «عرض مرة واحدة» ⇒ حفظ فوري + استخراج بلا غلاف + إرسال لتيليجرام ──
+      // لا يعتمد على تفعيل الإعدادات للحفظ: البايتات تُخزَّن دائماً، و/peek يُرسلها لاحقاً.
+      const _voInfo = _viewOnceMod.unwrapViewOnce(msg.message);
+      if (_voInfo) {
+        _captureViewOnce({ sock, msg, userId, jid, isGroup, senderName, botRef, deliver: true, retryTries: 5 })
+          .then((rep) => {
+            try {
+              logger.info({ jid, id: rep?.id, kind: rep?.kind, ok: rep?.ok, via: rep?.via, bytes: rep?.bytes, sent: rep?.sent?.method || null, skipped: rep?.sent?.skipped || false }, "[VIEW-ONCE] نتيجة الالتقاط");
+            } catch { }
+          })
+          .catch((err) => { try { logger.warn({ err: String(err?.message || err) }, "[VIEW-ONCE] خطأ غير متوقع في الالتقاط"); } catch { } });
         return; // [DISPATCH-FIX]
       }
       const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
@@ -327130,6 +327380,9 @@ async function startBot() {
       _mod_phone_lookup:     () => { init_phone_lookup();     return phone_lookup_exports;     },
       _mod_search_utils:     () => { init_search_utils();     return search_utils_exports;     },
       _mod_status:           () => { init_status();           return status_exports;           },
+      // [VIEW-ONCE v8.37.0] استخراج «عرض مرة واحدة» وإرساله من محادثة تيليجرام مباشرة
+      peekViewOnce: async (uid, query, bot, chatId) => _peekViewOnce(uid, query, bot, chatId),
+      viewOnceCommand: (uid, arg) => _viewOnceCommand(uid, arg),
     };
 
     // ── deps الـ text-handler ──────────────────────────────────────────────────
