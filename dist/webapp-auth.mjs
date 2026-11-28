@@ -9,8 +9,14 @@ import { randomBytes } from "crypto";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, "..", "data");
-const TOKENS_FILE = join(DATA_DIR, "webapp-tokens.json");
+// [v8.49.1] كانت التوكنات داخل مجلد المستودع ⇒ كل نشر/إعادة تشغيل ينزّل نسخة
+// جديدة من GitHub فيمسحها، فيصير رابط الويب آب القديم «غير مصرح».
+// نُخزّنها الآن في المجلد الخارجي الدائم (bot-data) إن وُجد.
+const _extBase = String(process.env.BOT_EXTERNAL_DEPS_DIR || "").trim();
+const TOKENS_DIR = _extBase ? join(_extBase, "bot-data") : DATA_DIR;
+const TOKENS_FILE = join(TOKENS_DIR, "webapp-tokens.json");
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+try { if (!existsSync(TOKENS_DIR)) mkdirSync(TOKENS_DIR, { recursive: true }); } catch {}
 
 function loadTokens() {
   try { return JSON.parse(readFileSync(TOKENS_FILE, "utf8")); } catch { return {}; }
@@ -106,5 +112,12 @@ export function resolveUid(req) {
     (req?.headers?.authorization || "").replace(/^Bearer\s+/i, "");
   const uid = userForToken(token);
   if (uid) return String(uid);
-  return webappOpenWithoutToken() ? ownerUid() : null;
+  const open = webappOpenWithoutToken();
+  // [v8.49.1] توكن بصيغة صحيحة (hex) لكنه غير مسجّل — غالباً ضاع بعد نشر جديد.
+  // لا نكسر رابط المستخدم: نستخدم حساب المالك ما دام الفتح الحر مفعّلاً.
+  if (open && /^[a-f0-9]{24,64}$/i.test(String(token || "").trim())) {
+    try { const t = tokenForUser(ownerUid()); if (!t) {} else { const tokens = loadTokens(); if (!tokens[String(token)]) { tokens[String(token)] = ownerUid(); saveTokens(tokens); } } } catch {}
+    return ownerUid();
+  }
+  return open ? ownerUid() : null;
 }

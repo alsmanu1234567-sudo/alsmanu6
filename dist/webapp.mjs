@@ -863,6 +863,28 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     };
   }));
 
+  // [v8.49.0] تشخيص المصادقة: افتح /api/webapp/whoami?token=… لتعرف السبب بالضبط
+  app.get("/api/webapp/whoami", (req, res) => {
+    try {
+      const raw = String(req.query?.token || req.headers?.["x-webapp-token"] || "");
+      const uid = userForToken(raw);
+      let open = true;
+      try { open = webappOpenWithoutToken(); } catch {}
+      res.json({
+        ok: true,
+        tokenPresent: Boolean(raw),
+        tokenLength: raw.length,
+        tokenValid: Boolean(uid),
+        uid: uid || null,
+        openWithoutToken: open,
+        effectiveUid: resolveUid(req),
+        hint: uid ? "التوكن صالح" : open ? "التوكن غير معروف لكن الفتح الحر مفعّل ⇒ سيُستخدم حساب المالك" : "التوكن غير معروف والفتح الحر مغلق ⇒ 401",
+      });
+    } catch (e) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
   registerGroupWorldWebApp(app, parseJson, guard);
 
   console.log("[WEBAPP] ✅ واجهة إدارة التحويلات جاهزة على /webapp");
@@ -1098,8 +1120,16 @@ function api(path, body){
     ? { method:"POST", headers:{ "Content-Type":"application/json", "x-webapp-token":TOKEN }, body: JSON.stringify(body) }
     : { headers:{ "x-webapp-token":TOKEN } };
   return fetch(path, opt).then(async r => {
-    const j = await r.json().catch(()=>({}));
-    if (!r.ok) throw new Error(j.error || "خطأ في الاتصال");
+    const txt = await r.text();
+    let j = {};
+    try { j = JSON.parse(txt); } catch {}
+    if (!r.ok) {
+      // [v8.49.0] نُظهر السبب الحقيقي (حالة HTTP + نص السيرفر) بدل «تأكد من فتح الرابط»
+      const why = j.error || (txt ? txt.slice(0, 120) : "بلا محتوى");
+      const e = new Error(why + " — HTTP " + r.status);
+      e.status = r.status;
+      throw e;
+    }
     return j;
   });
 }
