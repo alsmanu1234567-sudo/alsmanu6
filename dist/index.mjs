@@ -303657,8 +303657,20 @@ async function showServerControlMenu(bot2,chatId,userId){
 async function openServerControl(bot2,chatId,userId,minutes){
   if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId)){await bot2.sendMessage(chatId,'هذه الخدمة للمطور في المحادثة الخاصة فقط.');return;}
   const dir=process.env.BOT_SERVER_CONTROL_DIR;if(!dir){await bot2.sendMessage(chatId,'لوحة السيرفر غير جاهزة: شغّل البوت عبر bootstrap/index.mjs أولاً.');return;}
-  await bot2.sendMessage(chatId,'⏳ جارٍ تشغيل لوحة السيرفر وإنشاء رابط مستقل، قد يستغرق دقيقة أو أكثر.');
-  try{const {launchServerControl}=await import('../services/developer/server-control-launcher.mjs');const result=await launchServerControl({directory:dir,base:process.env.BOT_BASE_DIR||process.cwd(),minutes});await bot2.sendMessage(chatId,'🔴 رابط لوحة السيرفر المستقلة؛ لا تشاركه. ينتهي في '+new Date(result.expiry).toLocaleString('ar')+'.\n♻️ تُغلق تلقائياً بعد '+(result.idleMinutes||20)+' دقيقة بلا استخدام لتوفير رام السيرفر.'+(result.provider==='localtunnel'&&result.password?'\nإذا ظهرت صفحة حماية النفق أدخل هذا العنوان: '+result.password:''),{reply_markup:{inline_keyboard:[[{text:'🖥 فتح لوحة السيرفر',url:result.url}],[{text:'📋 إرسال الرابط كنص',callback_data:'dev_serverlink_text'}],[{text:'🔒 إيقاف الرابط',callback_data:'dev_serverlink_stop'}]]}})}catch(e){await bot2.sendMessage(chatId,'تعذر إنشاء رابط السيرفر: '+String(e.message||e).slice(0,300));}
+  // [v8.48.4] رابط دائم لا ينتهي ولا يُغلق بخمول: لوحة السيرفر المدمجة على الرابط الثابت.
+  {
+    const base=globalThis.__STABLE_BASE__||globalThis.__FW_PUBLIC_URL||'';
+    const key=globalThis.__DEV_KEY__||'';
+    if(!base||!key){await bot2.sendMessage(chatId,'⚠️ الرابط الدائم لم يجهز بعد — انتظر ثوانٍ ثم اضغط الزر مرة أخرى.');return;}
+    const panel=`${base}/srv?k=${key}`;
+    await bot2.sendMessage(chatId,
+      '🖥 *لوحة السيرفر — رابط دائم*\n\n'+panel+'\n\n✅ لا ينتهي، ولا يُغلق بعد خمول، ولا يحتاج نفق.\nمنها: إيقاف/تشغيل/إعادة تشغيل + اللوحة الأصلية كاملة + توكن.',
+      {parse_mode:'Markdown',disable_web_page_preview:true,reply_markup:{inline_keyboard:[
+        [{text:'🖥 فتح لوحة السيرفر',url:panel}],
+        [{text:'🛠 لوحة المطوّر',url:`${base}/dev?k=${key}`}],
+      ]}});
+    return;
+  }
 }
 async function sendServerControlLinkText(bot2,chatId,userId){if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId))return;try{const dir=process.env.BOT_SERVER_CONTROL_DIR;if(!dir)throw Error('لوحة السيرفر غير مهيأة');const {getServerControlLink}=await import('../services/developer/server-control-launcher.mjs');const url=await getServerControlLink(dir);await bot2.sendMessage(chatId,url?'🔐 رابط التحكم الكامل؛ لا تشاركه:\n'+url:'لا يوجد رابط صالح محفوظ؛ أنشئ رابطاً جديداً.',{disable_web_page_preview:true})}catch(e){await bot2.sendMessage(chatId,'تعذر إرسال الرابط: '+e.message)}}
 function createDevDiagService() {
@@ -303872,7 +303884,7 @@ async function sendDevPanel(bot2, chatId, userId) {
   const totalPts = Array.from(inMemoryDB.users.values()).reduce((s, u3) => s + (u3.points || 0), 0);
   const unreadMsgs = inMemoryDB.devMessages.filter((m) => !m.replied).length;
   const devKeyboard=devMenuKeyboard(inMemoryDB.users.size,stats.running,stats.stopped);
-  if(String(chatId)===String(userId)) devKeyboard.inline_keyboard.splice(1,0,[{text:"🖥 لوحة السيرفر المستقلة",callback_data:"dev_servercontrol"}],[{text:"🔄 رابط جديد للوحة المطور",callback_data:"dev_open_web"},{text:"🔒 إلغاء روابط المطور",callback_data:"dev_revoke_web"}]);
+  if(String(chatId)===String(userId)) devKeyboard.inline_keyboard.splice(1,0,[{text:"🖥 لوحة السيرفر (دائمة)",callback_data:"dev_servercontrol"}],[{text:"🔄 رابط جديد للوحة المطور",callback_data:"dev_open_web"},{text:"🔒 إلغاء روابط المطور",callback_data:"dev_revoke_web"}]);
   // [v8.48.3] أزرار تفتح مباشرة — بلا أوامر ولا كود: لوحة المطوّر + لوحة السيرفر + الويب آب.
   // تُبنى من الرابط الدائم (منفذ الاستضافة) فلا تتوقف إن مات النفق.
   if(String(chatId)===String(userId)){try{
@@ -303995,10 +304007,18 @@ ${isDev2 ? "\u{1F451} *\u0635\u0644\u0627\u062D\u064A\u0627\u062A \u0627\u0644\u
   const _webUrl=webappUrlFor(userId);
   // [v8.48.1] كان الزر يُحجب كلياً إن لم يكن الرابط https ⇒ «كل صفحات الويب آب لا تعمل».
   // الآن: https ⇒ web_app (Mini App)، وhttp الثابت ⇒ زر رابط عادي يفتح المتصفح.
+  // [v8.48.4] زر ويب آب واحد فقط: نحذف أي زر ويب آب مكرر ثم نضيف زراً واحداً دائماً.
   const addWebButton=kb=>{
-    const _u=_webUrl||globalThis.__STABLE_BASE__&&globalThis.__STABLE_BASE__+`/webapp?token=${typeof tokenForUser==='function'?tokenForUser(userId):''}`;
+    try{
+      if(kb&&Array.isArray(kb.inline_keyboard)){
+        kb.inline_keyboard=kb.inline_keyboard.filter(row=>!row.some(b=>/ويب\s*آب|WebApp|web_app|webapp/i.test(String(b&&b.text||''))));
+      }
+    }catch{}
+    let _u=_webUrl;
+    if(!_u){const _b=globalThis.__STABLE_BASE__||globalThis.__FW_PUBLIC_URL||'';if(_b&&typeof tokenForUser==='function')_u=_b+'/webapp?token='+tokenForUser(userId);}
+    if(!kb||!Array.isArray(kb.inline_keyboard))return kb;
     if(_u && /^https:\/\//i.test(_u))kb.inline_keyboard.unshift([{text:'🌐 فتح الويب آب',web_app:{url:_u}}]);
-    else if(_u)kb.inline_keyboard.unshift([{text:'🌐 فتح الويب آب (متصفح)',url:_u}]);
+    else if(_u)kb.inline_keyboard.unshift([{text:'🌐 فتح الويب آب (المجموعات والردود)',url:_u}]);
     return kb};
   const displayedWelcome = texts.welcome !== undefined ? getText('welcome',{name:from.first_name||'',points:freshUser.points||0,tier:TIER_NAMES[freshUser.tier]||'مجاني'}) : text;
   // [MULTI-NUM] المستخدم متعدد الأرقام: اعرض قائمة اختيار الرقم النشط أولاً
