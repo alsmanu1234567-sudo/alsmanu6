@@ -164,3 +164,37 @@ test("/copy g: يفضّل النسخة الكاملة المخزَّنة ويط�
   assert.match(src, /_voPending/);
   assert.match(src, /_voWaitForRicher/);
 });
+
+// ── [v8.44.0] لا «نوع آخر» لرسائل معروفة: بحث عميق + اسم المفتاح ──
+test("classifyMessage: أشكال كانت تُصنَّف «نوع آخر» سابقاً", () => {
+  assert.equal(chatLog.classifyMessage({ albumMessage: { expectedImageCount: 2 } }).type, "album");
+  assert.equal(chatLog.classifyMessage({ keepInChatMessage: { key: {} } }).type, "system");
+  assert.equal(chatLog.classifyMessage({ messageContextInfo: {}, senderKeyDistributionMessage: {} }).type, "system");
+  assert.equal(chatLog.classifyMessage({ ptvMessage: { mimetype: "video/mp4" } }).type, "video");
+  assert.equal(chatLog.classifyMessage({ documentWithCaptionMessage: { message: { documentMessage: { mimetype: "application/pdf" } } } }).type, "document");
+  assert.equal(chatLog.classifyMessage({ editedMessage: { message: { conversation: "x" } } }).type, "text");
+  assert.equal(chatLog.classifyMessage({ buttonsMessage: { contentText: "?" } }).type, "interactive");
+  assert.equal(chatLog.classifyMessage({ pollCreationMessage: { name: "?" } }).type, "poll");
+});
+
+test("classifyMessage: عرض-مرة بنوع عقدة أو غلاف أو ephemeral", () => {
+  assert.equal(chatLog.classifyMessage({ imageMessage: { mimetype: "image/jpeg", viewOnce: true } }).type, "image");
+  assert.equal(chatLog.classifyMessage({ viewOnceMessageV2: { message: { imageMessage: { mimetype: "image/jpeg" } } } }).type, "image");
+  assert.equal(chatLog.classifyMessage({ ephemeralMessage: { message: { viewOnceMessage: { message: { videoMessage: { mimetype: "video/mp4" } } } } } }).type, "video");
+  assert.equal(chatLog.classifyMessage({ viewOnceMessageV2: { message: { imageMessage: { mimetype: "image/jpeg" } } } }).viewOnce, true);
+});
+
+test("recordMessage: يحفظ rawKeys لعرض اسم المفتاح في الواجهة", () => {
+  chatLog.recordMessage(UID, JID, rawMsg("k1", { somethingWeirdMessage: {} }));
+  const [m] = chatLog.listMessages(UID, JID, 5);
+  assert.equal(m.type, "unknown");
+  assert.ok((m.rawKeys || []).includes("somethingWeirdMessage"));
+});
+
+test("group-chat-web.js: يعرض اسم المفتاح مع «نوع آخر» وأيقونات الأنواع الجديدة", () => {
+  const src = readFileSync(new URL("../../public/group-chat-web.js", import.meta.url), "utf8");
+  assert.match(src, /labelOf/);
+  assert.match(src, /rawKeys/);
+  assert.match(src, /ألبوم صور/);
+  assert.match(src, /أزرار\/قائمة/);
+});

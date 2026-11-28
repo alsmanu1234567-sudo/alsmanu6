@@ -64,7 +64,18 @@
   const KIND_ICON = {
     image: '🖼️ صورة', video: '🎬 فيديو', audio: '🎤 صوت', ptt: '🎙️ رسالة صوتية',
     sticker: '🧩 ملصق', document: '📄 ملف', location: '📍 موقع', contact: '👤 جهة اتصال',
-    poll: '📊 استبيان', reaction: '❤️ تفاعل', text: '💬 نص', unknown: '❔ نوع آخر',
+    poll: '📊 استبيان', reaction: '❤️ تفاعل', text: '💬 نص',
+    album: '🖼️ ألبوم صور', product: '🛍️ منتج', interactive: '🔘 أزرار/قائمة',
+    system: '⚙️ نظام', event: '📅 مناسبة', media: '📎 وسائط',
+    unknown: '❔ نوع آخر', empty: '␀ فارغة',
+  };
+  // [v8.44.0] لا نقول «نوع آخر» بلا اسم: نُظهر المفتاح الحقيقي للمساعدة في التشخيص
+  const labelOf = (m) => {
+    const base = KIND_ICON[m.type] || `❔ ${m.type || 'نوع آخر'}`;
+    if ((m.type === 'unknown' || !KIND_ICON[m.type]) && (m.rawKeys || []).length) {
+      return `${base} · ${m.rawKeys.join(', ')}`;
+    }
+    return base;
   };
 
   const state = { jid: '', name: '', reply: null, timer: null, lastCount: -1, sending: false };
@@ -139,7 +150,7 @@
 
   function bubble(m) {
     const mine = m.fromMe ? ' me' : '';
-    const kindLabel = m.type && m.type !== 'text' ? `${KIND_ICON[m.type] || m.type}${m.fileName ? ' · ' + esc(m.fileName) : ''}${m.seconds ? ' · ' + m.seconds + 'ث' : ''}` : '';
+    const kindLabel = m.type && m.type !== 'text' ? `${labelOf(m)}${m.fileName ? ' · ' + esc(m.fileName) : ''}${m.seconds ? ' · ' + m.seconds + 'ث' : ''}` : '';
     const kind = kindLabel || m.viewOnce ? `<div class="kind${m.viewOnce ? ' vo' : ''}">${m.viewOnce ? '👁️ عرض مرة واحدة · ' : ''}${kindLabel || 'وسائط'}</div>` : '';
     const rep = m.replyTo ? `<div class="rep">↩ ${esc(m.replyPreview || m.replyTo)}</div>` : '';
     const text = m.text ? `<div>${esc(m.text).replace(/\n/g, '<br>')}</div>` : '';

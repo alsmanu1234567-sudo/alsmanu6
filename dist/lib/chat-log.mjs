@@ -71,22 +71,59 @@ const KIND_BY_KEY = {
   contactMessage: "contact", contactsArrayMessage: "contact",
   pollCreationMessage: "poll", pollCreationMessageV2: "poll", pollCreationMessageV3: "poll",
   reactionMessage: "reaction", eventMessage: "event",
+  albumMessage: "album", productMessage: "product",
+  buttonsMessage: "interactive", listMessage: "interactive",
+  templateMessage: "interactive", interactiveMessage: "interactive",
+  highlyStructuredMessage: "interactive", buttonsResponseMessage: "text",
+  listResponseMessage: "text", templateButtonReplyMessage: "text",
+  protocolMessage: "system", senderKeyDistributionMessage: "system",
+  messageContextInfo: "system", keepInChatMessage: "system",
 };
 
-/** يحدّد نوع الرسالة من أي شكل (مغلّف أم لا). */
+const WRAPPERS = ["viewOnceMessageV2", "viewOnceMessageV2Extension", "viewOnceMessage", "ephemeralMessage", "documentWithCaptionMessage", "editedMessage"];
+
+/** بحث عميق (حتى ٤ طبقات) عن أي مفتاح وسائط/محتوى معروف. */
+function deepFind(message, depth = 0) {
+  if (!message || typeof message !== "object" || depth > 4) return null;
+  for (const [key, type] of Object.entries(KIND_BY_KEY)) {
+    if (message[key]) return { type, key, node: message[key] };
+  }
+  if (message.conversation || message.extendedTextMessage) return { type: "text", key: message.conversation ? "conversation" : "extendedTextMessage", node: message.extendedTextMessage || null };
+  for (const w of WRAPPERS) {
+    if (message[w]?.message) {
+      const inner = deepFind(message[w].message, depth + 1);
+      if (inner) return inner;
+    }
+  }
+  // أي مفتاح ينتهي بـ Message لم نعرفه ⇒ نُعيده كما هو للتشخيص
+  const unknownKey = Object.keys(message).find((k) => /Message$/.test(k) && k !== "messageContextInfo");
+  if (unknownKey) return { type: "unknown", key: unknownKey, node: message[unknownKey] };
+  return null;
+}
+
+/**
+ * يحدّد نوع الرسالة من أي شكل: غلاف، علم viewOnce، أو عقدة مباشرة.
+ * [v8.44.0] صار يبحث بعمق فلا يعطي «نوع آخر» إلا لشيء مجهول فعلاً — ويعيد اسم المفتاح.
+ */
 export function classifyMessage(message) {
   const info = unwrapViewOnce(message);
   if (info) {
-    const kind = mediaKindOf(info.node, info.contentKey) || "document";
+    const kind = mediaKindOf(info.node, info.contentKey) || "media";
     return { type: kind, viewOnce: Boolean(info.viewOnce), node: info.node, contentKey: info.contentKey, inner: info };
   }
   const m = message?.message || message || {};
-  for (const [key, type] of Object.entries(KIND_BY_KEY)) {
-    if (m[key]) return { type, viewOnce: Boolean(m[key]?.viewOnce), node: m[key], contentKey: key, inner: null };
+  const hit = deepFind(m);
+  if (!hit) {
+    const firstKey = Object.keys(m).find((k) => k !== "messageContextInfo") || null;
+    return { type: firstKey ? "unknown" : "empty", viewOnce: false, node: null, contentKey: firstKey };
   }
-  if (m.conversation || m.extendedTextMessage) return { type: "text", viewOnce: false, node: m.extendedTextMessage || null, contentKey: "conversation", inner: null };
-  const firstKey = Object.keys(m)[0] || null;
-  return { type: firstKey ? "unknown" : "unknown", viewOnce: false, node: null, contentKey: firstKey, inner: null };
+  return {
+    type: hit.type,
+    viewOnce: Boolean(hit.node?.viewOnce) || WRAPPERS.slice(0, 3).some((w) => Boolean(m?.[w])),
+    node: hit.node,
+    contentKey: hit.key,
+    inner: null,
+  };
 }
 
 /** يسجّل رسالة واردة/صادرة في سجل المحادثة. */
@@ -125,6 +162,7 @@ export function recordMessage(uid, jid, msg, { sock = null, groupName = null } =
     const entry = {
       id,
       jid,
+      rawKeys: Object.keys(msg.message || {}).slice(0, 4),
       ts,
       fromMe: Boolean(msg.key?.fromMe),
       name: msg.pushName || String(msg.key?.participant || jid).split("@")[0],
