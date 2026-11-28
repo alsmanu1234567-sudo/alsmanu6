@@ -327811,6 +327811,8 @@ async function startBot() {
   await connectDatabase();
   bot = new import_node_telegram_bot_api.default(token, { polling: { interval: 1e3, autoStart: true } });
   setBotRef(bot);
+  // [v8.51.0] مرجع لتيليجرام يستخدمه الويب آب (إرسال البروفايل من بطاقة العضو)
+  import("./lib/tg-send.mjs").then((m) => m.setTgBot(bot)).catch(() => {});
   // [PATCH_FORWARD_INIT_FIX] تهيئة forward.mjs فور إنشاء البوت — بدلاً من الانتظ��ر لأول رسالة واتساب
   // بدون هذ��: _bot=null داخل forward.mjs → handleForwardCallback ترجع false عند كل ضغطة على قسم التحويل
   import('./forward.mjs').then(({ initForward }) => initForward(bot)).catch(() => {});

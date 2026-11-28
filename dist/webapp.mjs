@@ -10,6 +10,8 @@ import { createZip, readZip } from "../services/zip-lite.mjs";
 // كل مستخدم يرى بياناته فقط عبر token خاص به
 // ═══════════════════════════════════════════════════════════════════
 import { userForToken, resolveUid, webappOpenWithoutToken, ownerUid } from "./webapp-auth.mjs";
+import * as MemberCard from "./lib/member-card.mjs";
+import * as TgSend from "./lib/tg-send.mjs";
 import {
   webGetOverview,
   webToggleGroupPin,
@@ -782,6 +784,84 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
       messages: CL().listMessages(uid, jid, limit),
     };
   }));
+  // ══════════ [v8.51.0] بطاقة العضو: بيانات + إجراءات ══════════
+  const _memberGuard = () => {
+    try { return globalThis.__GROUP_GUARD__ || groupGuard || null; } catch { return null; }
+  };
+  const sendTelegramText = (uid, text) => TgSend.sendText(uid, text).catch(() => false);
+  const sendTelegramPhoto = (uid, buf, caption) => (buf?.length ? TgSend.sendPhoto(uid, buf, caption).catch(() => false) : Promise.resolve(false));
+
+  app.get("/api/wa/chat/member", guard(async (uid, req) => {
+    const jid = String(req.query?.jid || "").trim();
+    const id = String(req.query?.id || "").trim();
+    if (!jid.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+    if (!id) throw new Error("معرّف العضو مطلوب");
+    const sock = CL().sockFor(uid, jid);
+    if (!sock) throw new Error("واتساب غير متصل");
+    const card = await MemberCard.getMemberCard({ uid, jid, id, sock, guard: _memberGuard() });
+    // صورة البروفايل بمسار مستقل حتى تبقى البطاقة خفيفة وسريعة
+    if (card.hasPicture) card.pictureUrl = `/api/wa/chat/member/pic?jid=${encodeURIComponent(jid)}&id=${encodeURIComponent(id)}&v=${card.pictureId || ""}`;
+    return card;
+  }));
+
+  app.get("/api/wa/chat/member/pic", guard(async (uid, req, res) => {
+    const jid = String(req.query?.jid || "").trim();
+    const id = String(req.query?.id || "").trim();
+    const sock = CL().sockFor(uid, jid);
+    if (!sock) { res.status(404).json({ error: "واتساب غير متصل" }); return; }
+    const pic = await MemberCard.memberPicture(sock, jid, id);
+    if (!pic?.buffer?.length) { res.status(404).json({ error: "لا توجد صورة" }); return; }
+    res.setHeader("Content-Type", pic.mimetype || "image/jpeg");
+    res.setHeader("Cache-Control", "private, max-age=600");
+    res.end(pic.buffer);
+  }));
+
+  app.post("/api/wa/chat/member/action", parseJson, guard(async (uid, req) => {
+    const jid = String(req.body?.jid || "").trim();
+    const id = String(req.body?.id || "").trim();
+    const action = String(req.body?.action || "").trim().toLowerCase();
+    if (!jid.endsWith("@g.us")) throw new Error("معرّف المجموعة غير صالح");
+    if (!id) throw new Error("معرّف العضو مطلوب");
+    const sock = CL().sockFor(uid, jid);
+    if (!sock) throw new Error("واتساب غير متصل");
+    const guard = _memberGuard();
+    const card = await MemberCard.getMemberCard({ uid, jid, id, sock, guard });
+
+    if (action === "kick" || action === "promote" || action === "demote") {
+      const r = await MemberCard.memberAction({ uid, jid, id, action, sock, guard });
+      const label = action === "kick" ? "تم الطرد" : action === "promote" ? "تم رفع العضو مشرفاً" : "تم تنزيل العضو من الإشراف";
+      return { ok: true, action, message: label, card: { ...card, isAdmin: action === "promote" ? true : action === "demote" ? false : card.isAdmin } };
+    }
+
+    if (action === "to-telegram") {
+      const buf = await MemberCard.pictureBuffer(sock, jid, id);
+      const caption =
+        `👤 *بطاقة عضو*\n` +
+        `الاسم: ${card.name || "—"}\n` +
+        `الرقم: +${card.number || "—"}\n` +
+        `الحالة: ${card.isSuperAdmin ? "مالك المجموعة" : card.isAdmin ? "مشرف" : "عضو"}\n` +
+        `المخالفات: ${card.warnings || 0}${card.violations?.length ? ` (آخرها: ${card.violations[0].reason || card.violations[0].kind})` : ""}\n` +
+        (card.about ? `الوصف: ${card.about}\n` : "");
+      let sent = false;
+      try { sent = Boolean(await sendTelegramPhoto(uid, buf, caption)); } catch { sent = false; }
+      if (!sent) sent = Boolean(await sendTelegramText(uid, caption + (buf ? "" : "\n\n(لا توجد صورة بروفايل ظاهرة)")));
+      if (!sent) throw new Error("تعذّر الإرسال إلى تيليجرام — أرسل /start للبوت أولاً");
+      return { ok: true, action, message: "أُرسل البروفايل إلى تيليجرام ✅" };
+    }
+
+    if (action === "copy-pic") {
+      const r = await MemberCard.copyProfilePicture({ jid, id, sock });
+      return { ok: true, action, message: `تم نسخ صورته إلى صورة البوت ✅ (${Math.round(r.bytes / 1024)} ك.ب)` };
+    }
+
+    if (action === "copy-name") {
+      const r = await MemberCard.copyProfileName({ jid, id, sock, card });
+      return { ok: true, action, message: `تم نسخ اسمه إلى اسم البوت: ${r.name} ✅` };
+    }
+
+    throw new Error("إجراء غير معروف: " + action);
+  }));
+
   // [v8.50.0] بثّ لحظي (SSE): البوت يدفع كل رسالة/حالة قراءة فوراً للويب آب
   app.get("/api/wa/chat/stream", (req, res) => {
     const uid = resolveUid(req);
@@ -2332,6 +2412,6 @@ async function delRule(){
 load();
 setInterval(()=>{if(!document.hidden)load()}, 30000);
 </script>
-<script defer src="/group-chat-web.js?v=8.50.0"></script>
+<script defer src="/group-chat-web.js?v=8.51.0"></script>
 </body>
 </html>`;

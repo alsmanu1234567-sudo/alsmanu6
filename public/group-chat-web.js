@@ -44,7 +44,70 @@
   .gcw-ico.rec{background:#7f1d1d;border-color:#ef4444;animation:gcw-pulse 1s infinite}
   @keyframes gcw-pulse{0%,100%{opacity:1}50%{opacity:.45}}
   .gcw-msg.pending{opacity:.55}
+  .gcw-msg.pressing{transform:scale(.97);filter:brightness(1.18);box-shadow:0 0 0 2px rgba(52,211,153,.55)}
   .gcw-row{display:flex;gap:7px;align-items:flex-end}
+
+  /* ══════ [v8.51.0] بطاقة العضو الزجاجية ══════ */
+  .mbr-bg{position:fixed;inset:0;z-index:10001;display:none;align-items:center;justify-content:center;padding:18px;
+    background:radial-gradient(120% 90% at 50% 0%,rgba(56,189,248,.18),rgba(4,7,15,.72) 60%),rgba(4,7,15,.66);
+    -webkit-backdrop-filter:blur(16px) saturate(150%);backdrop-filter:blur(16px) saturate(150%)}
+  .mbr-bg.open{display:flex;animation:mbr-fade .18s ease-out}
+  @keyframes mbr-fade{from{opacity:0}to{opacity:1}}
+  .mbr-card{position:relative;width:100%;max-width:430px;max-height:88vh;overflow:auto;border-radius:26px;padding:0 0 16px;
+    background:linear-gradient(165deg,rgba(38,48,68,.92),rgba(13,19,33,.96) 55%,rgba(9,13,24,.98));
+    border:1px solid rgba(255,255,255,.13);
+    box-shadow:0 28px 70px rgba(0,0,0,.62),inset 0 1px 0 rgba(255,255,255,.14);
+    -webkit-backdrop-filter:blur(24px) saturate(170%);backdrop-filter:blur(24px) saturate(170%);
+    animation:mbr-up .26s cubic-bezier(.2,.9,.25,1)}
+  @keyframes mbr-up{from{opacity:0;transform:translateY(26px) scale(.96)}to{opacity:1;transform:none}}
+  .mbr-glow{position:absolute;inset:-1px;border-radius:26px;pointer-events:none;
+    background:linear-gradient(120deg,rgba(52,211,153,.35),rgba(56,189,248,.28),rgba(167,139,250,.3));
+    -webkit-mask:linear-gradient(#000,#000) content-box,linear-gradient(#000,#000);
+    -webkit-mask-composite:xor;mask-composite:exclude;padding:1px;opacity:.85}
+  .mbr-top{display:flex;align-items:flex-start;gap:14px;padding:20px 18px 14px}
+  .mbr-av{position:relative;width:76px;height:76px;flex:none;border-radius:50%;padding:3px;
+    background:conic-gradient(from 140deg,#34d399,#38bdf8,#a78bfa,#34d399);box-shadow:0 10px 26px rgba(56,189,248,.28)}
+  .mbr-av img,.mbr-av .ph{width:100%;height:100%;border-radius:50%;object-fit:cover;background:#0f172a;display:flex;align-items:center;justify-content:center;font-size:29px;color:#94a3c0}
+  .mbr-id{flex:1;min-width:0}
+  .mbr-name{font-size:18px;font-weight:900;color:#f4f7ff;line-height:1.3;word-break:break-word}
+  .mbr-num{font-size:12.5px;color:#9fb0cb;margin-top:3px;direction:ltr;text-align:right}
+  .mbr-badges{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+  .mbr-badge{font-size:11px;font-weight:800;padding:3px 9px;border-radius:999px;border:1px solid rgba(255,255,255,.16);
+    background:rgba(255,255,255,.07);color:#cfe0f5}
+  .mbr-badge.admin{background:rgba(52,211,153,.16);border-color:rgba(52,211,153,.45);color:#6ee7b7}
+  .mbr-badge.super{background:rgba(167,139,250,.18);border-color:rgba(167,139,250,.5);color:#c4b5fd}
+  .mbr-badge.warn{background:rgba(251,191,36,.16);border-color:rgba(251,191,36,.45);color:#fcd34d}
+  .mbr-x{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);color:#e6eefc;width:32px;height:32px;border-radius:11px;font-size:15px;cursor:pointer;flex:none}
+  .mbr-sec{margin:4px 16px 0;padding:12px 13px;border-radius:16px;background:rgba(255,255,255,.055);
+    border:1px solid rgba(255,255,255,.09);box-shadow:inset 0 1px 0 rgba(255,255,255,.07)}
+  .mbr-sec h4{margin:0 0 7px;font-size:12px;color:#9fb0cb;font-weight:800;letter-spacing:.2px;display:flex;justify-content:space-between;align-items:center}
+  .mbr-about{font-size:13px;color:#dfe8f7;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+  .mbr-empty{font-size:12.5px;color:#7f8fa8}
+  .mbr-vio{display:flex;gap:9px;align-items:flex-start;padding:7px 0;border-top:1px dashed rgba(255,255,255,.09);font-size:12.5px;color:#dbe6f6}
+  .mbr-vio:first-of-type{border-top:0}
+  .mbr-vio b{color:#fca5a5;font-weight:800;flex:none}
+  .mbr-vio span{color:#8fa2bd;font-size:11px;flex:none}
+  .mbr-acts{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:14px 16px 0}
+  .mbr-btn{display:flex;align-items:center;gap:8px;justify-content:flex-start;padding:11px 12px;border-radius:15px;cursor:pointer;
+    font-family:inherit;font-size:12.5px;font-weight:800;color:#e8f0fd;text-align:right;
+    background:linear-gradient(160deg,rgba(255,255,255,.1),rgba(255,255,255,.045));
+    border:1px solid rgba(255,255,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.1),0 6px 16px rgba(0,0,0,.22);
+    transition:transform .12s ease,filter .12s ease}
+  .mbr-btn:active{transform:scale(.96)}
+  .mbr-btn:disabled{opacity:.5}
+  .mbr-btn .ic{font-size:16px}
+  .mbr-btn.tg{border-color:rgba(56,189,248,.42);background:linear-gradient(160deg,rgba(56,189,248,.2),rgba(56,189,248,.07))}
+  .mbr-btn.pic{border-color:rgba(167,139,250,.42);background:linear-gradient(160deg,rgba(167,139,250,.2),rgba(167,139,250,.07))}
+  .mbr-btn.name{border-color:rgba(52,211,153,.42);background:linear-gradient(160deg,rgba(52,211,153,.2),rgba(52,211,153,.07))}
+  .mbr-btn.kick{border-color:rgba(239,68,68,.5);background:linear-gradient(160deg,rgba(239,68,68,.24),rgba(239,68,68,.08));color:#fecaca}
+  .mbr-btn.wide{grid-column:1 / -1}
+  .mbr-msg{margin:12px 16px 0;font-size:12.5px;border-radius:13px;padding:9px 12px;display:none;line-height:1.55}
+  .mbr-msg.on{display:block}
+  .mbr-msg.ok{background:rgba(52,211,153,.14);border:1px solid rgba(52,211,153,.4);color:#a7f3d0}
+  .mbr-msg.err{background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.42);color:#fecaca}
+  .mbr-load{display:flex;align-items:center;justify-content:center;gap:10px;padding:38px 18px;color:#9fb0cb;font-size:13px}
+  .mbr-spin{width:18px;height:18px;border-radius:50%;border:2px solid rgba(255,255,255,.2);border-top-color:#34d399;animation:mbr-rot .8s linear infinite}
+  @keyframes mbr-rot{to{transform:rotate(360deg)}}
   `;
 
   function ensureStyle() {
@@ -113,7 +176,7 @@
           '<button class="gcw-send" id="gcw-send">إرسال</button>' +
         '</div>' +
         '<input type="file" id="gcw-file" accept="image/*" style="display:none">' +
-        '<div class="gcw-note" id="gcw-note">اضغط على أي رسالة للردّ عليها · وصول الرسائل لحظي من واتساب</div>' +
+        '<div class="gcw-note" id="gcw-note">ضغط قصير = ردّ · ضغط مطوّل على رسالة عضو = بطاقة العضو والإجراءات</div>' +
       '</div>';
     document.body.appendChild(bg);
 
@@ -200,7 +263,10 @@
     const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 120;
     body.innerHTML = messages.map(bubble).join('');
     body.querySelectorAll('.gcw-msg').forEach((n) => {
+      const _m = messages.find((x) => x.id === n.dataset.id) || null;
+      if (_m) longPress(n, _m);
       n.onclick = (ev) => {
+        if (n.dataset.skip) return;
         // الضغط على وسيط ميديا أو زر تنزيل لا يعني «ردّ»
         if (ev.target.closest('[data-media]') || ev.target.closest('[data-dl]') || ev.target.tagName === 'AUDIO') return;
         const m = messages.find((x) => x.id === n.dataset.id) || null;
@@ -317,7 +383,9 @@
     const node = wrap.firstElementChild;
     if (!node) return null;
     if (pending) node.classList.add('pending');
+    longPress(node, m);
     node.onclick = (ev) => {
+      if (node.dataset.skip) return;
       if (ev.target.closest('[data-media]') || ev.target.closest('[data-dl]') || ev.target.tagName === 'AUDIO') return;
       setReply({ id: node.dataset.id, preview: node.dataset.preview, type: m.type });
     };
@@ -499,5 +567,163 @@
     state.jid = '';
   }
 
-  window.ChatUI = { open, close, load };
+
+  // ═══════════════════════════════════════════════════════════════════
+  // [v8.51.0] بطاقة العضو الزجاجية — ضغط مطوّل على أي رسالة
+  // ═══════════════════════════════════════════════════════════════════
+  const fmtDate = (ts) => {
+    try {
+      const d = new Date(ts);
+      return d.toLocaleDateString('ar', { day: '2-digit', month: 'short' }) + ' · ' + d.toLocaleTimeString('ar', { hour: '2-digit', minute: '2-digit' });
+    } catch { return ''; }
+  };
+  const VIO_LABEL = { warned: 'تحذير', kicked: 'طرد', deleted: 'حذف رسالة', join: 'انضمام', left: 'خروج' };
+
+  function memberSheetShell(inner) {
+    let bg = el('mbr-bg');
+    if (!bg) {
+      bg = document.createElement('div');
+      bg.className = 'mbr-bg';
+      bg.id = 'mbr-bg';
+      document.body.appendChild(bg);
+      bg.addEventListener('click', (ev) => { if (ev.target === bg) closeMemberSheet(); });
+    }
+    bg.innerHTML = '<div class="mbr-card"><div class="mbr-glow"></div>' + inner + '</div>';
+    bg.classList.add('open');
+    return bg;
+  }
+  function closeMemberSheet() {
+    const bg = el('mbr-bg');
+    if (bg) bg.classList.remove('open');
+  }
+
+  function memberCardHTML(c) {
+    const av = c.pictureUrl
+      ? `<img src="${c.pictureUrl}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'👤'}))">`
+      : '<div class="ph">👤</div>';
+    const badge = (t, cls) => `<span class="mbr-badge ${cls || ''}">${esc(t)}</span>`;
+    const badges = [
+      c.isSuperAdmin ? badge('👑 مالك المجموعة', 'super') : c.isAdmin ? badge('🛡️ مشرف', 'admin') : badge('عضو'),
+      c.isMe ? badge('هذا أنت') : '',
+      (c.warnings > 0) ? badge(`⚠️ ${c.warnings} تحذير`, 'warn') : '',
+      c.kickedBefore ? badge('🚪 طُرد سابقاً', 'warn') : '',
+    ].filter(Boolean).join('');
+    const vio = (c.violations || []).length
+      ? c.violations.map((v) => `<div class="mbr-vio"><b>${esc(VIO_LABEL[v.kind] || v.kind || 'حدث')}</b><div style="flex:1">${esc(v.reason || v.text || '—')}</div><span>${esc(fmtDate(v.at))}</span></div>`).join('')
+      : '<div class="mbr-empty">لا مخالفات مسجّلة على هذا العضو ✅</div>';
+    return `
+      <div class="mbr-top">
+        <div class="mbr-av">${av}</div>
+        <div class="mbr-id">
+          <div class="mbr-name">${esc(c.name || 'عضو')}</div>
+          <div class="mbr-num">+${esc(c.number || '—')}</div>
+          <div class="mbr-badges">${badges}</div>
+        </div>
+        <button class="mbr-x" id="mbr-close">✕</button>
+      </div>
+      ${c.about ? `<div class="mbr-sec"><h4>الوصف / الحالة</h4><div class="mbr-about">${esc(c.about)}</div></div>` : ''}
+      <div class="mbr-sec">
+        <h4><span>المخالفات</span><span style="color:#fcd34d">${(c.violations || []).length}</span></h4>
+        ${vio}
+      </div>
+      <div class="mbr-msg" id="mbr-msg"></div>
+      <div class="mbr-acts">
+        <button class="mbr-btn tg" data-act="to-telegram"><span class="ic">📩</span> إرسال البروفايل لتيليجرام</button>
+        <button class="mbr-btn pic" data-act="copy-pic"><span class="ic">🖼️</span> نسخ صورته إلى صورتي</button>
+        <button class="mbr-btn name" data-act="copy-name"><span class="ic">✏️</span> نسخ اسمه إلى اسمي</button>
+        ${c.isAdmin && !c.isSuperAdmin
+          ? `<button class="mbr-btn" data-act="demote"><span class="ic">⬇️</span> تنزيل من الإشراف</button>`
+          : `<button class="mbr-btn" data-act="promote"><span class="ic">⬆️</span> رفع مشرف</button>`}
+        <button class="mbr-btn kick wide" data-act="kick"><span class="ic">🚪</span> طرد من المجموعة</button>
+      </div>`;
+  }
+
+  function sheetMsg(text, kind) {
+    const n = el('mbr-msg');
+    if (!n) return;
+    n.className = 'mbr-msg on ' + (kind === 'err' ? 'err' : 'ok');
+    n.textContent = text;
+  }
+
+  function wireMemberCard(card) {
+    const bg = el('mbr-bg');
+    if (!bg) return;
+    el('mbr-close').onclick = closeMemberSheet;
+    bg.querySelectorAll('[data-act]').forEach((btn) => {
+      btn.onclick = async () => {
+        const act = btn.dataset.act;
+        const danger = act === 'kick';
+        if (danger && !confirm(`طرد ${card.name || 'العضو'} من المجموعة؟`)) return;
+        const label = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="ic">⏳</span> جارٍ التنفيذ…';
+        try {
+          const out = await api('/api/wa/chat/member/action', { jid: state.jid, id: card.id, action: act });
+          sheetMsg(out.message || 'تم ✅', 'ok');
+          if (act === 'kick' || act === 'promote' || act === 'demote') {
+            const fresh = out.card || card;
+            const nameEl = bg.querySelector('.mbr-name');
+            const badgesEl = bg.querySelector('.mbr-badges');
+            if (nameEl && fresh.name) nameEl.textContent = fresh.name;
+            if (badgesEl) {
+              const b = [];
+              b.push(fresh.isSuperAdmin ? '<span class="mbr-badge super">👑 مالك المجموعة</span>' : fresh.isAdmin ? '<span class="mbr-badge admin">🛡️ مشرف</span>' : '<span class="mbr-badge">عضو</span>');
+              if (fresh.isMe) b.push('<span class="mbr-badge">هذا أنت</span>');
+              badgesEl.innerHTML = b.join('');
+            }
+            if (act === 'kick') setTimeout(closeMemberSheet, 1200);
+          }
+        } catch (e) {
+          sheetMsg(e.message || 'فشل الإجراء', 'err');
+        }
+        btn.disabled = false;
+        btn.innerHTML = label;
+      };
+    });
+  }
+
+  async function openMemberSheet(m) {
+    if (!m) return;
+    if (m.fromMe) { toast('هذه رسالتك — الضغط المطوّل يعمل على رسائل الأعضاء'); return; }
+    const id = m.participant || m.author || null;
+    if (!id) { toast('لا يمكن تحديد صاحب الرسالة'); return; }
+    memberSheetShell('<div class="mbr-load"><span class="mbr-spin"></span> جارٍ تحميل بطاقة العضو…</div>');
+    try {
+      const card = await api('/api/wa/chat/member?jid=' + encodeURIComponent(state.jid) + '&id=' + encodeURIComponent(id));
+      card.id = id;
+      memberSheetShell(memberCardHTML(card));
+      wireMemberCard(card);
+    } catch (e) {
+      memberSheetShell('<div class="mbr-load">⚠️ ' + esc(e.message || 'تعذّر التحميل') + '</div>');
+      el('mbr-close') && (el('mbr-close').onclick = closeMemberSheet);
+    }
+  }
+
+  function longPress(node, m) {
+    let timer = null;
+    let moved = false;
+    let longFired = false;
+    const start = () => {
+      moved = false;
+      longFired = false;
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        longFired = true;
+        try { node.classList.add('pressing'); } catch {}
+        try { if (navigator.vibrate) navigator.vibrate(18); } catch {}
+        openMemberSheet(m);
+      }, 460);
+    };
+    const cancel = () => { clearTimeout(timer); timer = null; try { node.classList.remove('pressing'); } catch {} };
+    node.addEventListener('touchstart', start, { passive: true });
+    node.addEventListener('touchmove', () => { moved = true; cancel(); }, { passive: true });
+    node.addEventListener('touchend', () => { cancel(); if (longFired) { try { node.dataset.skip = '1'; setTimeout(() => { try { delete node.dataset.skip; } catch {} }, 400); } catch {} } });
+    node.addEventListener('touchcancel', cancel);
+    node.addEventListener('mousedown', (e) => { if (e.button === 0) start(); });
+    node.addEventListener('mouseup', cancel);
+    node.addEventListener('mouseleave', cancel);
+    node.addEventListener('contextmenu', (e) => { e.preventDefault(); openMemberSheet(m); });
+  }
+
+  window.ChatUI = { open, close, load, openMemberSheet };
 })();
