@@ -425,6 +425,24 @@ function _voGroupAllowed(sett, { jid, groupName }) {
   return sett.groups.some((f) => _viewOnceMod.groupMatches(f, { jid, subject: groupName || "" }));
 }
 
+// [v8.47.1] «ممنوع الفشل الصامت»: إن استُخرجت الوسائط ولم تُرسل، نقول السبب
+// صراحةً في السجل + رسالة واحدة للمستخدم كل ٦ ساعات (بلا إغراق).
+const _voSkipNoticedAt = new Map();
+function _voSkipNotice(bot, chatId, reason) {
+  try {
+    if (!bot || !Number.isFinite(Number(chatId))) return;
+    const key = `${chatId}|${reason}`;
+    const now = Date.now();
+    if (now - (_voSkipNoticedAt.get(key) || 0) < 6 * 60 * 60 * 1000) return;
+    if (_voSkipNoticedAt.size > 200) _voSkipNoticedAt.clear();
+    _voSkipNoticedAt.set(key, now);
+    bot.sendMessage(Number(chatId),
+      `⚠️ *عرض-المرة: استُخرجت الوسائط لكن لم تُرسل*\n\nالسبب: ${reason}\n\n` +
+      `الحل: أرسل /viewonce_on لتشغيل الإرسال التلقائي، ثم /peek لإرسال ما حُفظ الآن (الرام ٣٠ دقيقة).`,
+      { parse_mode: "Markdown", disable_web_page_preview: true }).catch(() => {});
+  } catch { }
+}
+
 /** إرسال وسيط إلى تيليجرام بأول طريقة ناجحة (مستند كبديل دائماً). */
 async function _voSendToTelegram(bot, chatId, { buffer, kind, caption, mimetype, filename }) {
   if (!bot || chatId === null || chatId === undefined) return { ok: false, method: null, errors: ["لا بوت/محادثة"] };
@@ -563,6 +581,15 @@ async function _captureViewOnce({ sock, msg, userId, jid, isGroup, senderName, b
     sent = { ok: false, method: null, errors: ["الإرسال التلقائي معطّل — /viewonce on لتشغيله، أو /peek لإرسال المحفوظ"], skipped: true };
   } else if (!allowed) {
     sent = { ok: false, method: null, errors: [`المجموعة «${groupName || jid}» ليست ضمن الفلاتر`], skipped: true };
+  }
+  // [v8.47.1] إن تُخطّي الإرسال بلا سبب واضح ⇒ سجّله وأبلغ مرة واحدة
+  if (!sent.ok && sent.skipped) {
+    const _why = (sent.errors || ["سبب غير معروف"])[0];
+    try {
+      logger.warn({ jid, id, kind: info.kind, deliver, enabled: sett.enabled, allowed, group: groupName, reason: _why },
+        "[VIEW-ONCE] ⊘ استُخرجت الوسائط ولم تُرسل إلى تيليجرام — السبب أعلاه");
+    } catch { }
+    _voSkipNotice(bot, tgChatId, _why);
   }
   // ④ استمرار المحاولة بلا توقف البوت
   if (!dl.buffer?.length && retryTries > 0) {

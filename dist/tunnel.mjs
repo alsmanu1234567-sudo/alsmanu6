@@ -339,6 +339,19 @@ function _startTunnelWatch(getArgs) {
 
 // ─── نقطة الدخول ─────────────────────────────────────────────────────
 export async function startTunnel(port, logger, onUrl) {
+  // [v8.47.1] رابط ثابت (منفذ الاستضافة) يغني عن النفق تماماً. النفق كان يبدأ
+  // قبل تأكيد الرابط الثابت بجزء من الثانية فيُنشئ نطاقاً ميتاً بلا داعٍ.
+  try {
+    if (!globalThis.__SKIP_TUNNEL__ && !globalThis.__STABLE_BASE__ && !_url) {
+      await new Promise((r) => setTimeout(r, 6000));
+    }
+  } catch { }
+  if (globalThis.__SKIP_TUNNEL__ || globalThis.__STABLE_BASE__) {
+    // ملاحظة: log() داخل الدالة يُعرَّف بعد هذا الموضع ⇒ نستخدم console/logger
+    try { (logger?.info ? (m) => logger.info(m) : console.log)("[TUNNEL] يوجد رابط ثابت — لا ننشئ نفقاً إطلاقاً"); } catch { }
+    return null;
+  }
+
   _startTunnelWatch(() => ({ port, logger, onUrl }));
   const log = (m) => { try { logger ? logger.info(m) : console.log(m); } catch { console.log(m); } };
   if (_starting || _url) return _url;
