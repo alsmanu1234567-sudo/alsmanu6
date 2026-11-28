@@ -281,3 +281,55 @@ test("system-handler: /viewonce group كيك يمرّر الاسم كما هو",
   await SYS.handleText(fakeBot(), { text: "/viewonce group كيك", chat: { id: 770001 }, from: { id: 770001 } });
   assert.equal(arg, "group كيك");
 });
+
+// ── ⑧ [v8.38.0] الشرطة السفلية: /viewonce_on · /viewonce_group_كيك · /peek_كيك ──
+test("system-handler: /viewonce_on يعمل مثل /viewonce on", async () => {
+  let arg = null;
+  SYS.setDeps(sysDeps({ viewOnceCommand: (uid, a) => { arg = a; return { ok: true, text: "✅ on" }; } }));
+  const handled = await SYS.handleText(fakeBot(), { text: "/viewonce_on", chat: { id: 770001 }, from: { id: 770001 } });
+  assert.equal(handled, true);
+  assert.equal(arg, "on");
+});
+
+test("system-handler: /viewonce_group_كيك يمرّر «group كيك»", async () => {
+  let arg = null;
+  SYS.setDeps(sysDeps({ viewOnceCommand: (uid, a) => { arg = a; return { ok: true, text: "ok" }; } }));
+  await SYS.handleText(fakeBot(), { text: "/viewonce_group_كيك", chat: { id: 770001 }, from: { id: 770001 } });
+  assert.equal(arg, "group كيك");
+});
+
+test("system-handler: /peek_كيك يستخرج من «كيك»", async () => {
+  let q = null;
+  SYS.setDeps(sysDeps({ peekViewOnce: async (uid, query) => { q = query; return { ok: true, text: "✅ أُرسل" }; } }));
+  const handled = await SYS.handleText(fakeBot(), { text: "/peek_كيك", chat: { id: 770001 }, from: { id: 770001 } });
+  assert.equal(handled, true);
+  assert.equal(q, "كيك");
+});
+
+test("system-handler: /peek_120363000000000999 يعمل بالمعرّف", async () => {
+  let q = null;
+  SYS.setDeps(sysDeps({ peekViewOnce: async (uid, query) => { q = query; return { ok: false, text: "لا شيء" }; } }));
+  await SYS.handleText(fakeBot(), { text: "/peek_120363000000000999", chat: { id: 770001 }, from: { id: 770001 } });
+  assert.equal(q, "120363000000000999");
+});
+
+test("system-handler: /vodebug يعرض تقرير التشخيص", async () => {
+  const bot = fakeBot();
+  SYS.setDeps(sysDeps({ viewOnceDebug: () => "🔎 تشخيص «عرض مرة واحدة»" }));
+  const handled = await SYS.handleText(bot, { text: "/vodebug", chat: { id: 770001 }, from: { id: 770001 } });
+  assert.equal(handled, true);
+  assert.ok(bot.calls.some((c) => /تشخيص/.test(String(c.payload))));
+});
+
+test("system-handler: /vo_debug يعمل أيضاً", async () => {
+  const bot = fakeBot();
+  SYS.setDeps(sysDeps({ viewOnceDebug: () => "تقرير" }));
+  await SYS.handleText(bot, { text: "/vo_debug", chat: { id: 770001 }, from: { id: 770001 } });
+  assert.ok(bot.calls.some((c) => /تقرير/.test(String(c.payload))));
+});
+
+test("system-handler: أوامر أخرى لا تُخطف (‎/peeking نص عادي)", async () => {
+  SYS.setDeps(sysDeps({ peekViewOnce: async () => ({ ok: true, text: "x" }) }));
+  const handled = await SYS.handleText(fakeBot(), { text: "/peeking", chat: { id: 770001 }, from: { id: 770001 } });
+  assert.equal(handled, false);
+});

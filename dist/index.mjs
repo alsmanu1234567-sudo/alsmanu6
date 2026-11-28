@@ -89,6 +89,22 @@ globalThis.__dirname = __bannerPath.dirname(globalThis.__filename);
 //   • /peek ‏[اسم المجموعة] يستخرج ويُرسل الآن — حتى لو انتهى الغلاف أو الرابط
 // ═══════════════════════════════════════════════════════════════════════════
 
+// [VOTRACE v8.38.0] آخر ما وصل فعلاً — لتشخيص «البوت ما بينزّل» بأدلة لا بتخمين
+const _voTrace = [];
+const _voLastCaptures = [];
+function _voTracePush(rec) {
+  try {
+    _voTrace.push(rec);
+    if (_voTrace.length > 40) _voTrace.shift();
+  } catch { }
+}
+function _voTraceCapture(rep) {
+  try {
+    _voLastCaptures.unshift(rep);
+    if (_voLastCaptures.length > 12) _voLastCaptures.pop();
+  } catch { }
+}
+
 function _voNowLabel() {
   try { return new Date().toLocaleString("ar", { timeZone: "Africa/Khartoum" }); }
   catch { return new Date().toISOString(); }
@@ -125,7 +141,8 @@ function _voGroupsList(userId) {
 function _voSettingsOf(user) {
   const s = user?.viewOnceSettings || {};
   const ms = user?.msgSettings || {};
-  const enabled = ms.viewOnceEnabled ?? s.enabled ?? false;
+  // [v8.38.0] الافتراضي مفعّل — «عرض مرة واحدة» يصل تلقائياً بلا أي أمر
+  const enabled = ms.viewOnceEnabled ?? s.enabled ?? true;
   const groups = Array.isArray(s.groups) ? s.groups.filter(Boolean) : [];
   const target = ms.viewOnceTarget ?? s.target ?? "all";
   return { enabled: Boolean(enabled), groups, target };
@@ -238,7 +255,9 @@ async function _captureViewOnce({ sock, msg, userId, jid, isGroup, senderName, b
   if (!dl.buffer?.length && retryTries > 0) {
     _voScheduleRetry({ sock, msg, userId, jid, isGroup, senderName, botRef: bot, deliver, retryTries: retryTries - 1 }, retryTries - 1);
   }
-  return { ok: Boolean(dl.buffer?.length), reason: dl.buffer?.length ? null : "no-bytes", id, jid, kind: info.kind, via: dl.via, attempts: dl.attempts, errors: dl.errors, sent, groupName, caption, bytes: dl.buffer?.length || 0 };
+  const _voRep = { ts: Date.now(), id, jid, kind: info.kind, ok: Boolean(dl.buffer?.length), via: dl.via, attempts: dl.attempts, bytes: dl.buffer?.length || 0, sent: sent.ok ? sent.method : null, sentErr: sent.ok ? null : (sent.errors || []).slice(0, 2).join(" | "), skipped: Boolean(sent.skipped), errors: (dl.errors || []).slice(-2) };
+  _voTraceCapture(_voRep);
+  return _voRep;
 }
 
 /**
@@ -287,6 +306,36 @@ async function _peekViewOnce(userId, query, bot, chatId) {
     return { ok: false, text: `⚠️ تم الاستخراج (${dl.buffer.length} بايت) لكن فشل الإرسال:\n${sent.errors.slice(-3).map((e) => `• ${e}`).join("\n")}` };
   }
   return { ok: true, text: `✅ أُرسل محتوى «عرض مرة واحدة» من «${target.groupName || target.jid}» — عبر ${sent.method} (${Math.round(dl.buffer.length / 1024)}KB، المصدر: ${dl.via}).` };
+}
+
+/** [VODEBUG v8.38.0] تقرير أدلّة: ماذا وصل؟ وهل حُوّل؟ وبأي طريقة؟ */
+function _voDebugText(userId) {
+  const groups = _voGroupsList(userId);
+  const nameOf = (jid) => groups.find((g) => g.jid === jid)?.subject || String(jid || "").split("@")[0];
+  const fmtTime = (ts) => { try { return new Date(ts).toLocaleTimeString("ar", { timeZone: "Africa/Khartoum" }); } catch { return "?"; } };
+  const lines = ["🔎 *تشخيص «عرض مرة واحدة»*", ""];
+  const caps = _voLastCaptures.slice(0, 5);
+  if (caps.length) {
+    lines.push("*آخر محاولات الالتقاط:*");
+    for (const c of caps) {
+      const state = c.ok ? `✅ ${c.bytes}B (${c.via}${c.attempts > 1 ? `، ${c.attempts} محاولة` : ""})` : `✖ بلا بايتات${c.errors?.length ? ` — ${c.errors[0]}` : ""}`;
+      const sent = c.sent ? `→ تيليجرام ${c.sent}` : `→ لم يُرسل${c.skipped ? " (متخطّى)" : ""}${c.sentErr ? `: ${c.sentErr}` : ""}`;
+      lines.push(`• ${fmtTime(c.ts)} · «${nameOf(c.jid)}» · ${c.kind} · ${state} ${sent}`);
+    }
+  } else {
+    lines.push("⚠️ لم تُسجّل أي محاولة التقاط بعد (يعني: لم يصل شيء يُعتبر «عرض مرة واحدة»).");
+  }
+  lines.push("");
+  const tr = _voTrace.slice(-10).reverse();
+  if (tr.length) {
+    lines.push("*آخر الرسائل الواصلة (أنواعها):*");
+    for (const t of tr) {
+      lines.push(`• ${fmtTime(t.ts)} · «${nameOf(t.jid)}» · ${(t.keys || []).join(", ")}${t.vo ? ` ⇒ 🔓 ${t.vo}` : ""}`);
+    }
+  } else {
+    lines.push("⚠️ لا تتبّع للرسائل — السوكت لم يستقبل شيئاً بعد التحديث.");
+  }
+  return lines.join("\n").slice(0, 3800);
 }
 
 /** [VIEW-ONCE v8.37.0] أمر /viewonce — تشغيل/إيقاف/قصر الإرسال على مجموعة. */
@@ -340,12 +389,14 @@ function _viewOnceStatusText(user) {
     `الحالة: ${sett.enabled ? "✅ مفعّل" : "⛔️ متوقف"}`,
     `المجموعات: ${sett.groups.length ? sett.groups.map((g) => `«${g}»`).join(" · ") : "الكل"}`,
     "",
-    "الأوامر:",
-    "• /viewonce on — تشغيل الإرسال التلقائي",
-    "• /viewonce off — إيقافه (يبقى الحفظ)",
-    "• /viewonce group كيك — قصر الإرسال على مجموعة",
-    "• /viewonce all — إلغاء القصر",
-    "• /peek كيك — استخراج وإرسال أحدث واحد الآن",
+    "الأوامر (بالشرطة السفلية — كما في تيليجرام):",
+    "• /viewonce_on — تشغيل الإرسال التلقائي",
+    "• /viewonce_off — إيقافه (يبقى الحفظ)",
+    "• /viewonce_group_كيك — قصر الإرسال على مجموعة «كيك»",
+    "• /viewonce_all — إلغاء القصر",
+    "• /peek_كيك — استخراج وإرسال أحدث واحد الآن",
+    "• /vodebug — تشخيص: ماذا وصل فعلاً ولماذا لم يُرسل",
+    "ℹ️ الصيغة بالمسافة مقبولة أيضاً، والافتراضي الآن *مفعّل*.",
     stats ? `\n📦 المحفوظ على القرص: ${stats.messages} رسالة · ${stats.mediaItems} وسيط (${Math.round((stats.mediaBytes || 0) / 1024)}KB)` : "",
   ].filter(Boolean).join("\n");
 }
@@ -295501,6 +295552,20 @@ function registerMessageHandler(sock, userId) {
       const sock = sock2;
       const jid = msg.key.remoteJid || "";
       if (!jid) return; // [DISPATCH-FIX]
+      // ── [VIEW-ONCE-EARLY v8.38.0] أول شيء يحدث: لا يوجد أي return قبله يمكنه ابتلاع «عرض مرة واحدة» ──
+      try {
+        if (msg.message) {
+          const _voScan = _viewOnceMod.unwrapViewOnce(msg.message);
+          _voTracePush({ ts: Date.now(), jid, id: msg.key?.id, keys: Object.keys(msg.message).slice(0, 8), vo: _voScan ? `${_voScan.kind}${_voScan.viewOnce ? "/vo" : ""}` : null });
+          if (_voScan) {
+            const _voIsGroup = jid.endsWith("@g.us");
+            const _voSender = msg.pushName || String(msg.key?.participant || jid).split("@")[0];
+            _captureViewOnce({ sock, msg, userId, jid, isGroup: _voIsGroup, senderName: _voSender, botRef, deliver: true, retryTries: 5 })
+              .catch((err) => { try { logger.warn({ err: String(err?.message || err) }, "[VIEW-ONCE] فشل الالتقاط"); } catch { } });
+            return;
+          }
+        }
+      } catch (err) { try { logger.warn({ err: String(err?.message || err) }, "[VIEW-ONCE] فحص مبكر فشل"); } catch { } }
       // [META-AI] ردود محادثة Meta AI تُقرأ فقط عبر مزوّد الذكاء — لا تُعالج كرسالة عادية
       if (/^13135550002@/.test(jid)) return;
       if (jid === "status@broadcast") {
@@ -298227,19 +298292,7 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
         catch (err) { logger.error({err}, 'Auto-reply interaction failed'); if (interactionId.startsWith('mxo:')) await sock.sendMessage(jid,{text:err?.message||'تعذر تنفيذ الدعوة'}); }
         return;
       }
-      // ── [VIEW-ONCE v8.37.0] «عرض مرة واحدة» ⇒ حفظ فوري + استخراج بلا غلاف + إرسال لتيليجرام ──
-      // لا يعتمد على تفعيل الإعدادات للحفظ: البايتات تُخزَّن دائماً، و/peek يُرسلها لاحقاً.
-      const _voInfo = _viewOnceMod.unwrapViewOnce(msg.message);
-      if (_voInfo) {
-        _captureViewOnce({ sock, msg, userId, jid, isGroup, senderName, botRef, deliver: true, retryTries: 5 })
-          .then((rep) => {
-            try {
-              logger.info({ jid, id: rep?.id, kind: rep?.kind, ok: rep?.ok, via: rep?.via, bytes: rep?.bytes, sent: rep?.sent?.method || null, skipped: rep?.sent?.skipped || false }, "[VIEW-ONCE] نتيجة الالتقاط");
-            } catch { }
-          })
-          .catch((err) => { try { logger.warn({ err: String(err?.message || err) }, "[VIEW-ONCE] خطأ غير متوقع في الالتقاط"); } catch { } });
-        return; // [DISPATCH-FIX]
-      }
+      // [VIEW-ONCE-EARLY v8.38.0] انتقل الفحص إلى أعلى دالة _dispatchIncomingMsg
       const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
       const user = getUser(userId);
       const ms2 = user.msgSettings || {};
@@ -327383,6 +327436,7 @@ async function startBot() {
       // [VIEW-ONCE v8.37.0] استخراج «عرض مرة واحدة» وإرساله من محادثة تيليجرام مباشرة
       peekViewOnce: async (uid, query, bot, chatId) => _peekViewOnce(uid, query, bot, chatId),
       viewOnceCommand: (uid, arg) => _viewOnceCommand(uid, arg),
+      viewOnceDebug: (uid) => _voDebugText(uid),
     };
 
     // ── deps الـ text-handler ──────────────────────────────────────────────────
