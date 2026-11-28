@@ -128,7 +128,14 @@ function _panelPids() {
     if (!/^\d+$/.test(pid)) continue;
     try {
       const cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim();
-      if (cmd.includes("server-control") && cmd.includes("node")) out.push(Number(pid));
+      if (!(cmd.includes("server-control") && cmd.includes("node"))) continue;
+      // [v8.49.3] تجاهل العمليات الميتة/الزومبي — كانت تمنع تشغيل اللوحة من جديد
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        if (/\bZ\b/.test(stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3))) continue;
+      } catch { continue; }
+      try { process.kill(Number(pid), 0); } catch { continue; }
+      out.push(Number(pid));
     } catch {}
   }
   return out;
@@ -147,6 +154,35 @@ async function _stopPanel() {
   return { stopped: pids.length, forced: left.length };
 }
 
+/** منفذ حر للوحة (منفصل تماماً عن منفذ البوت 5000). */
+function _pickFreePort() {
+  return new Promise((resolve) => {
+    const srv = http.createServer(() => {});
+    srv.on("error", () => resolve(null));
+    srv.listen(0, "127.0.0.1", () => {
+      const p = srv.address()?.port || null;
+      try { srv.close(() => resolve(p)); } catch { resolve(p); }
+    });
+  });
+}
+
+function _panelLogPath() {
+  try {
+    const base = String(process.env.BOT_EXTERNAL_DEPS_DIR || "").trim() || "/tmp";
+    const dir = base.endsWith("bot-data") ? base : `${base}/bot-data`;
+    return `${dir}/panel-start.log`;
+  } catch { return "/tmp/panel-start.log"; }
+}
+
+function _panelLogTail(lines = 8) {
+  try {
+    const p = _panelLogPath();
+    if (!existsSync(p)) return "";
+    const txt = readFileSync(p, "utf8");
+    return txt.split("\n").filter(Boolean).slice(-lines).join("\n").slice(-900);
+  } catch { return ""; }
+}
+
 async function _startPanel() {
   // [v8.48.8] لا نولّد عملية جديدة إن كانت هناك عملية لوحة قائمة أصلاً
   // (حتى لو لم تستجب بعد) — كان التوليد المتكرر يستهلك الرام ويخنق السيرفر.
@@ -156,23 +192,37 @@ async function _startPanel() {
   const dir = PANEL_DIR();
   const entry = ["server.mjs", "index.mjs", "app.mjs"].map((f) => join(dir, f)).find((p) => existsSync(p));
   if (!entry) throw new Error(`لم أجد ملف تشغيل اللوحة في ${dir}`);
+  // [v8.49.3] السبب الحقيقي للفشل: كنا نمرّر PORT=5000 (منفذ البوت) للوحة
+  // فتموت فوراً بـ EADDRINUSE. الآن منفذ حر خاص + التقاط سجلّها لعرض السبب.
+  const freePort = (await _pickFreePort()) || 39461;
+  let out = null;
+  try {
+    const fsMod = await import("node:fs");
+    out = fsMod.createWriteStream(_panelLogPath(), { flags: "a" });
+    out.write(`\n\n===== تشغيل اللوحة ${new Date().toISOString()} · port=${freePort} =====\n`);
+  } catch {}
   const child = spawn(process.execPath, [entry], {
     cwd: dir,
     detached: true,
-    stdio: "ignore",
-    env: { ...process.env },
+    stdio: ["ignore", out || "ignore", out || "ignore"],
+    env: { ...process.env, PORT: String(freePort), HOST: "127.0.0.1", SERVER_CONTROL_PORT: String(freePort) },
   });
   child.unref();
-  await new Promise((r) => setTimeout(r, 3000));
+  await new Promise((r) => setTimeout(r, 4000));
   _panelCache = { port: null, at: 0 };
-  const port = await panelPort();
-  const alive = await _panelAlive(port);
-  // إن فشلت الإقلاع نقتل العملية بدل ترك عمليات متراكمة
-  if (!alive) {
-    try { if (child.pid) process.kill(child.pid, "SIGKILL"); } catch {}
-    _lastStartErr = _lastStartErr || "العملية أقُلعت لكن اللوحة لم تستجب على أي منفذ";
+  let port = await panelPort();
+  let alive = await _panelAlive(port);
+  if (!alive && !port) {
+    // جرّب المنفذ الذي أعطيناه مباشرة
+    if (await _panelAlive(freePort)) { port = freePort; alive = true; _panelCache = { port, at: Date.now() }; }
   }
-  return { started: child.pid || null, port, alive };
+  if (!alive) {
+    const tail = _panelLogTail(8);
+    _lastStartErr = `اللوحة لم تستجب (منفذ ${freePort})${tail ? ` — آخر سجلها: ${tail}` : ""}`;
+    try { if (child.pid) process.kill(child.pid, "SIGKILL"); } catch {}
+  }
+  try { out?.end?.(); } catch {}
+  return { started: child.pid || null, port, alive, freePort, log: alive ? null : _panelLogTail(6) };
 }
 
 // ─── الوكيل: /srv/panel/* → لوحة السيرفر الأصلية ──────────────────
@@ -181,7 +231,9 @@ async function _proxy(req, res, prefix) {
   if (!port || !(await _panelAlive(port))) port = await ensurePanel(true);
   if (!port || !(await _panelAlive(port))) {
     res.status(503).json({
-      error: `لوحة السيرفر لا تعمل — حاولت تشغيلها تلقائياً${_lastStartErr ? ` وفشلت: ${_lastStartErr}` : " ولم تستجب بعد"}`,
+      error: _lastStartErr
+        ? `لوحة السيرفر لا تعمل — ${_lastStartErr}`
+        : "لوحة السيرفر لا تعمل ولم تُشغَّل بعد. افتح /api/srv/panel-debug?k=… للتشخيص الكامل",
       panelDir: PANEL_DIR(),
       hint: "تأكد أن مجلد bol/server-control موجود، أو شغّلها يدوياً من /hub",
     });
@@ -313,8 +365,10 @@ refresh();setInterval(refresh,15000);
 </script></body></html>`;
 }
 
+let mainPort = 0;
 export function registerServerHub(app, deps = {}) {
   const key = deps.key || devKey();
+  try { mainPort = Number(process.env.PORT || 5000); } catch {}
   const startedAt = Date.now();
 
   // [v8.48.5] /srv = اللوحة الأصلية نفسها (هي التي تتحكم بالسيرفر كاملاً).
@@ -334,6 +388,30 @@ export function registerServerHub(app, deps = {}) {
   });
 
   // [v8.48.9] قياس الرام والكومة — لمعرفة سبب البطء فوراً
+  // [v8.49.3] تشخيص لوحة السيرفر: كل شيء في مكان واحد
+  app.get("/api/srv/panel-debug", async (req, res) => {
+    if (!_keyOk(req)) return res.status(401).json({ error: "مفتاح صحيح مطلوب" });
+    const dir = PANEL_DIR();
+    const entries = ["server.mjs", "index.mjs", "app.mjs"].map((f) => ({ file: f, exists: existsSync(join(dir, f)) }));
+    const pids = _panelPids();
+    const ports = (() => { try { return listListeningPorts(); } catch { return []; } })().filter((p) => p !== 5000 && p !== mainPort);
+    const probed = [];
+    for (const p of ports.slice(0, 12)) probed.push({ port: p, answers: await _panelAlive(p) });
+    res.json({
+      ok: true,
+      panelDir: dir,
+      dirExists: existsSync(dir),
+      entries,
+      processes: pids,
+      detectedPort: await panelPort(),
+      probed,
+      tokenSet: Boolean(panelToken()),
+      lastStartErr: _lastStartErr,
+      log: _panelLogTail(15),
+      botPort: mainPort,
+    });
+  });
+
   app.get("/api/srv/mem", (req, res) => {
     if (!_keyOk(req)) return res.status(401).json({ error: "مفتاح غير صحيح" });
     const m = process.memoryUsage();
@@ -472,7 +550,18 @@ export function registerServerHub(app, deps = {}) {
     if (!_keyOk(req)) return res.status(401).send("مفتاح المطوّر مطلوب: أضف ?k=<KEY>");
     let port = await panelPort();
     if (!port || !(await _panelAlive(port))) port = await ensurePanel(true);
-    if (!port) return res.status(503).send("لوحة السيرفر لا تعمل ولم أستطع تشغيلها: " + (_lastStartErr || "سبب غير معروف"));
+    if (!port) {
+      const tail = _panelLogTail(6);
+      return res.status(503).send(
+        `<html dir="rtl"><meta charset="utf-8"><body style="font:16px Tahoma;background:#0b1020;color:#eaf0fb;padding:24px">` +
+        `<h3>لوحة السيرفر لا تعمل</h3>` +
+        `<p>المجلد: <code>${PANEL_DIR()}</code></p>` +
+        `<p>السبب: ${_lastStartErr || "لم تُشغَّل بعد"}</p>` +
+        (tail ? `<pre style="white-space:pre-wrap;background:#0f1526;padding:10px;border-radius:10px">${tail.replace(/[<>&]/g, "")}</pre>` : "") +
+        `<p><a style="color:#34d399" href="/api/srv/panel-debug?k=${encodeURIComponent(key)}">تشخيص كامل</a></p>` +
+        `</body></html>`
+      );
+    }
     try {
       const html = await new Promise((resolve, reject) => {
         const r = http.request({ host: "127.0.0.1", port, path: "/", method: "GET", timeout: 15000, headers: { "x-control-token": panelToken() } }, (up) => {
