@@ -37,6 +37,7 @@ const WRAPPER_KEYS = [
   "ephemeralMessage",
   "documentWithCaptionMessage",
   "editedMessage",
+  "deviceSentMessage",
 ];
 
 /** نوع الوسيط من مفتاح المحتوى أو من mimetype. */

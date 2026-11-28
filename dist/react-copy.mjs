@@ -12,6 +12,7 @@
 // updateMediaMessage، viewOnce، ptt، gifPlayback، groupGetInviteInfo.
 
 import { downloadAndDecryptMedia } from "./lib/wa-media.mjs";
+import { getMessage as chatLogGetMessage } from "./lib/chat-log.mjs";
 
 import {
   loadMessage as storeLoadMessage,
@@ -21,7 +22,7 @@ import {
   _resetStoreCache,
 } from "./lib/react-copy-store.mjs";
 // [NO-DISK v8.41.0] وسائط «نسخ بالتفاعل» و«عرض مرة واحدة» في الرام فقط — لا ملفات
-import { setMedia as ramSetMedia, getMedia as ramGetMedia, setMessage as ramSetMessage, getMessage as ramGetMessage } from "./lib/vo-ram.mjs";
+import { setMedia as ramSetMedia, getMedia as ramGetMedia, setMessage as ramSetMessage, getMessage as ramGetMessage, _reset as resetVoRam } from "./lib/vo-ram.mjs";
 
 // [MEM v8.26.1] خُفِّض من 300 إلى 120 رسالة/مجموعة: المخزن الدائم على القرص يغطي الباقي
 // (كان الكاش الرمادي يستهلك ذاكرة ملحوظة في المجموعات النشطة على حد 589MB).
@@ -364,6 +365,7 @@ const WRAPPERS = [
   "viewOnceMessageV2Extension",
   "documentWithCaptionMessage",
   "editedMessage",
+  "deviceSentMessage",
   "statusMentionMessage",
   "groupMentionedMessage",
 ];
@@ -389,6 +391,37 @@ export function unwrapMessage(message, depth = 0) {
     depth++;
   }
   return { content: cur || {}, viewOnce };
+}
+
+/**
+ * [COPY-REPLY v8.54.0] استخراج سياق الرد من أي شكل ترسله واتساب.
+ * بعض نسخ واتساب تضع `contextInfo` داخل extendedTextMessage، وبعضها
+ * تغلّف الرسالة بـ ephemeral/deviceSent/edited؛ البحث في مستوى واحد فقط
+ * يجعل /copy g يردّ كأن المستخدم لم يقتبس شيئاً.
+ */
+export function replyContextOf(message) {
+  const root = message?.message || message;
+  const seen = new Set();
+  const visit = (node, depth = 0) => {
+    if (!node || typeof node !== "object" || depth > 10 || seen.has(node)) return null;
+    seen.add(node);
+    for (const candidate of [node.contextInfo, node.messageContextInfo]) {
+      if (candidate && typeof candidate === "object"
+        && (candidate.quotedMessage || candidate.quotedMessageId || candidate.stanzaId)) {
+        return candidate;
+      }
+    }
+    // نفحص الأغلفة ومحتوى الرسالة، لكن لا ندخل quotedMessage نفسه حتى لا نلتقط
+    // سياقاً داخلياً بدلاً من الرد الذي كتبه المستخدم الآن.
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "contextInfo" || key === "messageContextInfo" || key === "quotedMessage") continue;
+      if (!value || typeof value !== "object") continue;
+      const hit = visit(value, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  return visit(root);
 }
 
 /** نوع المحتوى القابل للنسخ، أو null إن كان غير مدعوم. */
@@ -445,7 +478,8 @@ export function extractAnyMedia(message) {
       || m.viewOnceMessage?.message
       || m.ephemeralMessage?.message
       || m.documentWithCaptionMessage?.message
-      || m.editedMessage?.message;
+      || m.editedMessage?.message
+      || m.deviceSentMessage?.message;
     if (!wrapped) return null;
     if (isVO) wasVO = true;
     m = wrapped;
@@ -743,18 +777,50 @@ function settingsCached(userId, sock) {
  */
 export async function copyToSameChat({ sock, baileys, jid, quoted, quotedKey, userId, logger }) {
   try {
-    if (!jid || !quoted) return { ok: false, reason: "no-message" };
-    const { content, viewOnce: wasViewOnce } = unwrapMessage(quoted);
-    const kind = classifyContent(content);
-    if (!kind) return { ok: false, reason: "unsupported", wasViewOnce };
     const qid = quotedKey?.id || "";
-    // [PEEK v8.35.0] بايتات محفوظة مسبقاً (حفظ مسبق للعرض-مرة أو من مخزن القرص) تُقدَّم
-    // على أي تنزيل — رابط «عرض مرة واحدة» يموت بعد فتحه.
+    if (!jid || (!quoted && !qid)) return { ok: false, reason: "no-message" };
+    const quotedUnwrapped = unwrapMessage(quoted || {});
+    let wasViewOnce = Boolean(quotedUnwrapped.viewOnce || extractAnyMedia(quoted)?.viewOnce);
+    const quotedKind = classifyContent(quotedUnwrapped.content);
+    if (!quotedKind && !qid) return { ok: false, reason: "unsupported", wasViewOnce };
+
+    // [COPY-REPLY v8.54.0] اقتباس «عرض مرة واحدة» غالباً stub بلا mediaKey/url.
+    // نبحث عن النسخة الكاملة التي التقطها الصنبور/سجل المحادثة قبل محاولة التنزيل؛
+    // النسخة السابقة كانت تمرّر الـ stub مباشرة إلى Baileys فتفشل كل مرة.
+    let effective = quoted;
+    let resolved = null;
+    if (qid && (!quoted || copyMessageScore(quoted) <= 1 || !copyMessageReady(quoted))) {
+      resolved = await resolveOriginal(userId, sock, {
+        remoteJid: jid,
+        fromMe: Boolean(quotedKey?.fromMe),
+        id: qid,
+        ...(quotedKey?.participant ? { participant: quotedKey.participant } : {}),
+      }, { logger });
+      if (resolved?.message && (!quoted || resolved.buffer?.length || copyMessageScore(resolved.message) > copyMessageScore(quoted))) {
+        effective = resolved.message;
+      }
+    }
+    if (!effective) return { ok: false, reason: "no-message", wasViewOnce };
+    const effectiveUnwrapped = unwrapMessage(effective);
+    wasViewOnce = Boolean(wasViewOnce || effectiveUnwrapped.viewOnce || extractAnyMedia(effective)?.viewOnce);
+    if (!classifyContent(effectiveUnwrapped.content)) return { ok: false, reason: "unsupported", wasViewOnce };
+
+    // البايتات المحفوظة مسبقاً تُقدَّم على أي تنزيل — رابط العرض-مرة يموت بعد الفتح.
+    // ابدأ من الكاش المحلي أولاً؛ هذا يحافظ أيضاً على مسار getPrefetchedMedia القديم.
     let buffer = qid ? _voGet(jid, qid) : null;
-    if (!buffer && qid) { try { buffer = ramGetMedia(jid, qid)?.buffer || (userId ? storeLoadMedia(String(userId), jid, qid) : null); } catch { } }
+    if (!buffer && resolved?.buffer?.length) buffer = resolved.buffer;
+    if (!buffer && qid) {
+      try { buffer = ramGetMedia(jid, qid)?.buffer || (userId ? storeLoadMedia(String(userId), jid, qid) : null); } catch { }
+    }
+    const sourceKey = resolved?.key || quotedKey || {};
     const original = {
-      key: { remoteJid: jid, fromMe: Boolean(quotedKey?.fromMe), id: qid, ...(quotedKey?.participant ? { participant: quotedKey.participant } : {}) },
-      message: quoted,
+      key: {
+        remoteJid: sourceKey.remoteJid || jid,
+        fromMe: Boolean(sourceKey.fromMe),
+        id: sourceKey.id || qid,
+        ...(sourceKey.participant ? { participant: sourceKey.participant } : {}),
+      },
+      message: effective,
       sourceJid: jid,
       ...(buffer?.length ? { buffer } : {}),
     };
@@ -886,14 +952,37 @@ export async function copyMessageToTarget({ sock, baileys, destination, original
   }
 }
 
-/** يستخرج الرسالة الأصلية من الذاكرة أو من المخزن إن وُجد. */
+/** هل الرسالة تحتوي مادة تكفي لتنزيل/تمرير الوسيط؟ */
+function copyMessageReady(message) {
+  const unwrapped = unwrapMessage(message);
+  const kind = classifyContent(unwrapped.content);
+  if (kind === "text") return true;
+  const found = extractAnyMedia(message);
+  const node = found?.node;
+  // relay والتنزيل الذاتي يحتاجان المفتاح والرابط/المسار معاً؛ وجود أحدهما
+  // وحده هو نسخة جزئية، ويجب ألا يوقف البحث عن النسخة الكاملة.
+  return Boolean(node?.mediaKey && (node.url || node.directPath));
+}
+
+/** درجة غنى نسخة الرسالة؛ الاقتباس المصغّر لعرض-مرة درجته صفر. */
+function copyMessageScore(message) {
+  const unwrapped = unwrapMessage(message);
+  const found = extractAnyMedia(message);
+  const node = found?.node;
+  if (!node) return classifyContent(unwrapped.content) === "text" ? 100 : 0;
+  let score = found.viewOnce || unwrapped.viewOnce ? 1 : 2;
+  if (node.mediaKey) score += 8;
+  if (node.url || node.directPath) score += 4;
+  if (node.fileEncSha256 || node.fileSha256) score += 2;
+  if (node.mimetype) score += 1;
+  return score;
+}
+
 /**
- * [RC-PERSIST v8.23.0] يحلّ الرسالة الأصلية بعدة طبقات:
- *   1) ذاكرة الجلسة
- *   2) مخزن دائم على القرص (ينجو من إعادة التشغيل)
- *   3) مخزن Baileys إن وُجد
- *   4) طلب إعادة إرسال من الهاتف (requestPlaceholderResend) ثم انتظار وصولها
- * يعيد { key, message, sourceJid, buffer? } أو null.
+ * [RC-PERSIST v8.54.0] يحلّ الرسالة الأصلية بعدة طبقات.
+ * النسخة السابقة كانت ترجع أول رسالة من vo-ram حتى لو كانت stub فقيرة،
+ * وبذلك لم تصل أبداً إلى chat-log أو requestPlaceholderResend. الآن نحتفظ
+ * بالنسخة الفقيرة كاحتياط ونواصل البحث حتى نجد النسخة الأغنى أو البايتات.
  */
 async function resolveOriginal(userId, sock, targetKey, { logger } = {}) {
   const jid = targetKey?.remoteJid;
@@ -901,36 +990,65 @@ async function resolveOriginal(userId, sock, targetKey, { logger } = {}) {
   if (!jid || !id) return null;
 
   const withBuffer = (found) => {
-    const prefetched = _voGet(jid, id) || ramGetMedia(jid, id)?.buffer || (userId ? storeLoadMedia(String(userId), jid, id) : null);
+    if (!found?.message) return null;
+    const prefetched = found.buffer?.length
+      ? found.buffer
+      : _voGet(jid, id) || ramGetMedia(jid, id)?.buffer || (userId ? storeLoadMedia(String(userId), jid, id) : null);
     return { ...found, ...(prefetched ? { buffer: prefetched } : {}) };
   };
 
+  let fallback = null;
+  const consider = (found, label = "") => {
+    const item = withBuffer(found);
+    if (!item) return null;
+    if (item.buffer?.length || copyMessageReady(item.message)) return item;
+    if (!fallback || copyMessageScore(item.message) > copyMessageScore(fallback.message)) fallback = item;
+    if (label) {
+      try { logger?.debug?.({ jid, id, source: label }, "[REACT-COPY] النسخة موجودة لكنها فقيرة — نبحث عن نسخة أغنى"); } catch { }
+    }
+    return null;
+  };
+
   const hit = cacheGet(userId, jid, id);
-  if (hit) return withBuffer({ key: hit.key, message: hit.message, sourceJid: jid });
+  let ready = consider(hit ? { key: hit.key, message: hit.message, sourceJid: jid } : null, "memory-cache");
+  if (ready) return ready;
+
+  // سجل المحادثة يلتقط الرسالة الخام حتى عندما تكون ميزة نسخ التفاعل معطلة.
+  try {
+    const chat = chatLogGetMessage(userId, jid, id);
+    ready = consider(chat?.raw ? { key: chat.raw.key || targetKey, message: chat.raw.message, sourceJid: jid } : null, "chat-log");
+    if (ready) return ready;
+  } catch { }
 
   const _ramMsg = ramGetMessage(jid, id);
-  const persisted = _ramMsg?.message ? { key: _ramMsg.key, message: _ramMsg.message } : (userId ? storeLoadMessage(String(userId), jid, id) : null);
-  if (persisted?.message) {
-    cachePut(userId, jid, persisted.key || targetKey, persisted.message, "");
-    try { logger?.info?.({ jid, id }, "[REACT-COPY] وُجدت الرسالة في المخزن الدائم (بعد إعادة تشغيل؟)"); } catch { }
-    return withBuffer({ key: persisted.key || targetKey, message: persisted.message, sourceJid: jid });
+  ready = consider(_ramMsg?.message ? { key: _ramMsg.key || targetKey, message: _ramMsg.message, sourceJid: jid } : null, "vo-ram");
+  if (ready) return ready;
+
+  const persisted = userId ? storeLoadMessage(String(userId), jid, id) : null;
+  ready = consider(persisted?.message ? { key: persisted.key || targetKey, message: persisted.message, sourceJid: jid } : null, "persistent-store");
+  if (ready) {
+    try { cachePut(userId, jid, ready.key || targetKey, ready.message, ""); } catch { }
+    try { logger?.info?.({ jid, id }, "[REACT-COPY] وُجدت النسخة الكاملة في المخزن"); } catch { }
+    return ready;
   }
 
   const loaders = [
-    () => sock.store?.loadMessage?.(jid, id),
-    () => sock.loadMessage?.(jid, id),
+    () => sock?.store?.loadMessage?.(jid, id),
+    () => sock?.loadMessage?.(jid, id),
   ];
   for (const fn of loaders) {
     try {
       const m = await fn();
-      if (m?.message) return withBuffer({ key: m.key || targetKey, message: m.message, sourceJid: jid });
+      ready = consider(m?.message ? { key: m.key || targetKey, message: m.message, sourceJid: jid } : null, "baileys-store");
+      if (ready) return ready;
     } catch { }
   }
 
-  // الطبقة الأخيرة: نطلب من هاتف صاحب الحساب إعادة إرسال الرسالة (واجهة Baileys حقيقية)
+  // الطبقة الأخيرة: نطلب من هاتف صاحب الحساب إعادة إرسال الرسالة (واجهة Baileys حقيقية).
   const resent = await _requestResend(sock, targetKey, logger, userId);
-  if (resent?.message) return withBuffer(resent);
-  return null;
+  ready = consider(resent, "placeholder-resend");
+  if (ready) return ready;
+  return fallback;
 }
 
 /**
@@ -1119,6 +1237,7 @@ async function handleReaction({ userId, sock, logger, baileys, cfg, reaction, re
 export function _resetReactCopyState() {
   _recent.length = 0;
   try { _resetStoreCache(); } catch { }
+  try { resetVoRam(); } catch { }
   _voStore.clear();
   _voInflight.clear();
   _cache.clear();

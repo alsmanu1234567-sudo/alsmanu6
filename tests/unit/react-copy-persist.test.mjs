@@ -9,6 +9,7 @@ import {
   flushStore,
 } from "../../dist/react-copy.mjs";
 import { saveMessage, loadMessage, saveMedia, loadMedia, flush } from "../../dist/lib/react-copy-store.mjs";
+import { getMedia } from "../../dist/lib/vo-ram.mjs";
 
 const UID = "990001";
 const NUM = "249114375739";
@@ -103,20 +104,21 @@ test("الطبقة 4: لا ذاكرة ولا قرص ⇒ نطلب إعادة إر
   assert.ok(target[0].payload.image);
 });
 
-test("وسائط العرض-مرة تُحفظ على القرص أيضاً (تبقى بعد إعادة التشغيل)", async () => {
+test("وسائط العرض-مرة تُحفظ في الرام فقط ولا تُكتب على القرص", async () => {
   _resetReactCopyState();
   const { sock } = wire();
   attachReactCopy({ userId: UID, sock, logger: { warn() { }, info() { } }, baileys: { downloadMediaMessage: async () => BUF } });
   sock.emit("messages.upsert", {
     type: "notify",
-    messages: [{ key: { remoteJid: SRC, fromMe: false, id: "DISKMEDIA", participant: "66@s.whatsapp.net" }, message: { viewOnceMessageV2: { message: { imageMessage: { mimetype: "image/jpeg", url: "https://mmg.whatsapp.net/m" } } } } }],
+    messages: [{ key: { remoteJid: SRC, fromMe: false, id: "RAMMEDIA", participant: "66@s.whatsapp.net" }, message: { viewOnceMessageV2: { message: { imageMessage: { mimetype: "image/jpeg", url: "https://mmg.whatsapp.net/m" } } } } }],
   });
   await new Promise((r) => setTimeout(r, 200));
   flushStore(UID);
-  const onDisk = loadMedia(UID, SRC, "DISKMEDIA");
-  assert.ok(onDisk && onDisk.length === BUF.length, "البايتات على القرص");
+  const inRam = getMedia(SRC, "RAMMEDIA")?.buffer;
+  assert.ok(inRam && inRam.length === BUF.length, "البايتات في كاش الرام");
+  assert.equal(loadMedia(UID, SRC, "RAMMEDIA"), null, "لا تُكتب وسائط العرض-مرة على القرص");
   const stats = persistentStoreStats(UID);
-  assert.ok(stats.mediaItems >= 1);
+  // قد توجد وسائط قديمة من اختبار الطبقة 2؛ المهم أن RAMMEDIA نفسها لم تُكتب.
   assert.ok(stats.messages >= 1);
 });
 

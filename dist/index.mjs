@@ -123,35 +123,42 @@ globalThis.__dirname = __bannerPath.dirname(globalThis.__filename);
  *   4) تقرير عربي مقروء + JSON كامل + ملخّص الحكم ودرجة الثقة
  *   5) إن نجح التنزيل: يُرسل المحتوى كملف في نفس المحادثة (بدون غلاف)
  */
-async function _voWaitForRicher(jid, id, timeoutMs = 8000) {
-  const rich = (m) => { const i = _viewOnceMod.unwrapViewOnce(m); return i && i.hasMediaKey ? m : null; };
+async function _voWaitForRicher(jid, id, timeoutMs = 8000, userId = "") {
+  const rich = (m) => {
+    if (!m) return null;
+    const i = _viewOnceMod.unwrapViewOnce(m);
+    // النسخة الصالحة للتنزيل/الـrelay تحتاج المفتاح والرابط معاً؛ وجود
+    // أحدهما فقط لا يكفي ولا ينبغي أن يوقف انتظار النسخة الكاملة.
+    return i && i.hasMediaKey && i.hasUrl ? m : null;
+  };
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    const cand = _voRamMod.getMessage(jid, id)?.message
-      || _chatLogMod.getMessage(jid, id)?.raw?.message
-      || (() => { try { return _rcStoreMod.loadMessage("", jid, id)?.message; } catch { return null; } })();
-    const hit = rich(cand);
-    if (hit) return hit;
+    const candidates = [
+      _voRamMod.getMessage(jid, id)?.message,
+      _chatLogMod.getMessage(jid, id)?.raw?.message,
+      (() => { try { return _rcStoreMod.loadMessage(userId, jid, id)?.message; } catch { return null; } })(),
+    ];
+    for (const cand of candidates) {
+      const hit = rich(cand);
+      if (hit) return hit;
+    }
     await new Promise((r) => setTimeout(r, 400));
   }
   return null;
 }
 
 async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
-  const ctxInfo = msg.message?.extendedTextMessage?.contextInfo
-    || msg.message?.imageMessage?.contextInfo
-    || msg.message?.videoMessage?.contextInfo
-    || msg.message?.audioMessage?.contextInfo
-    || msg.message?.documentMessage?.contextInfo
-    || msg.message?.stickerMessage?.contextInfo
-    || msg.message?.viewOnceMessageV2?.message?.imageMessage?.contextInfo
-    || null;
-  const quoted = ctxInfo?.quotedMessage;
-  if (!quoted) {
+  // [COPY-REPLY v8.54.0] لا نفترض أن contextInfo في مستوى واحد؛ الرسالة
+  // قد تكون extendedText/ephemeral/deviceSent/edited حسب جهاز واتساب.
+  const ctxInfo = _reactCopyMod.replyContextOf(msg.message);
+  const quoted = ctxInfo?.quotedMessage || null;
+  const qid = ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || "";
+  // قد يصل الرد بمعرّف فقط (بلا quotedMessage inline)، وهذا لا يعني أنه
+  // ليس رداً؛ نسمح للتشخيص بالبحث في chat-log/الرام/المخزن ثم بطلب resend.
+  if (!ctxInfo || (!quoted && !qid)) {
     await sock.sendMessage(jid, { text: `⚠️ ردّ على الرسالة أولاً ثم أرسل ${myS?.copyCmd || "/copy"} g\n(الأمر يفحص الرسالة التي تردّ عليها ويشرح سبب فشل استخراجها)` });
     return true;
   }
-  const qid = ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || "";
   const t0 = Date.now();
   await sock.sendMessage(jid, { text: "🧠 جارٍ التشخيص العملاق… (أفحص كل المصادر وأجرّب كل طرق التنزيل وأطلب إعادة إرسال من واتساب)" }).catch(() => { });
 
@@ -183,9 +190,23 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
     ["quoted", quoted],
   ];
   let chosen = quoted, chosenSource = "quoted";
-  for (const [name, m] of candidates) {
+  const rankCandidate = (m) => {
     const f = nodeFacts(m);
-    if (f.found && f.hasMediaKey) { chosen = m; chosenSource = name; break; }
+    if (!f.found) return 0;
+    // نسخة فيها المفتاح والرابط هي الوحيدة الصالحة للتنزيل/relay؛ النسخة
+    // التي فيها أحدهما فقط تظل جزئية ولا يجوز أن تغلب نسخة كاملة لاحقة.
+    if (f.hasMediaKey && f.hasUrl) return 3;
+    if (f.hasMediaKey || f.hasUrl) return 2;
+    return 1;
+  };
+  let bestRank = rankCandidate(chosen);
+  for (const [name, m] of candidates) {
+    const rank = rankCandidate(m);
+    if (rank > bestRank) {
+      chosen = m;
+      chosenSource = name;
+      bestRank = rank;
+    }
   }
 
   // ── ③ مصفوفة محاولات التنزيل ────────────────────────────────────────────
@@ -254,7 +275,7 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
       try { await sock.requestPlaceholderResend({ remoteJid: jid, fromMe: false, id: qid }); resend.requested = true; resend.methods.push("requestPlaceholderResend"); } catch (err) { resend.methods.push(`requestPlaceholderResend ✖ ${String(err?.message || err).slice(0, 80)}`); }
     }
     if (resend.requested) {
-      const richer = await _voWaitForRicher(jid, qid, 8000);
+      const richer = await _voWaitForRicher(jid, qid, 8000, userId);
       if (richer) {
         resend.arrived = true;
         chosen = richer;
@@ -280,7 +301,7 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
       await sock.fetchMessageHistory(50, oldest, Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000));
       resend.requested = true;
       resend.methods.push("fetchMessageHistory");
-      const richer2 = await _voWaitForRicher(jid, qid, 8000);
+      const richer2 = await _voWaitForRicher(jid, qid, 8000, userId);
       if (richer2) {
         resend.arrived = true;
         chosen = richer2;
@@ -632,7 +653,19 @@ async function _peekViewOnce(userId, query, bot, chatId) {
   const candidates = [];
   for (const g of scope) {
     let items = [];
-    try { items = _chatLogMod.listMessages(userId, g.jid, 80).map((m) => ({ id: m.id, key: m.raw?.key || { id: m.id, remoteJid: g.jid }, message: m.raw?.message || {}, ts: m.ts })); } catch { }
+    try {
+      // listMessages() يحذف raw عمداً لواجهة الويب؛ /peek يحتاج الرسالة
+      // الكاملة للتنزيل، لذلك نعيد جلب كل raw عبر getMessage().
+      items = _chatLogMod.listMessages(userId, g.jid, 80).map((m) => {
+        const full = _chatLogMod.getMessage(userId, g.jid, m.id);
+        return {
+          id: m.id,
+          key: full?.raw?.key || { id: m.id, remoteJid: g.jid },
+          message: full?.raw?.message || {},
+          ts: m.ts,
+        };
+      });
+    } catch { }
     const picked = _viewOnceMod.pickNewestViewOnce(items);
     if (picked) candidates.push({ jid: g.jid, groupName: g.subject, ...picked });
   }
@@ -296818,15 +296851,12 @@ ${nameLine}${statusLine}`;
           // viewOnce ⇒ تُنسخ رسالة «عرض مرة واحدة» **مفتوحة وبلا أي غلاف** حتى لو كان
           // رابط التنزيل ميتاً. وإن تعذّر التمرير يُنزَّل المحتوى ويُرسل من جديد.
           try {
-            const ctxInfo = msg.message?.extendedTextMessage?.contextInfo
-              || msg.message?.imageMessage?.contextInfo
-              || msg.message?.videoMessage?.contextInfo
-              || msg.message?.audioMessage?.contextInfo
-              || msg.message?.documentMessage?.contextInfo
-              || msg.message?.stickerMessage?.contextInfo
-              || null;
-            const quoted = ctxInfo?.quotedMessage;
-            if (!quoted) {
+            // [COPY-REPLY v8.54.0] استخرج سياق الرد من كل الأغلفة المدعومة،
+            // لا من extendedTextMessage فقط.
+            const ctxInfo = _reactCopyMod.replyContextOf(msg.message);
+            const quoted = ctxInfo?.quotedMessage || null;
+            const quotedId = ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || "";
+            if (!ctxInfo || (!quoted && !quotedId)) {
               await activeSock.sendMessage(jid, { text: `⚠️ ردّ على رسالة أولاً ثم أرسل ${myS.copyCmd}` });
             } else {
               const res = await _reactCopyMod.copyToSameChat({
@@ -296835,7 +296865,7 @@ ${nameLine}${statusLine}`;
                 jid,
                 quoted,
                 quotedKey: {
-                  id: ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || "",
+                  id: quotedId,
                   participant: ctxInfo?.participant,
                   fromMe: false,
                 },

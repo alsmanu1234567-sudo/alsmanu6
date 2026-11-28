@@ -138,31 +138,32 @@ test("اضبط التبعيات لا يكسر الوحدة", () => {
   assert.ok(true);
 });
 
-// ─────────── /copy في index.mjs: طريقة alsmanu5 + فكّ العرض-مرة (v8.22.0) ───────────
+// ─────────── /copy: مسار موحّد لفكّ العرض-مرة والنسخ المفتوح ───────────
 import { readFileSync } from "node:fs";
 const indexSrc = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+const copySrc = readFileSync(new URL("../../dist/react-copy.mjs", import.meta.url), "utf8");
 
-test("/copy: يستخدم downloadMediaMessage مثل alsmanu5 ويفكّ أغلفة العرض-مرة", () => {
-  assert.match(indexSrc, /\[\/COPY v8\.22\.0\]/);
-  assert.match(indexSrc, /quoted\.viewOnceMessageV2\?\.message/);
-  assert.match(indexSrc, /quoted\.viewOnceMessage\?\.message/);
-  assert.match(indexSrc, /downloadMediaMessage2/);
-  assert.match(indexSrc, /init_lib6\(\), lib_exports4/);
+test("/copy: يمرّر التنفيذ إلى الوحدة الموحّدة ويدعم فكّ الأغلفة والتنزيل الاحتياطي", () => {
+  assert.match(indexSrc, /_reactCopyMod\.copyToSameChat/);
+  assert.match(indexSrc, /_reactCopyMod\.replyContextOf/);
   assert.match(indexSrc, /ctxInfo\?\.quotedMessageId \|\| ctxInfo\?\.stanzaId/);
+  assert.match(copySrc, /export async function copyToSameChat/);
+  assert.match(copySrc, /extractAnyMedia/);
+  assert.match(copySrc, /relayMediaStripped/);
+  assert.match(copySrc, /downloadMediaMessage/);
 });
 
 test("/copy: لا يرسل أي شيء كـ viewOnce (المحتوى يُفتح دائماً)", () => {
-  const block = indexSrc.slice(indexSrc.indexOf("[/COPY v8.22.0]"), indexSrc.indexOf("[/COPY v8.22.0]") + 6000);
-  assert.equal(block.includes("viewOnce: true"), false);
-  assert.match(block, /sticker: buf/);
+  assert.match(copySrc, /preferViewOnce: false/);
+  assert.match(copySrc, /const asViewOnce = Boolean\(preferViewOnce === true && wasViewOnce\)/);
+  assert.match(copySrc, /if \(!keepViewOnce\) delete cleanNode\.viewOnce/);
 });
 
-// ─────────── سرعة الذكاء: سباق ميتا/HTTP ومهل أقصر (v8.22.0) ───────────
-test("الذكاء: ميتا و HTTP يعملان بالتوازي وأول رد يصل يُستخدم", () => {
+// ─────────── تكامل مزوّدي الذكاء ومهلهم الحالية ───────────
+test("الذكاء: يحافظ على السباق/المهل وآلية تعطيل المزوّد عند الفشل", () => {
   assert.match(indexSrc, /function _firstReply\(promises\)/);
-  assert.match(indexSrc, /_firstReply\(\[/);
-  assert.match(indexSrc, /META_AI_TIMEOUT_MS\) \|\| 12000/);
+  assert.match(indexSrc, /Number\(process\.env\.META_AI_TIMEOUT_MS\) \|\| 12000/);
   assert.match(indexSrc, /st\.fails >= 2/);
-  assert.match(indexSrc, /META_AI_DISABLED_MS = 12 \* 60 \* 60 \* 1000/);
+  assert.match(indexSrc, /META_AI_DISABLED_MS = 2 \* 60 \* 1000/);
   assert.match(indexSrc, /createKeylessClient\(\{ timeoutMs: 20000/);
 });

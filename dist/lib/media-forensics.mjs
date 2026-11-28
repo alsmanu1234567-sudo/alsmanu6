@@ -151,7 +151,7 @@ export function analyzeMessage(message) {
   };
   if (!message) return out;
   let m = message;
-  const WRAP = ["viewOnceMessageV2", "viewOnceMessageV2Extension", "viewOnceMessage", "ephemeralMessage", "documentWithCaptionMessage", "editedMessage"];
+  const WRAP = ["viewOnceMessageV2", "viewOnceMessageV2Extension", "viewOnceMessage", "ephemeralMessage", "documentWithCaptionMessage", "editedMessage", "deviceSentMessage"];
   const NOT_CONTENT = new Set([...WRAP, "protocolMessage", "senderKeyDistributionMessage", "messageContextInfo", "deviceSentMessage"]);
   for (let i = 0; i < 8 && m; i++) {
     const wrapperKey = WRAP.find((w) => m[w]?.message);

@@ -102,7 +102,7 @@ const KIND_BY_KEY = {
   messageContextInfo: "system", keepInChatMessage: "system",
 };
 
-const WRAPPERS = ["viewOnceMessageV2", "viewOnceMessageV2Extension", "viewOnceMessage", "ephemeralMessage", "documentWithCaptionMessage", "editedMessage"];
+const WRAPPERS = ["viewOnceMessageV2", "viewOnceMessageV2Extension", "viewOnceMessage", "ephemeralMessage", "documentWithCaptionMessage", "editedMessage", "deviceSentMessage"];
 
 /** بحث عميق (حتى ٤ طبقات) عن أي مفتاح وسائط/محتوى معروف. */
 function deepFind(message, depth = 0) {

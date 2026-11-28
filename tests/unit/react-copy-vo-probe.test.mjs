@@ -9,6 +9,7 @@ import {
   lastViewOnceMethod,
 } from "../../dist/react-copy.mjs";
 import { loadMedia, flush } from "../../dist/lib/react-copy-store.mjs";
+import { getMedia } from "../../dist/lib/vo-ram.mjs";
 
 const UID = "770011";
 const NUM = "249114375739";
@@ -105,8 +106,9 @@ test("المسبار يجرّب الغلاف فيفشل ثم المحتوى ال
   assert.ok(flat(logs).includes("نجح تنزيل العرض-مرة"), "يسجّل الطريقة الناجحة");
   assert.equal(lastViewOnceMethod(), "المحتوى الداخلي");
   flush(UID);
-  const disk = loadMedia(UID, KEEK, "VO1");
-  assert.ok(disk && disk.length === BUF.length, "حُفظت البايتات على القرص");
+  const inRam = getMedia(KEEK, "VO1")?.buffer;
+  assert.ok(inRam && inRam.length === BUF.length, "حُفظت البايتات في الرام");
+  assert.equal(loadMedia(UID, KEEK, "VO1"), null, "لا تُكتب وسائط العرض-مرة على القرص");
   assert.equal(sock.sent.length, 0, "لا إرسال في مرحلة التنزيل المسبق");
 });
 
@@ -154,8 +156,9 @@ test("التنزيل المسبق يعمل حتى لو كانت «كيك» لي�
   emit("messages.upsert", { type: "notify", messages: [vo("VO3")] });
   await new Promise((r) => setTimeout(r, 300));
   flush(UID);
-  const disk = loadMedia(UID, KEEK, "VO3");
-  assert.ok(disk?.length === BUF.length, "بايتات «كيك» محفوظة رغم أن المصدر مجموعة أخرى");
+  const inRam = getMedia(KEEK, "VO3")?.buffer;
+  assert.ok(inRam?.length === BUF.length, "بايتات «كيك» محفوظة في الرام رغم أن المصدر مجموعة أخرى");
+  assert.equal(loadMedia(UID, KEEK, "VO3"), null, "لا تُكتب وسائط العرض-مرة على القرص");
 });
 
 test("كل رسالة وسائط تُسجَّل في اللوق (لنعرف هل وصلت أصلاً)", async () => {
