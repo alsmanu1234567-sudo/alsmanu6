@@ -877,12 +877,18 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     try { res.flushHeaders?.(); } catch {}
     const send = (obj) => { try { res.write("data: " + JSON.stringify(obj) + "\n\n"); } catch {} };
     send({ type: "hello", jid, at: Date.now() });
+    const sameUid = (a, b) => {
+      if (String(a) === String(b)) return true;
+      try { const f = globalThis.__UID_CANON__; return f ? String(f(a)) === String(f(b)) : false; } catch { return false; }
+    };
     const onEntry = (p) => {
-      if (String(p.uid) !== String(uid) || String(p.jid) !== jid) return;
+      if (String(p.jid) !== jid) return;
+      if (!sameUid(p.uid, uid)) return;
       send({ type: "message", message: p.entry });
     };
     const onAck = (p) => {
-      if (String(p.uid) !== String(uid) || String(p.jid) !== jid) return;
+      if (String(p.jid) !== jid) return;
+      if (!sameUid(p.uid, uid)) return;
       send({ type: "ack", id: p.id, ack: p.ack });
     };
     let alive = true;
@@ -1097,6 +1103,33 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     }
     res.json(out);
   });
+
+  // [v8.53.0] تشخيص سجل المحادثة — يكشف فوراً إن كانت الرسائل تُخزَّن بمُعرّف آخر
+  app.get("/api/wa/chat/debug", guard(async (uid, req) => {
+    const jid = String(req.query?.jid || "").trim();
+    const CLx = CL();
+    const uids = CLx.listUids ? CLx.listUids() : [];
+    const perUid = uids.map((u) => ({
+      uid: String(u),
+      isOwner: String(u) === String(uid),
+      chats: CLx.listChats ? (CLx.listChats(u) || []).length : null,
+      messages: jid ? (CLx.listMessages(u, jid, 5) || []).length : null,
+      last: jid ? (CLx.listMessages(u, jid, 1)[0]?.text || null) : null,
+    }));
+    return {
+      ok: true,
+      jid: jid || null,
+      requestedUid: String(uid),
+      canonActive: typeof globalThis.__UID_CANON__ === "function",
+      canonOfRequest: (() => { try { return String(globalThis.__UID_CANON__?.(uid) || uid); } catch { return null; } })(),
+      ownerUid: globalThis.__OWNER_UID__ || null,
+      tapInstalled: typeof globalThis.__WA_RAW_TAP__ === "function",
+      uids: perUid,
+      hint: perUid.length === 0
+        ? "لا شيء مسجّل بعد — تأكد أن البوت متصل وأن رسالة وصلت بعد التشغيل"
+        : "إذا كانت الرسائل تحت uid مختلف عن requestedUid فالمشكلة توحيد المُعرّف",
+    };
+  }));
 
   registerGroupWorldWebApp(app, parseJson, guard);
 

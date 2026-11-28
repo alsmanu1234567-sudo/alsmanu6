@@ -63,6 +63,16 @@ import * as _rcStoreMod from './lib/react-copy-store.mjs'; // [VIEW-ONCE v8.37.0
 import * as _waMediaMod from './lib/wa-media.mjs';         // [VIEW-ONCE v8.37.0] تنزيل ذاتي بلا مكتبة
 import * as _chatLogMod from './lib/chat-log.mjs';          // [GROUP-CHAT v8.39.0] سجل رسائل للمحادثة في الويب آب
 try { globalThis.__CHATLOG__ = _chatLogMod; } catch { }
+// [v8.53.0] مُعرّف واحد لسجل المحادثة: كل رسالة (واردة أو صادرة) تُخزَّن وتُقرأ
+// بمُعرّف المالك نفسه، فلا تختفي رسائل الأعضاء.
+try {
+  globalThis.__UID_CANON__ = (u) => {
+    try {
+      const owner = String(globalThis.__OWNER_UID__ || process.env.DEVELOPER_ID || process.env.OWNER_UID || "").trim();
+      return owner || String(u);
+    } catch { return String(u); }
+  };
+} catch { }
 try {
   globalThis.__WA_TAP_STATS__ = () => ({
     version: _botVersion(),
@@ -125090,6 +125100,8 @@ var init_constants = __esm({
   "src/bot/core/constants.ts"() {
     "use strict";
     DEVELOPER_ID = "7428421245";
+    // [v8.53.0] المُعرّف الموحّد لسجل المحادثة = مالك البوت
+    try { globalThis.__OWNER_UID__ = String(process.env.DEVELOPER_ID || DEVELOPER_ID || ""); } catch { }
     TIER_NAMES = {
       free: "البداية",
       pro: "الانطلاقة",

@@ -24,8 +24,24 @@ export const CHAT_LOG_LIMITS = {
 
 const _chats = new Map(); // uid -> Map(jid -> { name, number, sock, msgs: [] })
 
+// [v8.53.0] توحيد مُعرّف المستخدم — سبب «الرسائل ما تجي في الويب آب»:
+// كان السجل يُكتب بمُعرّف البوت الداخلي (userId) ويُقرأ بمُعرّف تيليجرام
+// (ownerUid) ⇒ مجلدان مختلفان: رسائلك تظهر (تُكتب من مسار الإرسال) ورسائل
+// الناس لا. الآن كل الكتابة/القراءة تمرّ عبر مُعرّف واحد.
+function canonUid(uid) {
+  const raw = String(uid || "");
+  try {
+    const f = globalThis.__UID_CANON__;
+    if (typeof f === "function") {
+      const out = String(f(raw) || raw);
+      if (out) return out;
+    }
+  } catch { }
+  return raw;
+}
+
 function bucket(uid) {
-  const key = String(uid);
+  const key = canonUid(uid);
   let m = _chats.get(key);
   if (!m) { m = new Map(); _chats.set(key, m); }
   return m;
@@ -193,7 +209,7 @@ export function recordMessage(uid, jid, msg, { sock = null, groupName = null } =
     prune(map);
     try {
       const { raw: _r, ...pub } = entry;
-      chatEvents.emit("entry", { uid: String(uid), jid: String(jid), entry: { ...pub, time: fmtTime(pub.ts) } });
+      chatEvents.emit("entry", { uid: canonUid(uid), jid: String(jid), entry: { ...pub, time: fmtTime(pub.ts) } });
     } catch {}
     return true;
   } catch { return false; }
@@ -224,7 +240,7 @@ export function setAck(uid, jid, id, ack) {
     const n = Number(ack) || 0;
     if (n <= (Number(e.ack) || 0)) return false;
     e.ack = n;
-    try { chatEvents.emit("ack", { uid: String(uid), jid: String(jid), id: e.id, ack: n }); } catch {}
+    try { chatEvents.emit("ack", { uid: canonUid(uid), jid: String(jid), id: e.id, ack: n }); } catch {}
     return true;
   } catch { return false; }
 }

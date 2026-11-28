@@ -60,3 +60,36 @@ test("الرسائل الواردة تبدأ بـ ack=0", () => {
   recordMessage(UID, JID, msg("A3", "من غيري", false));
   assert.equal(listMessages(UID, JID).find((x) => x.id === "A3").ack, 0);
 });
+
+// ── [v8.53.0] توحيد مُعرّف المستخدم: الرسائل لا تختفي بين المسارين ──
+test("رسالة مسجّلة بمُعرّف داخلي تُقرأ بمُعرّف المالك", () => {
+  _resetChatLog();
+  globalThis.__UID_CANON__ = (u) => String(process.env.DEVELOPER_ID || "7428421245");
+  try {
+    // البوت يسجّل بمُعرّف جلسته الداخلية
+    recordMessage("mongo-internal-65f3a", JID, msg("U1", "رسالة من عضو", false));
+    // الويب آب يقرأ بمُعرّف تيليجرام
+    const list = listMessages(UID, JID);
+    assert.equal(list.length, 1, "كانت الرسالة تختفي بسبب اختلاف المُعرّف");
+    assert.equal(list[0].text, "رسالة من عضو");
+    assert.equal(list[0].id, "U1");
+  } finally {
+    delete globalThis.__UID_CANON__;
+  }
+});
+
+test("البثّ اللحظي يحمل المُعرّف الموحّد", () => {
+  _resetChatLog();
+  globalThis.__UID_CANON__ = () => UID;
+  const got = [];
+  const on = (p) => got.push(p);
+  chatEvents.on("entry", on);
+  try {
+    recordMessage("internal-xyz", JID, msg("U2", "لحظي", false));
+  } finally {
+    chatEvents.off("entry", on);
+    delete globalThis.__UID_CANON__;
+  }
+  assert.equal(got.length, 1);
+  assert.equal(got[0].uid, UID, "يجب أن يحمل المُعرّف الموحّد ليطابق فلتر SSE");
+});
