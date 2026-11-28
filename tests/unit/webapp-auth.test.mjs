@@ -1,6 +1,7 @@
 // tests/unit/webapp-auth.test.mjs — [v8.49.1] رابط الويب آب لا يُرفض بعد النشر
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { resolveUid, ownerUid, tokenForUser, userForToken, webappOpenWithoutToken } from "../../dist/webapp-auth.mjs";
 
 test("توكن المالك الصالح يعطي uid المالك", () => {
@@ -12,9 +13,11 @@ test("توكن المالك الصالح يعطي uid المالك", () => {
 
 test("توكن بصيغة صحيحة لكن غير مسجّل لا يكسر الرابط (فتح حر)", () => {
   assert.equal(webappOpenWithoutToken(), true);
-  const unknown = "a".repeat(48);
+  const unknown = randomBytes(24).toString("hex"); // توكن جديد كل تشغيل
   assert.equal(userForToken(unknown), null);
   assert.equal(resolveUid({ query: { token: unknown } }), ownerUid());
+  // وبعد أول استخدام يُسجَّل تلقائياً فلا يُرفض لاحقاً
+  assert.equal(userForToken(unknown), ownerUid());
 });
 
 test("بلا توكن: حساب المالك (الفتح الحر)", () => {
