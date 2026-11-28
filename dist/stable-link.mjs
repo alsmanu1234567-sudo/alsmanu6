@@ -13,6 +13,7 @@
 //     لا يتغير أبداً، والضغط عليه يرسل لك الرابط الحالي لحظياً.
 // ═══════════════════════════════════════════════════════════════════
 import http from "node:http";
+import { tuneServer } from "./lib/http-fast.mjs";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -126,6 +127,7 @@ function _listenExtra(port) {
     try {
       srv.listen(port, "0.0.0.0", () => {
         _log(`[STABLE-LINK] استمع على المنفذ ${port} (ثابت محتمل)`);
+        try { tuneServer(srv); } catch {}
         finish(true);
       });
     } catch (e) {

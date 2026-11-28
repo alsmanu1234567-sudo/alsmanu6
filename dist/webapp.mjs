@@ -878,7 +878,8 @@ const HTML_PAGE = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#171331">
 <title>لوحة البوت</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>window.__TG_READY__=0;</script>
+<script async src="https://telegram.org/js/telegram-web-app.js" onload="window.__TG_READY__=1" onerror="window.__TG_READY__=1"></script>
 <link rel="stylesheet" href="/auto-replies.css">
 <script defer src="/sitegen-web.js"></script>
 <script defer src="/member-manager.js" onload="if (typeof TAB !== 'undefined' && TAB === 'members') render()"></script>

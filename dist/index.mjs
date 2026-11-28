@@ -332413,6 +332413,13 @@ var routes_default = router3;
 // src/app.ts
 init_logger();
 var app = (0, import_express4.default)();
+// [v8.48.7] تسريع صفحات الويب آب: gzip + تخزين مؤقت + قياس الزمن (بلا مكتبات)
+try {
+  const { installFastHttp } = await import("./lib/http-fast.mjs");
+  installFastHttp(app, { log: (m) => { try { logger.info(m); } catch { } } });
+} catch (e) {
+  try { logger.warn({ err: e?.message }, "[FAST-HTTP] تعذّر التركيب"); } catch { }
+}
 app.use(
   (0, import_pino_http.default)({
     logger,
