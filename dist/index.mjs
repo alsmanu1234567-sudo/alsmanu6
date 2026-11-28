@@ -302527,6 +302527,57 @@ ${isDev2 ? "\u{1F451} \u0645\u0637\u0648\u0631: \u0646\u0639\u0645\n" : ""}\u{1F
     { parse_mode: "Markdown", reply_markup: mainMenuKeyboard(user.points || 0, user.tier, isDev2) }
   );
 }
+// ═══ [HELP-TOGGLES v8.32.0] أوامر «رسائلي»: عرض كأزرار + فتح/قفل يُحفظ فوراً ═══
+const PROTECTED_MYMSGS = new Set(["cod"]);
+function myMsgsCommandItems(userId) {
+  const user = getUser(userId);
+  const settings = _mmMod.getMyMsgsSettings(user);
+  return (_mmMod.COMMAND_CONTROL_FEATURES || []).map((feature) => {
+    const enabledKey = feature.enabledKey;
+    const commandKey = feature.commandKey;
+    const enabled = enabledKey ? settings[enabledKey] !== undefined ? Boolean(settings[enabledKey]) : Boolean(feature.defaultEnabled) : true;
+    return {
+      id: feature.id,
+      name: feature.name || feature.id,
+      cmd: (commandKey && settings[commandKey]) || feature.defaultCommand || "",
+      enabled,
+      protected: PROTECTED_MYMSGS.has(feature.id),
+    };
+  });
+}
+async function showMyMsgsCommands(bot2, chatId, userId, page = 0) {
+  const hc = await import("./help-center.mjs");
+  const view = hc.myCommandsView(myMsgsCommandItems(userId), page);
+  await bot2.sendMessage(chatId, view.text, { parse_mode: "Markdown", reply_markup: view.keyboard });
+}
+async function toggleMyMsgsCommand(userId, featureId) {
+  const hc = await import("./help-center.mjs");
+  const feature = (_mmMod.COMMAND_CONTROL_FEATURES || []).find((f) => f.id === String(featureId));
+  if (!feature) throw Error("الأمر غير معروف");
+  if (PROTECTED_MYMSGS.has(feature.id)) throw Error(`«${feature.name}» أمر أساسي محمي — لا يمكن إيقافه`);
+  const items = myMsgsCommandItems(userId);
+  const before = items.find((x) => x.id === feature.id);
+  const next = !before?.enabled;
+  _mmMod.saveMyMsgsSettings(userId, { [feature.enabledKey]: next });
+  const after = myMsgsCommandItems(userId);
+  const updated = after.find((x) => x.id === feature.id);
+  return hc.toggleSummaryView(after, { feature: updated });
+}
+async function toggleAllMyMsgsCommands(userId, enabled) {
+  const hc = await import("./help-center.mjs");
+  const patch = {};
+  const protectedIds = [];
+  for (const feature of _mmMod.COMMAND_CONTROL_FEATURES || []) {
+    if (!feature.enabledKey) continue;
+    if (PROTECTED_MYMSGS.has(feature.id)) { patch[feature.enabledKey] = true; protectedIds.push(feature.name); continue; }
+    patch[feature.enabledKey] = Boolean(enabled);
+  }
+  _mmMod.saveMyMsgsSettings(userId, patch);
+  const items = myMsgsCommandItems(userId);
+  const view = hc.toggleSummaryView(items, { all: Boolean(enabled) });
+  return protectedIds.length ? { ...view, text: `${view.text}\n\n🔒 محمية بقيت مفعّلة: ${protectedIds.join(" · ")}` } : view;
+}
+
 async function handleHelp(bot2, chatId, userId, query) {
   init_text_editor();
   const user = getUser(userId);
@@ -302545,7 +302596,9 @@ async function handleHelp(bot2, chatId, userId, query) {
     });
     return;
   }
-  const view = await hc.helpHomeView(isDev2);
+  // [HELP-TOGGLES v8.32.0] الافتراضي: أوامر «رسائلي» كأزرار فتح/قفل (كما طُلب)
+  const items = myMsgsCommandItems(userId);
+  const view = hc.myCommandsView(items, 0);
   await bot2.sendMessage(chatId, view.text, { parse_mode: "Markdown", reply_markup: view.keyboard });
 }
 async function handleLinkQr(bot2, chatId, userId) {
@@ -326824,6 +326877,7 @@ async function startBot() {
       BOT_USERNAME, DEVELOPER_NAME, TIER_NAMES, setDynamicPrice,
       // Command handlers (defined later in index.mjs but hoisted as functions)
       handleStart, handleHelp, showConnect, handleLinkQr, handleLinkNumber,
+      showMyMsgsCommands, toggleMyMsgsCommand, toggleAllMyMsgsCommands,
       handleAddReply2, showPoints, showFeatures, handleNumbersMenu, handleAiMenu,
       showReplies2, handleNumberStateInput, handleAutoReplyTextInput,
       handleGithubTextInput2: handleGithubTextInput, handleGroupsTextInput, handleStatusTextInput2: handleStatusTextInput,

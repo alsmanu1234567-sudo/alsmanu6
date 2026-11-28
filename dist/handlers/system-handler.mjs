@@ -202,6 +202,35 @@ export async function handleCallback(bot, query) {
     await _deps.showHelp(bot, chatId, userId, user, isDev);
     return true;
   }
+  // ═══ [HELP-TOGGLES v8.32.0] فتح/قفل أوامر «رسائلي» من /help ═══
+  if (data.startsWith('help_tg_') || data.startsWith('help_tgall_') || data.startsWith('help_myp_')) {
+    const editMsg = async (view) => {
+      const opts = { parse_mode: 'Markdown', reply_markup: view.keyboard };
+      try {
+        if (query.message) await bot.editMessageText(view.text, { chat_id: chatId, message_id: query.message.message_id, ...opts });
+        else await bot.sendMessage(chatId, view.text, opts);
+      } catch {
+        await bot.sendMessage(chatId, view.text, opts);
+      }
+    };
+    try { await bot.answerCbQuery?.(query.id); } catch {}
+    try {
+      if (data.startsWith('help_tgall_')) {
+        const enabled = data.endsWith('_1');
+        await editMsg(await _deps.toggleAllMyMsgsCommands(userId, enabled));
+        return true;
+      }
+      if (data.startsWith('help_myp_')) {
+        await _deps.showMyMsgsCommands(bot, chatId, userId, Number(data.replace('help_myp_', '')) || 0);
+        return true;
+      }
+      await editMsg(await _deps.toggleMyMsgsCommand(userId, data.replace('help_tg_', '')));
+      return true;
+    } catch (error) {
+      await bot.sendMessage(chatId, `⚠️ ${String(error?.message || error).slice(0, 160)}`);
+      return true;
+    }
+  }
   // ═══ [HELP-CENTER v8.29.0] دليل الأوامر التفاعلي ═══
   if (data === 'help_home' || data.startsWith('help_cat_') || data.startsWith('help_cmd_') || data === 'help_search') {
     const hc = await import('../help-center.mjs');

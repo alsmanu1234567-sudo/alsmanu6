@@ -97,7 +97,7 @@ test('اللوحة تعرض المفتاحين الجديدين وتسمح بح�
   const ui = readFileSync(new URL('../../public/groups-guard-web.js', import.meta.url), 'utf8');
   assert.match(ui, /toggleRow\("imageGuard", "منع الصور"/);
   assert.match(ui, /toggleRow\("audioGuard", "منع الصوت"/);
-  assert.match(webapp, /"imageGuard", "cardImages", "audioGuard"/);
+  assert.match(webapp, /"imageGuard", "cardImages", "cardsOff", "deleteMax", "audioGuard"/);
 });
 
 test('الترحيب يُرسل مرة واحدة بعد 10 ثوانٍ ويُمدَّد 5 ثوانٍ مع كل موجة', () => {
@@ -218,7 +218,7 @@ test('اللوحة تعرض المفتاحين الجديدين وتسمح بح�
   const ui = readFileSync(new URL('../../public/groups-guard-web.js', import.meta.url), 'utf8');
   assert.match(ui, /toggleRow\("imageGuard", "منع الصور"/);
   assert.match(ui, /toggleRow\("audioGuard", "منع الصوت"/);
-  assert.match(webapp, /"imageGuard", "cardImages", "audioGuard"/);
+  assert.match(webapp, /"imageGuard", "cardImages", "cardsOff", "deleteMax", "audioGuard"/);
 });
 
 test('الترحيب يُرسل مرة واحدة بعد 10 ثوانٍ ويُمدَّد 5 ثوانٍ مع كل موجة', () => {

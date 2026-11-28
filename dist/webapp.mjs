@@ -187,10 +187,49 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     const groupId = guardGroupId(req);
     const patch = req.body?.patch || {};
     const allowed = {};
-    for (const key of ["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "cardImages", "audioGuard", "buttonGuard", "reactionGuard", "reactionEmojis", "reactionKickSec", "kickOnLimit", "maxWarnings", "stickerWarnEvery", "kickDelaySec", "words", "welcome", "goodbye", "floodGuard", "floodCount", "floodWindowSec", "repeatGuard", "autoReKick", "whitelist", "quiet", "blockedDomains", "allowedDomains", "dailyReport", "dailyReportHour"]) {
+    for (const key of ["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "cardImages", "cardsOff", "deleteMax", "audioGuard", "buttonGuard", "reactionGuard", "reactionEmojis", "reactionKickSec", "kickOnLimit", "maxWarnings", "stickerWarnEvery", "kickDelaySec", "words", "welcome", "goodbye", "floodGuard", "floodCount", "floodWindowSec", "repeatGuard", "autoReKick", "whitelist", "quiet", "blockedDomains", "allowedDomains", "dailyReport", "dailyReportHour"]) {
       if (key in patch) allowed[key] = patch[key];
     }
     return { groupId, config: publicGuardConfig(groupGuard.updateGroupConfig(uid, groupId, allowed)) };
+  }));
+  // ═══ [DEPUTY v8.32.0] نواب المشرفين: صلاحيات لكل عضو + حدّ طرد محفوظ ═══
+  app.get('/api/fw/groups/deputies', guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    const deputy = await import("./lib/deputy-admins.mjs");
+    return { groupId, ...deputy.overview(uid, groupId) };
+  }));
+  app.post('/api/fw/groups/deputies', parseJson, guard(async (uid, req) => {
+    const groupId = guardGroupId(req);
+    const deputy = await import("./lib/deputy-admins.mjs");
+    const action = String(req.body?.action || "").trim();
+    const jid = String(req.body?.jid || "").trim();
+    const target = jid && !jid.includes("@")
+      ? (String(req.body?.lid || "").trim() || `${String(jid).replace(/\D/g, "")}@s.whatsapp.net`)
+      : jid;
+    if (action === "add") {
+      if (!target.includes("@")) throw new Error("اختر عضواً أو أدخل رقمه بالدولة");
+      const before = deputy.isDeputy(uid, groupId, target);
+      deputy.addDeputy(uid, groupId, target, { name: String(req.body?.name || "").slice(0, 80), addedBy: String(uid) });
+      if (!before) deputy.setDeputyPerms(uid, groupId, target, req.body?.perms || {});
+      return { groupId, ok: true, ...deputy.overview(uid, groupId) };
+    }
+    if (action === "remove") {
+      if (!deputy.removeDeputy(uid, groupId, target)) throw new Error("هذا العضو ليس نائب مشرف");
+      return { groupId, ok: true, ...deputy.overview(uid, groupId) };
+    }
+    if (action === "perms") {
+      deputy.setDeputyPerms(uid, groupId, target, req.body?.perms || {});
+      return { groupId, ok: true, ...deputy.overview(uid, groupId) };
+    }
+    if (action === "reset-quota") {
+      deputy.resetKickUsage(uid, groupId, target);
+      return { groupId, ok: true, ...deputy.overview(uid, groupId) };
+    }
+    if (action === "settings") {
+      deputy.setGroupSettings(uid, groupId, req.body?.settings || {});
+      return { groupId, ok: true, ...deputy.overview(uid, groupId) };
+    }
+    throw new Error("إجراء غير معروف");
   }));
   app.post('/api/fw/groups/guard/card', parseJson, guard(async (uid, req) => {
     const groupId = guardGroupId(req);

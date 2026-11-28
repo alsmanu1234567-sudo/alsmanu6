@@ -91,3 +91,38 @@ test("تيليجرام: /help كلمة مدعوم والأزرار تُعالَ�
   const idx = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
   assert.match(idx, /async function handleHelp\(bot2, chatId, userId, query\)/);
 });
+
+test("أزرار /help: فتح/قفل كل أمر + فتح الكل وقفل الكل + محمي", async () => {
+  const items = [
+    { id: "ai", name: "الذكاء", cmd: "/ai", enabled: true },
+    { id: "cod", name: "ربط", cmd: "/cod", enabled: true, protected: true },
+    { id: "del", name: "حذف", cmd: "/del", enabled: false },
+  ];
+  const view = hc.myCommandsView(items, 0);
+  const cbs = view.keyboard.inline_keyboard.flat().map((b) => b.callback_data);
+  assert.ok(cbs.includes("help_tg_ai"));
+  assert.ok(cbs.includes("help_tg_del"));
+  assert.ok(cbs.includes("help_tgall_1"));
+  assert.ok(cbs.includes("help_tgall_0"));
+  assert.ok(cbs.includes("help_home"), "زر الدليل الكامل موجود");
+  assert.match(view.text, /المفتوح/);
+  // الصفحات
+  const many = Array.from({ length: 14 }, (_, i) => ({ id: `x${i}`, name: `أمر ${i}`, cmd: `/x${i}`, enabled: i % 2 === 0 }));
+  const p0 = hc.myCommandsView(many, 0);
+  const nav = p0.keyboard.inline_keyboard.flat().filter((b) => b.callback_data.startsWith("help_myp_"));
+  assert.ok(nav.length >= 2, "تنقّل بين الصفحات");
+});
+
+test("ربط /help بالأوامر الفعلية في index.mjs ونظام الحماية بالنواب", () => {
+  const idx = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+  assert.match(idx, /myMsgsCommandItems/);
+  assert.match(idx, /_mmMod\.saveMyMsgsSettings/);
+  assert.match(idx, /PROTECTED_MYMSGS/);
+  const sys = readFileSync(new URL("../../dist/handlers/system-handler.mjs", import.meta.url), "utf8");
+  assert.match(sys, /help_tgall_/);
+  const guard = readFileSync(new URL("../../services/group-guard.mjs", import.meta.url), "utf8");
+  assert.match(guard, /deputy\.authorize\(/);
+  assert.match(guard, /deputy\.consumeKick\(/);
+  assert.match(guard, /case "delete": \{/);
+  assert.match(guard, /rememberMessage\(groupJid, message\)/);
+});

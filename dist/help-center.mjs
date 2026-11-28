@@ -234,3 +234,59 @@ export async function catalogForWeb(isDev = false) {
     commands: commands.map(({ id, cmd, desc, cat, adminOnly, aliases, feature }) => ({ id, cmd, desc, cat, adminOnly: !!adminOnly, aliases: aliases || [], feature: feature || "" })),
   };
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// [HELP-TOGGLES v8.32.0] قائمة أوامر «رسائلي» كأزرار فتح/قفل
+// items: [{ id, name, cmd, enabled, protected }]
+// ═══════════════════════════════════════════════════════════════════
+const TOGGLE_PAGE = 6;
+
+export function myCommandsView(items = [], page = 0) {
+  const list = Array.isArray(items) ? items : [];
+  const pages = Math.max(1, Math.ceil(list.length / TOGGLE_PAGE));
+  const current = Math.min(Math.max(0, Number(page) || 0), pages - 1);
+  const slice = list.slice(current * TOGGLE_PAGE, (current + 1) * TOGGLE_PAGE);
+  const on = list.filter((x) => x.enabled).length;
+  const rows = slice.map((item) => [
+    {
+      text: `${item.protected ? "🔒" : item.enabled ? "✅" : "❌"} ${item.name} — ${item.cmd}`,
+      callback_data: `help_tg_${item.id}`,
+    },
+  ]);
+  if (pages > 1) {
+    const nav = [];
+    if (current > 0) nav.push({ text: "⬅️", callback_data: `help_myp_${current - 1}` });
+    nav.push({ text: `${current + 1}/${pages}`, callback_data: `help_myp_${current}` });
+    if (current + 1 < pages) nav.push({ text: "➡️", callback_data: `help_myp_${current + 1}` });
+    rows.push(nav);
+  }
+  rows.push([
+    { text: "🔓 فتح الكل", callback_data: "help_tgall_1" },
+    { text: "🔒 قفل الكل", callback_data: "help_tgall_0" },
+  ]);
+  rows.push([
+    { text: "📖 دليل كل الأوامر", callback_data: "help_home" },
+    { text: "🏠 القائمة", callback_data: "home" },
+  ]);
+  const text = [
+    "❓ *أوامر «رسائلي» — تشغيل/إيقاف*",
+    "",
+    `المفتوح: *${on}* · المقفول: *${list.length - on}* من ${list.length}`,
+    "",
+    "اضغط أي أمر لتبديل حالته فوراً (يُحفظ تلقائياً).",
+    "🔒 = أمر أساسي محمي لا يُقفل.",
+    "",
+    "تصفّح بقية أوامر البوت من «📖 دليل كل الأوامر».",
+  ].join("\n");
+  return { text, keyboard: { inline_keyboard: rows } };
+}
+
+export function toggleSummaryView(items = [], { feature = null, all = null } = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const on = list.filter((x) => x.enabled).length;
+  let head = "";
+  if (feature) head = `${feature.enabled ? "✅ فُتح" : "❌ أُقفل"}: ${feature.name} (${feature.cmd})`;
+  if (all !== null) head = all ? "🔓 تم فتح كل الأوامر القابلة للفتح" : "🔒 تم قفل كل الأوامر القابلة للقفل";
+  const view = myCommandsView(list, 0);
+  return { text: `${head}\n\n${view.text}`, keyboard: view.keyboard };
+}

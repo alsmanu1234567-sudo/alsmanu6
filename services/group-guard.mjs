@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { sendInteractive, listButton, extractInteractiveResponseId } from "./interactive.js";
 import { effectiveGuardWords, normalizePresetKeys } from "./wordlist-presets.mjs";
 import { removeParticipant, kickErrorText } from "../dist/lib/wa-kick.mjs";
+import * as deputy from "../dist/lib/deputy-admins.mjs";
 
 // [ROBUST-PATHS] لا نعتمد على process.cwd() وحده: تشغيل البوت قد يكون من مجلد مختلف عن مجلد الكود
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -60,6 +61,10 @@ const DEFAULTS = {
   imageGuard: false,
   // [CARD-IMAGES v8.28.0] تنبيهات التحذير/الطرد بصورة أو نص فقط
   cardImages: true,
+  // [CARD-OFF v8.32.0] إيقاف بطاقة نوع معيّن فقط (الحماية تستمر)
+  cardsOff: {},
+  // [DELETE v8.32.0] أقصى عدد رسائل في أمر .حزف
+  deleteMax: 50,
   audioGuard: false,
   // [BUTTON-GUARD v8.20.0] منع الأزرار وأزرار القوائم (رسائل تفاعلية/قوائم) — مطفأ افتراضياً
   buttonGuard: false,
@@ -343,7 +348,7 @@ function fileFor(userId) {
 // نصدّر إعدادات المجموعات فقط: الأعلام والنصوص والقوائم — لا التحذيرات ولا قوائم الطرد
 // ولا سجلات الأعضاء (تلك معلومات شخصية لا تُرفع).
 const BACKUP_CONFIG_KEYS = [
-  "enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "cardImages", "audioGuard", "buttonGuard", "reactionGuard", "reactionEmojis", "reactionKickSec",
+  "enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "cardImages", "cardsOff", "deleteMax", "audioGuard", "buttonGuard", "reactionGuard", "reactionEmojis", "reactionKickSec",
   "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport",
   "maxWarnings", "stickerWarnEvery", "kickDelaySec", "floodCount", "floodWindowSec",
   "dailyReportHour", "words", "blockedDomains", "allowedDomains",
@@ -351,6 +356,7 @@ const BACKUP_CONFIG_KEYS = [
 ];
 
 export function exportGuardSettings(userId) {
+  // [DEPUTY v8.32.0] تُصدَّر إعدادات النواب أيضاً (حد الطرد/الصلاحيات) بلا أرقام هواتف إضافية
   const state = getState(userId);
   const groups = {};
   for (const [groupJid, cfg] of Object.entries(state.groups || {})) {
@@ -361,6 +367,10 @@ export function exportGuardSettings(userId) {
       if (key === "whitelist") continue; // أرقام أعضاء = بيانات شخصية
       picked[key] = cfg[key];
     }
+    try {
+      const dup = deputy.getGroupSettings(userId, groupJid);
+      if (dup) picked.deputySettings = { quotaEnabled: Boolean(dup.quotaEnabled), kickLimit: Number(dup.kickLimit), quotaHours: Number(dup.quotaHours) };
+    } catch { }
     if (Object.keys(picked).length) groups[String(groupJid)] = picked;
   }
   return groups;
@@ -383,6 +393,7 @@ export function importGuardSettings(userId, groups, { replace = false } = {}) {
       if (cfg[key] !== undefined) patch[key] = cfg[key];
     }
     if (Object.keys(patch).length) { updateGroupConfig(userId, String(groupJid), patch); applied++; }
+    if (cfg.deputySettings) { try { deputy.setGroupSettings(userId, String(groupJid), cfg.deputySettings); } catch { } }
   }
   persist(userId);
   return { applied, skipped };
@@ -479,6 +490,14 @@ export function updateGroupConfig(userId, groupJid, patch = {}) {
       next.whitelist = normalizeJidList(value);
     } else if (key === "blockedDomains" || key === "allowedDomains") {
       next[key] = normalizeDomainList(value);
+    } else if (key === "cardsOff") {
+      const src = value && typeof value === "object" ? value : {};
+      next.cardsOff = {};
+      for (const kind of ["warn1", "warn2", "warn3", "join", "welcome", "leave", "kick"]) {
+        next.cardsOff[kind] = Boolean(src[kind]);
+      }
+    } else if (key === "deleteMax") {
+      next.deleteMax = Math.max(1, Math.min(200, Number(value) || DEFAULTS.deleteMax));
     } else if (["enabled", "linkGuard", "wordGuard", "stickerGuard", "imageGuard", "cardImages", "audioGuard", "buttonGuard", "reactionGuard", "kickOnLimit", "floodGuard", "repeatGuard", "autoReKick", "dailyReport"].includes(key)) {
       next[key] = Boolean(value);
     } else if (key === "reactionEmojis") {
@@ -690,6 +709,7 @@ export function escalationFor(nextCount, maxWarnings) {
 }
 
 const COMMANDS = [
+  { key: "delete", aliases: ["حزف", "حذف", "حدف", "مسح", "delete"], usage: ".حزف  أو  .حزف 20", description: "بالرد على رسالة يحذفها للجميع. مع رقم: يحذف آخر N رسالة في المجموعة، وإن رددت على شخص يحذف آخر N رسالة أرسلها هو.", adminOnly: true },
   { key: "kick", aliases: ["طرد", "كيك"], usage: ".طرد @العضو", description: "يطرد العضو فوراً مع كرت أحمر", adminOnly: true },
   { key: "kickall", aliases: ["طرد-الكل", "طرد الكل", "كيك-الكل"], usage: ".طرد الكل", description: "يطرد كل الأعضاء (غير المشرفين) في ثانية واحدة", adminOnly: true },
   { key: "add", aliases: ["اضافه", "اضافة", "add"], usage: ".اضافة 249xxxxxxxxx", description: "يضيف رقماً برمز الدولة إلى المجموعة", adminOnly: true },
@@ -817,8 +837,9 @@ export function resolveTarget(message, rest) {
 }
 
 async function sendCard(sock, groupJid, file, caption, mentions = [], options = {}) {
-  // [CARD-IMAGES v8.28.0] options.images === false ⇒ تنبيه نصي بلا صورة
-  if (options && options.images === false) {
+  // [CARD-IMAGES/CARD-OFF v8.32.0] إيقاف الصور عموماً أو إيقاف بطاقة نوع معيّن ⇒ نص فقط
+  const kindOff = options?.kind && options?.cardsOff ? Boolean(options.cardsOff[options.kind]) : false;
+  if ((options && options.images === false) || kindOff) {
     return sock.sendMessage(groupJid, { text: caption }, mentions.length ? { mentions } : undefined)
       .catch(() => null);
   }
@@ -834,6 +855,31 @@ async function sendCard(sock, groupJid, file, caption, mentions = [], options = 
 // [LID-FIX] بعض الأعضاء معرّفهم LID وليس رقماً — عند المنشن يظهر رقم طويل أو «عضو».
 // نحوّل المعرّف إلى رقم الهاتف الحقيقي من بيانات المجموعة حتى يظهر المنشن أخضر بالاسم.
 const participantsCache = new Map();
+// [DELETE v8.32.0] آخر رسائل كل مجموعة (مفاتيح فقط) لتنفيذ .حزف بعدد
+const recentMessages = new Map();
+const RECENT_MAX = 120;
+function rememberMessage(groupJid, message) {
+  try {
+    const key = message?.key;
+    if (!groupJid || !key?.id) return;
+    const list = recentMessages.get(groupJid) || [];
+    list.push({
+      id: key.id,
+      participant: message?.key?.participant || message?.participant || "",
+      fromMe: Boolean(key.fromMe),
+      at: Date.now(),
+      key,
+    });
+    while (list.length > RECENT_MAX) list.shift();
+    recentMessages.set(groupJid, list);
+  } catch { }
+}
+export function recentMessagesFor(groupJid) {
+  return [...(recentMessages.get(groupJid) || [])];
+}
+export function clearRecentMessages(groupJid) {
+  recentMessages.delete(groupJid);
+}
 
 async function groupParticipants(sock, groupJid, force = false) {
   const key = `${groupJid}`;
@@ -993,7 +1039,7 @@ export async function issueWarning({ userId, sock, groupJid, memberJid, cfg, rea
   }
 
   // [WARN-SILENT] التحذيرات الصامتة (صور/صوت) تكتفي برسالة الحذف وتُظهر الكرت عند الإنذار الأخير فقط
-  if (!silent || level === "final") await sendCard(sock, groupJid, cfg.cards[kind], caption, m.mentions, { images: cfg.cardImages !== false });
+  if (!silent || level === "final") await sendCard(sock, groupJid, cfg.cards[kind], caption, m.mentions, { images: cfg.cardImages !== false, kind, cardsOff: cfg.cardsOff || {} });
 
   let kicked = false;
   const pendingKey = `${groupJid}:${targetJid}`;
@@ -1182,6 +1228,7 @@ const BUTTON_REASON_LABELS = {
 export async function handleModeration({ userId, sock, message, cfg }) {
   const key = message?.key || {};
   const groupJid = key.remoteJid;
+  rememberMessage(groupJid, message); // [DELETE] نحتفظ بالمفاتيح لحذف آخر N رسالة
   if (!groupJid?.endsWith("@g.us") || key.fromMe) return { handled: false };
   if (!cfg?.enabled) return { handled: false };
 
@@ -1346,6 +1393,11 @@ export async function handleModeration({ userId, sock, message, cfg }) {
   return { handled: false };
 }
 
+function permissionLabel(key) {
+  const found = deputy.PERMISSIONS.find((p) => p.key === key);
+  return found ? found.label : String(key || "");
+}
+
 async function sendCodesList(sock, groupJid) {
   const list = COMMANDS.filter((command) => command.key !== "list");
   const toRow = (command) => ({
@@ -1395,6 +1447,34 @@ export async function handleCommand({ userId, sock, message, text }) {
   const targetMentions = targetMention ? targetMention.mentions : [];
   const reply = (body, mentions = []) => sock.sendMessage(groupJid, { text: body }, mentions.length ? { mentions } : undefined).catch(() => null);
 
+  // ═══ [DEPUTY v8.32.0] بوابة الصلاحيات: مالك/مشرف، وإلا نائب مشرف بصلاحية، وإلا رفض ═══
+  const senderJid = jidOf(message?.key?.participant || message?.participant || "");
+  const senderIsAdmin = senderJid ? await isGroupAdmin(sock, groupJid, senderJid) : false;
+  const verdict = deputy.authorize({
+    userId, groupJid, senderJid,
+    senderIsAdmin,
+    senderIsOwner: false,
+    commandKey: parsed.key,
+  });
+  if (!verdict.allowed) {
+    if (verdict.reason === "quota") {
+      const mins = Math.max(1, Math.ceil((verdict.quota?.resetInSec || 0) / 60));
+      await reply(`⛔ *انتهى حدّ الطرد الخاص بك*\nالحد: ${verdict.quota?.limit} عملية كل ${deputy.getGroupSettings(userId, groupJid).quotaHours} ساعة.\nإعادة الضبط بعد ~${mins} دقيقة.`);
+      return { handled: true, denied: "quota" };
+    }
+    if (verdict.reason === "missing-permission") {
+      await reply(`⛔ لا تملك صلاحية «${permissionLabel(verdict.permission)}» في هذه المجموعة.\nراجع مالك البوت لمنحك الصلاحية.`);
+      return { handled: true, denied: verdict.permission };
+    }
+    if (verdict.reason === "unknown-command") {
+      await reply("⛔ هذا الأمر للمشرفين فقط.");
+      return { handled: true, denied: "admin-only" };
+    }
+    // عضو عادي جرّب أمراً إدارياً
+    await reply("⛔ هذا الأمر إداري — للمشرفين أو نواب المشرفين المصرّح لهم فقط.");
+    return { handled: true, denied: verdict.reason || "not-allowed" };
+  }
+
   switch (parsed.key) {
     case "list": {
       await sendCodesList(sock, groupJid);
@@ -1433,8 +1513,68 @@ export async function handleCommand({ userId, sock, message, text }) {
       const result = await issueWarning({ userId, sock, groupJid, memberJid: target, cfg, reason: "manual", delayKick: false });
       return { handled: true, ...result };
     }
+    case "delete": {
+      // [DELETE v8.32.0] حذف للجميع عبر revoke (يشترط أن يكون البوت مشرفاً且在 حدود واتساب)
+      const ctx = message?.message?.extendedTextMessage?.contextInfo
+        || message?.message?.imageMessage?.contextInfo
+        || message?.message?.videoMessage?.contextInfo
+        || {};
+      const quotedKey = ctx?.stanzaId ? { remoteJid: groupJid, id: ctx.stanzaId, fromMe: false, participant: ctx.participant } : null;
+      const digits = String(rest || "").replace(/\D/g, "");
+      const requested = digits ? Number(digits) : 0;
+      const max = Math.max(1, Number(cfg.deleteMax) || DEFAULTS.deleteMax);
+      const replyTargetParticipant = ctx?.participant ? jidOf(ctx.participant) : "";
+
+      const deleteKey = async (key) => {
+        try {
+          await sock.sendMessage(groupJid, { delete: key });
+          noteGuardEvent(userId, groupJid, "deleted", { jid: key?.participant || "", reason: "manual-delete" });
+          return true;
+        } catch { return false; }
+      };
+
+      if (!requested) {
+        if (!quotedKey) {
+          await reply(`🗑️ ردّ على الرسالة التي تريد حذفها ثم أرسل .حزف\nأو استخدم .حزف 20 لحذف آخر 20 رسالة.`);
+          return { handled: true };
+        }
+        const ok = await deleteKey(quotedKey);
+        await reply(ok ? "🗑️ حُذفت الرسالة للجميع." : "⚠️ تعذّر الحذف — تأكد أن البوت مشرف وأن الرسالة قابلة للحذف.");
+        return { handled: true, deleted: ok ? 1 : 0 };
+      }
+
+      const target = Math.min(requested, max);
+      const pool = recentMessagesFor(groupJid);
+      const filtered = (replyTargetParticipant ? pool.filter((m) => jidOf(m.participant) === replyTargetParticipant) : pool)
+        .filter((m) => !quotedKey || m.id !== quotedKey.id);
+      const take = filtered.slice(-target).reverse();
+      if (!take.length) {
+        await reply(`⚠️ لا توجد رسائل محفوظة${replyTargetParticipant ? " لهذا العضو" : ""} في الذاكرة. البوت يحفظ آخر ${RECENT_MAX} رسالة فقط.`);
+        return { handled: true, deleted: 0 };
+      }
+      let done = 0;
+      for (const item of take) {
+        if (await deleteKey(item.key)) done++;
+        await new Promise((r) => setTimeout(r, 350));
+      }
+      const who = replyTargetParticipant ? (await mentionFor(sock, groupJid, replyTargetParticipant)).token : "المجموعة";
+      const notes = [];
+      if (requested > target) notes.push(`الحد الأقصى ${max} — طُلب ${requested}.`);
+      if (done < take.length) notes.push(`تعذّر حذف ${take.length - done} (قديمة أو غير قابلة للحذف).`);
+      await reply(`🗑️ حُذفت *${done}* من *${take.length}* رسالة لـ ${who}.${notes.length ? "\n" + notes.join("\n") : ""}`);
+      return { handled: true, deleted: done, attempted: take.length };
+    }
     case "kick": {
       if (!target) { await reply("حدد العضو: `.طرد @العضو`"); return { handled: true }; }
+      // [DEPUTY] احتساب عملية الطرد على نائب المشرف (يُحفظ على القرص)
+      if (verdict.role === "deputy") {
+        const spent = deputy.consumeKick(userId, groupJid, senderJid);
+        if (!spent.ok) {
+          const mins = Math.max(1, Math.ceil((spent.resetInSec || 0) / 60));
+          await reply(`⛔ انتهى حدّ الطرد (${deputy.getGroupSettings(userId, groupJid).kickLimit}) — إعادة الضبط بعد ~${mins} دقيقة.`);
+          return { handled: true, denied: "quota" };
+        }
+      }
       await sendCard(sock, groupJid, cfg.cards.warn3, `🚫 تم طرد ${mention} من المجموعة بسبب مخالفة القوانين.`, targetMentions);
       try {
         await sock.groupParticipantsUpdate(groupJid, [target], "remove");

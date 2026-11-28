@@ -228,6 +228,78 @@
 
   let state = { groupId: "", config: null, warnings: [], kicked: [], commands: [], stats: {}, audit: [] };
 
+  // ═══ [DEPUTY v8.32.0] نواب المشرفين: إضافة/إزالة/صلاحيات/حدّ طرد ═══
+  const DeputyUI = {
+    data: { groupId: "", settings: { quotaEnabled: true, kickLimit: 10, quotaHours: 5 }, permissions: [], deputies: [] },
+    card() {
+      const d = DeputyUI.data;
+      return `<div class="gg-card wide" id="ggDeputyCard">
+        <h3>👑 نواب المشرفين <span class="gg-tag">${esc(d.deputies.length)}</span></h3>
+        <div class="mut">نائب المشرف عضو عادي بلا رتبة واتساب، يُمنح صلاحيات أوامر إدارية في هذه المجموعة فقط. كل نائب له صلاحيات مستقلة وحدّ طرد خاص محفوظ على القرص.</div>
+        <div class="gg-row"><div><b>حدّ الطرد الافتراضي</b><div class="mut">عدد عمليات الطرد المسموحة لكل نائب خلال المدة</div></div>
+          <input class="gg-in" style="width:70px" type="number" min="0" max="500" data-dquota="kickLimit" value="${esc(d.settings.kickLimit)}">
+          <input class="gg-in" style="width:70px" type="number" min="1" max="168" data-dquota="quotaHours" value="${esc(d.settings.quotaHours)}">
+          <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" data-dquota="quotaEnabled" ${d.settings.quotaEnabled ? "checked" : ""}> تشغيل الحد</label>
+          <button class="gg-btn" data-dsave="1">حفظ</button></div>
+        <div class="gg-row"><input class="gg-in grow" data-dadd="1" placeholder="رقم العضو بالدولة أو معرّفه (مثال 249114375739)"><button class="gg-btn ok" data-daddbtn="1">➕ إضافة نائب</button></div>
+        <div class="gg-list" data-dlist="1">${d.deputies.length ? d.deputies.map((row) => `
+          <div class="gg-cmd" style="display:block">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <b>${esc(row.name || row.jid.split("@")[0])}</b>
+              <span class="gg-tag">${esc(row.kickLeft === null ? "بلا حدّ" : `طرد: ${row.kickUsed}/${d.settings.kickLimit} · متبقٍ ${row.kickLeft}`)}</span>
+              ${row.resetInSec ? `<small class="mut">يتصفّر بعد ${esc(Math.ceil(row.resetInSec / 60))} دقيقة</small>` : ""}
+              <button class="gg-btn alt" data-dreset="${esc(row.jid)}">تصفير العدّاد</button>
+              <button class="gg-btn" data-ddel="${esc(row.jid)}" style="background:#7a2b3a">إزالة</button>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+              ${d.permissions.map((p) => `<button class="gg-btn ${row.perms[p.key] ? "ok" : "alt"}" data-dperm="${esc(row.jid)}|${esc(p.key)}">${p.emoji} ${esc(p.label)} ${row.perms[p.key] ? "✅" : "❌"}</button>`).join("")}
+            </div>
+          </div>`).join("") : `<div class="mut">لا يوجد نواب بعد — أضف أول نائب من الحقل أعلاه.</div>`}</div>
+      </div>`;
+    },
+    async load(groupId) {
+      DeputyUI.data.groupId = groupId;
+      try {
+        const data = await api(`/api/fw/groups/deputies?groupId=${encodeURIComponent(groupId)}`);
+        DeputyUI.data = { ...DeputyUI.data, ...data, groupId };
+      } catch { /* الحماية تعمل حتى لو فشل تحميل النواب */ }
+    },
+    bind(body) {
+      const card = body.querySelector("#ggDeputyCard");
+      if (!card) return;
+      const send = async (payload) => {
+        try {
+          const data = await api("/api/fw/groups/deputies", { groupId: DeputyUI.data.groupId, ...payload });
+          DeputyUI.data = { ...DeputyUI.data, ...data };
+          toast("✅ تم الحفظ");
+          render(body);
+        } catch (error) { toast("❌ " + error.message); }
+      };
+      const saveBtn = card.querySelector("[data-dsave]");
+      if (saveBtn) saveBtn.addEventListener("click", () => {
+        const value = (name) => card.querySelector(`[data-dquota="${name}"]`);
+        send({ action: "settings", settings: {
+          kickLimit: Number(value("kickLimit")?.value || 10),
+          quotaHours: Number(value("quotaHours")?.value || 5),
+          quotaEnabled: Boolean(value("quotaEnabled")?.checked),
+        } });
+      });
+      const addBtn = card.querySelector("[data-daddbtn]");
+      if (addBtn) addBtn.addEventListener("click", () => {
+        const jid = String(card.querySelector("[data-dadd]")?.value || "").replace(/[^\d@.\w-]/g, "");
+        if (!jid) { toast("❌ أدخل رقم العضو"); return; }
+        send({ action: "add", jid });
+      });
+      card.querySelectorAll("[data-ddel]").forEach((b) => b.addEventListener("click", () => send({ action: "remove", jid: b.dataset.ddel })));
+      card.querySelectorAll("[data-dreset]").forEach((b) => b.addEventListener("click", () => send({ action: "reset-quota", jid: b.dataset.dreset })));
+      card.querySelectorAll("[data-dperm]").forEach((b) => b.addEventListener("click", () => {
+        const [jid, key] = String(b.dataset.dperm).split("|");
+        const row = DeputyUI.data.deputies.find((x) => x.jid === jid);
+        send({ action: "perms", jid, perms: { [key]: !row?.perms?.[key] } });
+      }));
+    },
+  };
+
   function modal(title) {
     ensureStyle();
     const mask = document.createElement("div");
@@ -264,6 +336,7 @@
     body.innerHTML = `<div class="gg-card">جارٍ التحميل…</div>`;
     const data = await api(`/api/fw/groups/guard?groupId=${encodeURIComponent(groupId)}`);
     state = { groupId, config: data.config, warnings: data.warnings || [], kicked: data.kicked || [], commands: data.commands || [], stats: data.stats || {}, audit: data.audit || [] };
+    await DeputyUI.load(groupId);
     render(body);
   }
 
@@ -413,10 +486,13 @@
             ${Object.keys(CARD_LABELS).map((kind) => `
               <div class="gg-cardimg">
                 <img src="${cardUrl(state.groupId, kind)}" alt="${esc(CARD_LABELS[kind])}">
-                <div class="body"><span>${esc(CARD_LABELS[kind])}</span><label>تغيير<input type="file" accept="image/png,image/jpeg" data-card="${kind}"></label></div>
+                <div class="body"><span>${esc(CARD_LABELS[kind])}</span><label>تغيير<input type="file" accept="image/png,image/jpeg" data-card="${kind}"></label>
+                  <label class="gg-off"><input type="checkbox" data-cardoff="${kind}" ${(state.config?.cardsOff?.[kind]) ? "checked" : ""}> إيقاف البطاقة (الإجراء يبقى)</label></div>
               </div>`).join("")}
           </div>
         </div>
+
+        ${DeputyUI.card()}
 
         <div class="gg-card wide">
           <h3>سجل التحذيرات ${warnings.length ? `<span class="gg-tag">${esc(warnings.length)} عضو</span>` : ""}</h3>
@@ -967,6 +1043,21 @@
       } catch (error) { toast("❌ " + error.message); }
       finally { testWelcome.disabled = false; }
     });
+
+    // [CARD-OFF v8.32.0] إيقاف بطاقة بعينها دون تعطيل الحماية
+    body.querySelectorAll("[data-cardoff]").forEach((input) => {
+      input.addEventListener("change", async () => {
+        const cardsOff = { ...(state.config?.cardsOff || {}) };
+        cardsOff[input.dataset.cardoff] = input.checked;
+        try {
+          const data = await api("/api/fw/groups/guard", { groupId: state.groupId, patch: { cardsOff } });
+          state.config = data.config;
+          toast(input.checked ? "🔕 أُوقفت البطاقة (الإجراء يبقى)" : "🔔 عادت البطاقة");
+        } catch (error) { toast("❌ " + error.message); input.checked = !input.checked; }
+      });
+    });
+
+    DeputyUI.bind(body);
 
     body.querySelectorAll("[data-card]").forEach((input) => {
       input.addEventListener("change", () => {
