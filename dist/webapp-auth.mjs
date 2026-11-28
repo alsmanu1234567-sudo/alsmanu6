@@ -61,12 +61,17 @@ export function webappBaseUrl() {
 }
 
 export function webappUrlFor(uid) {
-  // [TUNNEL-VERIFY] إن كان الرابط العام غير موثوق (localtunnel بصفحة تحقق) لا نضع
-  // زر WebApp إطلاقاً — الزر كان يظهر خطأ «لا يعمل» عند المستخدم.
-  if (globalThis.__FW_PUBLIC_TRUSTED === false) return null;
+  const tok = tokenForUser(uid);
+  // [v8.48.1] الأولوية: رابط https الموثوق (نفق/بيئة) لأنه يسمح بأزرار web_app.
+  if (globalThis.__FW_PUBLIC_TRUSTED !== false) {
+    const base = webappBaseUrl();
+    if (base && /^https:\/\//i.test(base)) return `${base}/webapp?token=${tok}`;
+  }
+  // البديل الدائم: منفذ الاستضافة (http) — يعمل في المتصفح ولو مات كل الأنفاق.
+  const stable = globalThis.__STABLE_BASE__;
+  if (stable) return `${stable}/webapp?token=${tok}`;
   const base = webappBaseUrl();
-  if (!base) return null;
-  return `${base}/webapp?token=${tokenForUser(uid)}`;
+  return base ? `${base}/webapp?token=${tok}` : null;
 }
 
 // رابط محلي (fallback عند غياب رابط عام) — يُعرض كنص للمستخدم

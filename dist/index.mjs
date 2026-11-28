@@ -22,7 +22,7 @@ import {waitForTyping,typingSettings,startTyping} from '../services/reply-typing
 import {deleteSentMessages} from '../services/fast-message-delete.mjs';
 import {getMessageCutoff as replyCutoff,isMessageAfterCutoff as replyIsFresh,isMessageProcessingPaused,getProcessingDiagnostics,clearMessageCutoff} from '../engine/message-cutoff.mjs';
 import {evaluateIncoming} from '../services/messages-settings.mjs';
-import {webappUrlFor} from './webapp-auth.mjs';
+import {webappUrlFor,tokenForUser} from './webapp-auth.mjs';
 import { sendInteractiveAutoReply, resolveInteractiveAnswer, resolveInteractiveAction, formatInteractiveFallback } from '../services/auto-reply-interactive.mjs';
 import { setMessageCutoff, advanceMessageCutoff, setMessageProcessingPaused } from "../engine/message-cutoff.mjs";
 import { isGeneratedAutoReply, protectAutoReplySocket, matchesReplyTarget } from '../services/auto-reply-routing.mjs';
@@ -303980,7 +303980,13 @@ ${isDev2 ? "\u{1F451} *\u0635\u0644\u0627\u062D\u064A\u0627\u062A \u0627\u0644\u
 \u2B50 \u0641\u0626\u062A\u0643: *${TIER_NAMES[freshUser.tier] || "\u0645\u062C\u0627\u0646\u064A"}*
 \u{1F4F1} \u0627\u0644\u0623\u0631\u0642\u0627\u0645: *${(freshUser.whatsappNumbers || []).length}/${freshUser.maxNumbers || 1}*`;
   const _webUrl=webappUrlFor(userId);
-  const addWebButton=kb=>{if(_webUrl && /^https:\/\//i.test(_webUrl))kb.inline_keyboard.unshift([{text:'🌐 فتح الويب آب',web_app:{url:_webUrl}}]);return kb};
+  // [v8.48.1] كان الزر يُحجب كلياً إن لم يكن الرابط https ⇒ «كل صفحات الويب آب لا تعمل».
+  // الآن: https ⇒ web_app (Mini App)، وhttp الثابت ⇒ زر رابط عادي يفتح المتصفح.
+  const addWebButton=kb=>{
+    const _u=_webUrl||globalThis.__STABLE_BASE__&&globalThis.__STABLE_BASE__+`/webapp?token=${typeof tokenForUser==='function'?tokenForUser(userId):''}`;
+    if(_u && /^https:\/\//i.test(_u))kb.inline_keyboard.unshift([{text:'🌐 فتح الويب آب',web_app:{url:_u}}]);
+    else if(_u)kb.inline_keyboard.unshift([{text:'🌐 فتح الويب آب (متصفح)',url:_u}]);
+    return kb};
   const displayedWelcome = texts.welcome !== undefined ? getText('welcome',{name:from.first_name||'',points:freshUser.points||0,tier:TIER_NAMES[freshUser.tier]||'مجاني'}) : text;
   // [MULTI-NUM] المستخدم متعدد الأرقام: اعرض قائمة اختيار الرقم النشط أولاً
   const _numsList = freshUser.whatsappNumbers || [];
@@ -332676,8 +332682,10 @@ async function main() {
   // [TUNNEL] إنشاء رابط عام تلقائياً للاستضافات بدون رابط — يعمل في الخلفية
   // لا يعطّل إقلاع البوت أبداً حتى لو فشل
   // [v8.47.0] إذا وُجد رابط ثابت (منفذ الاستضافة) لا نُنشئ نفقاً إطلاقاً.
-  if (globalThis.__SKIP_TUNNEL__ || globalThis.__STABLE_BASE__) {
-    try { logger.info("[TUNNEL] تخطّي النفق — يوجد رابط ثابت (منفذ الاستضافة)"); } catch { }
+  // [v8.48.1] الرابط الثابت (http) يخدم اللوحات، لكن أزرار تيليجرام تحتاج https
+  // ⇒ نُشغّل النفق دائماً كمزوّد https إضافي (إن عاش). فشله لا يضرّ: الرابط الثابت باقٍ.
+  if (process.env.DISABLE_TUNNEL === "1") {
+    try { logger.info("[TUNNEL] معطّل بـ DISABLE_TUNNEL=1"); } catch { }
   } else
   import("./tunnel.mjs")
     .then((t) => {

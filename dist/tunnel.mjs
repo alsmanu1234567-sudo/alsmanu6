@@ -331,7 +331,9 @@ function _startTunnelWatch(getArgs) {
     try { _tmProc?.kill?.(); } catch { }
     try { _cfProc?.kill?.(); } catch { }
     _tmProc = null; _cfProc = null;
-    _url = null; _lastProvider = null; globalThis.__FW_PUBLIC_URL = null; _starting = false;
+    _url = null; _lastProvider = null; _starting = false;
+    // [v8.48.1] الرابط https مات ⇒ لا نترك أزرار تيليجرام تشير إليه
+    try { globalThis.__FW_PUBLIC_URL = null; globalThis.__FW_PUBLIC_TRUSTED = false; } catch { }
     try { await startTunnel(port, logger, onUrl); } catch { }
   }, 3 * 60 * 1000);
   if (typeof _healthTimer.unref === "function") _healthTimer.unref();
@@ -339,16 +341,11 @@ function _startTunnelWatch(getArgs) {
 
 // ─── نقطة الدخول ─────────────────────────────────────────────────────
 export async function startTunnel(port, logger, onUrl) {
-  // [v8.47.1] رابط ثابت (منفذ الاستضافة) يغني عن النفق تماماً. النفق كان يبدأ
-  // قبل تأكيد الرابط الثابت بجزء من الثانية فيُنشئ نطاقاً ميتاً بلا داعٍ.
-  try {
-    if (!globalThis.__SKIP_TUNNEL__ && !globalThis.__STABLE_BASE__ && !_url) {
-      await new Promise((r) => setTimeout(r, 6000));
-    }
-  } catch { }
-  if (globalThis.__SKIP_TUNNEL__ || globalThis.__STABLE_BASE__) {
-    // ملاحظة: log() داخل الدالة يُعرَّف بعد هذا الموضع ⇒ نستخدم console/logger
-    try { (logger?.info ? (m) => logger.info(m) : console.log)("[TUNNEL] يوجد رابط ثابت — لا ننشئ نفقاً إطلاقاً"); } catch { }
+  // [v8.48.1] النفق لم يبقَ مصدر الرابط الدائم: الرابط الثابت (منفذ الاستضافة)
+  // هو الدائم، والنفق يخدم غرضاً واحداً — منح تيليجرام رابطاً https لأزرار
+  // web_app. إن مات النفق لا يتأثر شيء (اللوحات على الرابط الثابت).
+  if (process.env.DISABLE_TUNNEL === "1" || globalThis.__SKIP_TUNNEL__) {
+    try { (logger?.info ? (m) => logger.info(m) : console.log)("[TUNNEL] النفق معطّل (DISABLE_TUNNEL)"); } catch { }
     return null;
   }
 

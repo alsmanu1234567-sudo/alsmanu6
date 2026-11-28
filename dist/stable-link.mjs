@@ -206,9 +206,14 @@ function _set(found) {
   _stable = { ...found, at: Date.now() };
   _save(_stable);
   try {
-    globalThis.__FW_PUBLIC_URL = _stable.base;
-    globalThis.__FW_PUBLIC_TRUSTED = true;
     globalThis.__STABLE_BASE__ = _stable.base;
+    // [v8.48.1] تيليجرام يشترط https لأزرار web_app ⇒ لا نضع رابطاً http هنا إلا
+    // إذا لم يوجد رابط https من النفق/البيئة. اللوحات تستخدم __STABLE_BASE__ دائماً.
+    const _isHttps = /^https:\/\//i.test(_stable.base);
+    if (_isHttps || !globalThis.__FW_PUBLIC_URL) {
+      globalThis.__FW_PUBLIC_URL = _stable.base;
+      globalThis.__FW_PUBLIC_TRUSTED = true;
+    }
   } catch {}
   if (prev !== _stable.base) {
     try { _onChange?.(_stable.base, _stable.kind); } catch {}
