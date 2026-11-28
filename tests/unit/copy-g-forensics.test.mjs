@@ -128,3 +128,35 @@ test("index: /copy g صار تشخيصاً عملاقاً (ينتظر النسخ
   assert.match(src, /copy-diag-\$\{stamp\}\.json/);
   assert.match(src, /self-decrypt-after-resend/);
 });
+
+// ── [v8.43.0] صنبور السوكت الخام: نرى history-sync (append) ولا نُرسل مرتين ──
+test("index: صنبور messages.upsert يرى كل شيء (notify/append) ويحفظ في سجل المحادثة", () => {
+  const src = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+  assert.match(src, /_waTap/);
+  assert.match(src, /_tapCount\(type\)/);
+  assert.match(src, /_tapPush\(/);
+  assert.match(src, /history sync \(append\)/);
+  // التقاط من الصنبور حتى لو كانت append (لا تمرّ للـ pipeline)
+  assert.match(src, /_captureViewOnce\(\{ sock, msg: m, userId, jid/);
+});
+
+test("index: منع الالتقاط/الإرسال المزدوج بنفس اللحظة", () => {
+  const src = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+  assert.match(src, /_voInFlight/);
+  assert.match(src, /duplicate/);
+  assert.match(src, /_voSentIds/);
+});
+
+test("index: updateMediaMessage لا يُستدعى بلا mediaKey (كان يرمي خطأ داخلي)", () => {
+  const src = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+  assert.match(src, /_canUpdate/);
+  assert.match(src, /تخطّيناها/);
+});
+
+test("/vodebug يعرض صنبور السوكت وسجل المحادثة وحالة المعالجة", () => {
+  const src = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
+  assert.match(src, /صنبور السوكت الخام/);
+  assert.match(src, /سجل المحادثة \(رام\)/);
+  assert.match(src, /حالة المعالجة/);
+  assert.match(src, /getProcessingDiagnostics/);
+});

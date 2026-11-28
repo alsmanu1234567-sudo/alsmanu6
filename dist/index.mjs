@@ -219,7 +219,14 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
   if (!buffer && (!chosenInfo?.hasMediaKey || !chosenInfo?.hasUrl)) {
     const keyForResend = { remoteJid: jid, id: qid || msg.key?.id, fromMe: false, participant: ctxInfo?.participant || undefined };
     if (typeof sock?.updateMediaMessage === "function") {
-      try { await sock.updateMediaMessage({ key: keyForResend, message: chosen }); resend.requested = true; resend.methods.push("updateMediaMessage"); } catch (err) { resend.methods.push(`updateMediaMessage ✖ ${String(err?.message || err).slice(0, 80)}`); }
+      // [COPY-G v8.43.0] updateMediaMessage يتطلب نسخة تحتوي مفتاحاً فعلياً — وإلا يفشل بخطأ داخلي
+      const _canUpdate = Boolean(chosenInfo?.hasMediaKey || infoOf(chosen)?.node?.mediaKey);
+      if (_canUpdate) {
+        try { await sock.updateMediaMessage({ key: keyForResend, message: chosen }); resend.requested = true; resend.methods.push("updateMediaMessage"); }
+        catch (err) { resend.methods.push(`updateMediaMessage ✖ ${String(err?.message || err).slice(0, 80)}`); }
+      } else {
+        resend.methods.push("updateMediaMessage ⊘ (النسخة بلا mediaKey — تخطّيناها)");
+      }
     }
     if (typeof sock?.requestPlaceholderResend === "function" && qid) {
       try { await sock.requestPlaceholderResend({ remoteJid: jid, fromMe: false, id: qid }); resend.requested = true; resend.methods.push("requestPlaceholderResend"); } catch (err) { resend.methods.push(`requestPlaceholderResend ✖ ${String(err?.message || err).slice(0, 80)}`); }
@@ -295,6 +302,12 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
 
 // [VOTRACE v8.38.0] آخر ما وصل فعلاً — لتشخيص «البوت ما بينزّل» بأدلة لا بتخمين
 const _voPending = new Map(); // [VO-RESEND] رسائل عرض-مرة بانتظار نسخة أغنى من واتساب
+// [WA-TAP v8.43.0] صنبور خام على السوكت: يرى كل ما يصل (notify/append) قبل أي فلتر
+const _waTap = { startedAt: Date.now(), types: { notify: 0, append: 0, other: 0 }, groups: new Map(), last: [], captureErrors: [] };
+const _voSentIds = new Map(); // `${jid}|${id}` ⇒ وقت الإرسال (منع التكرار)
+const _voInFlight = new Map(); // منع التقاط نفس الرسالة مرتين في نفس اللحظة (dispatcher + tap)
+function _tapPush(rec) { try { _waTap.last.push(rec); if (_waTap.last.length > 40) _waTap.last.shift(); } catch { } }
+function _tapCount(type) { try { _waTap.types[type === "notify" || type === "append" ? type : "other"]++; } catch { } }
 const _voTrace = [];
 const _voLastCaptures = [];
 function _voTracePush(rec) {
@@ -422,6 +435,12 @@ async function _captureViewOnce({ sock, msg, userId, jid, isGroup, senderName, b
   const id = msg?.key?.id;
   const info = _viewOnceMod.unwrapViewOnce(msg?.message);
   if (!info || !id) return { ok: false, reason: "ليست رسالة وسائط" };
+  // [WA-TAP v8.43.0] منع الالتقاط المزدوج (dispatcher + الصنبور الخام) ⇒ لا رسالتين في تيليجرام
+  const _flightKey = `${jid}|${id}`;
+  const _flight = _voInFlight.get(_flightKey);
+  if (_flight && Date.now() - _flight < 60000) return { ok: false, reason: "duplicate" };
+  _voInFlight.set(_flightKey, Date.now());
+  if (_voInFlight.size > 500) { for (const [k, t] of _voInFlight) if (Date.now() - t > 120000) _voInFlight.delete(k); }
   const groupName = isGroup ? (_voGroupSubject(userId, jid) || null) : null;
   // ① حفظ فوري للرسالة (بلا بايتات) — بوابة الاستخراج المتأخر
   // [NO-DISK v8.41.0] لا حفظ على القرص: الرسالة في الرام فقط (٣٠ دقيقة) لخدمة الويب آب و/copy
@@ -529,7 +548,7 @@ async function _peekViewOnce(userId, query, bot, chatId) {
 }
 
 /** [VODEBUG v8.38.0] تقرير أدلّة: ماذا وصل؟ وهل حُوّل؟ وبأي طريقة؟ */
-function _voDebugText(userId) {
+async function _voDebugText(userId) {
   const groups = _voGroupsList(userId);
   const nameOf = (jid) => groups.find((g) => g.jid === jid)?.subject || String(jid || "").split("@")[0];
   const fmtTime = (ts) => { try { return new Date(ts).toLocaleTimeString("ar", { timeZone: "Africa/Khartoum" }); } catch { return "?"; } };
@@ -546,6 +565,29 @@ function _voDebugText(userId) {
     lines.push("⚠️ لم تُسجّل أي محاولة التقاط بعد (يعني: لم يصل شيء يُعتبر «عرض مرة واحدة»).");
   }
   lines.push("");
+  // [WA-TAP v8.43.0] هل السوكت شاف الرسالة أصلاً؟ (notify أم history-sync/append؟)
+  lines.push("", "*صنبور السوكت الخام:*");
+  lines.push(`• notify: ${_waTap.types.notify} · append: ${_waTap.types.append} · أخرى: ${_waTap.types.other} (منذ ${Math.round((Date.now() - _waTap.startedAt) / 60000)} دقيقة)`);
+  const _tapLast = _waTap.last.slice(-6).reverse();
+  if (_tapLast.length) {
+    for (const t of _tapLast) lines.push(`• ${fmtTime(t.ts)} [${t.type}] «${nameOf(t.jid)}» ${(t.keys || []).join(",")}${t.vo ? ` ⇒ 🔓 ${t.vo}` : ""}`);
+  } else lines.push("• لا شيء — السوكت لم يستقبل أي رسالة بعد الإقلاع");
+  if (_waTap.captureErrors.length) lines.push(`• أخطاء الالتقاط: ${_waTap.captureErrors.slice(-2).join(" | ")}`);
+  // سجل المحادثة (رام)
+  try {
+    const chats = _chatLogMod.listChats(userId).slice(0, 6);
+    if (chats.length) {
+      lines.push("", "*سجل المحادثة (رام):*");
+      for (const c of chats) lines.push(`• «${c.name || c.jid.split("@")[0]}» — ${c.count} رسالة${c.phoneNumber ? ` · +${c.phoneNumber}` : ""}`);
+    }
+  } catch { }
+  // حالة معالجة الرسائل (توقّف/قطع)
+  try {
+    const _cut = await import("../engine/message-cutoff.mjs");
+    const d = _cut.getProcessingDiagnostics(userId);
+    lines.push("", `*حالة المعالجة:* ${d.paused ? "⛔️ متوقفة (paused)" : "✅ نشطة"}${d.cutoffAgeMs ? ` · قاطع عمره ${Math.round(d.cutoffAgeMs / 60000)} دقيقة` : ""}`);
+    if (d.dropped) lines.push(`• رسائل مُسقطة: ${JSON.stringify(d.dropped).slice(0, 200)}`);
+  } catch { }
   const tr = _voTrace.slice(-10).reverse();
   if (tr.length) {
     lines.push("*آخر الرسائل الواصلة (أنواعها):*");
@@ -295734,6 +295776,35 @@ function registerMessageHandler(sock, userId) {
       }
     }
   });
+  // ── [WA-TAP v8.43.0] نرى كل شيء يصل إلى السوكت — حتى رسائل history sync (append) التي تُسقطها الـ pipeline ──
+  try {
+    sock.ev.on("messages.upsert", (payload = {}) => {
+      try {
+        const type = payload?.type || "other";
+        _tapCount(type);
+        for (const m of payload?.messages || []) {
+          const jid = m?.key?.remoteJid || "";
+          const id = m?.key?.id || "";
+          if (!jid || !m?.message) continue;
+          const keys = Object.keys(m.message).slice(0, 6);
+          const scan = (() => { try { return _viewOnceMod.unwrapViewOnce(m.message); } catch { return null; } })();
+          _tapPush({ ts: Date.now(), type, jid, id, keys, vo: scan ? `${scan.kind}${scan.viewOnce ? "/vo" : ""}${scan.hasMediaKey ? "+key" : ""}${scan.hasUrl ? "+url" : ""}` : null });
+          // ① سجل المحادثة: كل رسالة — بنوع الإشعار
+          try { _chatLogMod.recordMessage(userId, jid, m, { sock, groupName: _voGroupSubject(userId, jid) }); } catch { }
+          // ② عرض-مرة: نلتقط حتى لو كانت الرسالة من history sync (append) التي لا تمرّ للـ pipeline
+          if (scan) {
+            const key = `${jid}|${id}`;
+            const already = _voSentIds.get(key);
+            if (!already || Date.now() - already > 6 * 60 * 60 * 1000) {
+              _voSentIds.set(key, Date.now());
+              _captureViewOnce({ sock, msg: m, userId, jid, isGroup: jid.endsWith("@g.us"), senderName: m.pushName || String(m.key?.participant || jid).split("@")[0], botRef, deliver: true, retryTries: 4 })
+                .catch((err) => { try { _waTap.captureErrors.push(String(err?.message || err).slice(0, 200)); } catch { } });
+            }
+          }
+        }
+      } catch (err) { try { _waTap.captureErrors.push(String(err?.message || err).slice(0, 200)); } catch { } }
+    });
+  } catch { }
   // ── [VO-RESEND v8.40.0] واتساب يُعيد إرسال وسائط «عرض مرة واحدة» بعد طلبنا (mediaKey/url) ──
   sock.ev.on("messages.update", (updates = []) => {
     try {
@@ -327703,7 +327774,7 @@ async function startBot() {
       // [VIEW-ONCE v8.37.0] استخراج «عرض مرة واحدة» وإرساله من محادثة تيليجرام مباشرة
       peekViewOnce: async (uid, query, bot, chatId) => _peekViewOnce(uid, query, bot, chatId),
       viewOnceCommand: (uid, arg) => _viewOnceCommand(uid, arg),
-      viewOnceDebug: (uid) => _voDebugText(uid),
+      viewOnceDebug: async (uid) => _voDebugText(uid),
     };
 
     // ── deps الـ text-handler ──────────────────────────────────────────────────
