@@ -5129,13 +5129,15 @@ var init_logger = __esm({
     import_pino = __toESM(require_pino(), 1);
     isProduction = process.env.NODE_ENV === "production";
     logger = (0, import_pino.default)({
-      level: process.env.LOG_LEVEL ?? "info",
+      level: process.env.LOG_LEVEL ?? "warn",  // [v8.48.9] كان info ⇒ آلاف الأسطر/دقيقة
       redact: [
         "req.headers.authorization",
         "req.headers.cookie",
         "res.headers['set-cookie']"
       ],
-      ...isProduction ? {} : {
+      // [v8.48.9] pino-pretty يشغّل worker thread ويُنسّق كل سطر سجل ⇒ كان يأكل
+      // المعالج ويبطئ كل الصفحات. صار مطفأً افتراضياً (LOG_PRETTY=1 لإعادته).
+      ...(isProduction || process.env.LOG_PRETTY !== "1") ? {} : {
         transport: {
           target: "pino-pretty",
           options: { colorize: true }

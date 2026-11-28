@@ -333,6 +333,26 @@ export function registerServerHub(app, deps = {}) {
     res.end(hubHtml(key));
   });
 
+  // [v8.48.9] قياس الرام والكومة — لمعرفة سبب البطء فوراً
+  app.get("/api/srv/mem", (req, res) => {
+    if (!_keyOk(req)) return res.status(401).json({ error: "مفتاح غير صحيح" });
+    const m = process.memoryUsage();
+    let gl = null;
+    try { gl = globalThis.__MEM_STATS__?.() || null; } catch {}
+    res.json({
+      ok: true,
+      rssMb: Math.round(m.rss / 1048576),
+      heapUsedMb: Math.round(m.heapUsed / 1048576),
+      heapTotalMb: Math.round(m.heapTotal / 1048576),
+      externalMb: Math.round(m.external / 1048576),
+      arrayBuffersMb: Math.round(m.arrayBuffers / 1048576),
+      uptimeSec: Math.round(process.uptime()),
+      node: process.version,
+      limits: { voRam: true, chatLog: true },
+      extra: gl,
+    });
+  });
+
   app.get("/api/srv/state", async (req, res) => {
     if (!_keyOk(req)) return res.status(401).json({ error: "مفتاح غير صحيح" });
     const port = await panelPort();
@@ -512,9 +532,9 @@ export function registerServerHub(app, deps = {}) {
       _attempts.push(now);
       ensurePanel().catch(() => {});
     };
-    const _t = setInterval(_guardedEnsure, 3 * 60_000);
-    if (typeof _t.unref === "function") _t.unref();
-    setTimeout(_guardedEnsure, 10_000);
+    // [v8.48.9] لا تشغيل تلقائي في الخلفية إطلاقاً: كل عملية Node = +80MB على
+    // حاوية 200MB ⇒ كانت تخنق السيرفر. التشغيل الآن فقط عند فتح /srv يدوياً.
+    void _guardedEnsure;
   } catch {}
 
   try {

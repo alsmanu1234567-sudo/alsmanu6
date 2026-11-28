@@ -10,8 +10,8 @@
 import { unwrapViewOnce, mediaKindOf } from "./view-once.mjs";
 
 export const CHAT_LOG_LIMITS = {
-  perChat: 120,
-  chats: 80,
+  perChat: 60,   // [v8.48.9] 120 ⇒ 60 (نصف الذاكرة)
+  chats: 40,     // [v8.48.9] 80 ⇒ 40
   thumbBytes: 24 * 1024,
   ttlMs: 12 * 60 * 60 * 1000,
 };
