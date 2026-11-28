@@ -97,8 +97,20 @@ async function showMetaAiPanel(bot2, chatId, userId) {
     "",
     "⚠️ التوفّر يعتمد على الدولة ونوع الحساب: **حسابات WhatsApp Business لا تحصل على محادثة Meta AI** غالباً، وفي هذه الحالة لن يصل رد أبداً.",
     "لذلك يعمل البوت تلقائياً بمزوّد **HTTP بلا مفتاح** (Pollinations) عند فشل ميتا — في الردود التلقائية والنشر التلقائي.",
-    "إن لم تصل ردود 3 مرات، يتوقف ميتا تلقائياً 6 ساعات ثم يعود.",
+    "إن لم تصل ردود، يتوقف ميتا تلقائياً دقيقتين (تزيد تدريجياً حتى 15 دقيقة) ثم يعود بلا إعادة تشغيل.",
   ];
+  // [AI-HEALTH v8.34.0] سبب توقّف الردود ظاهر هنا بلا تخمين
+  try {
+    const h = typeof _deps.aiHealth === "function" ? _deps.aiHealth(userId) : null;
+    if (h) {
+      lines.push("");
+      lines.push("*التشخيص الحالي:*");
+      lines.push(`• ميتا: ${h.meta.cooldownSec ? `⏸️ متوقفة ${h.meta.cooldownSec}ث (${h.meta.fails} إخفاق)` : "✅ جاهزة"} — نجاحات: ${h.meta.ok}`);
+      lines.push(`• المزوّد المجاني: ${h.keyless.blocked ? `⏸️ متوقف ${h.keyless.cooldownSec}ث` : h.keyless.nextSlotSec ? `⏳ دوره بعد ${h.keyless.nextSlotSec}ث` : "✅ جاهز"}`);
+      lines.push("• حصة المجاني: ردّ واحد كل 45 ثانية (لكل IP) — لذلك ميتا أولاً دائماً.");
+      if (h.keyless.lastError) lines.push(`• آخر خطأ: ${String(h.keyless.lastError).slice(0, 80)}`);
+    }
+  } catch { }
   const rows = [
     [{ text: enabled ? "⛔ إيقاف ذكاء ميتا" : "✅ تفعيل ذكاء ميتا", callback_data: "ai_metaai_toggle" }],
     [{ text: "🧪 اختبار الآن", callback_data: "ai_metaai_test" }],

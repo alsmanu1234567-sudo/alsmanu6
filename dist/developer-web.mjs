@@ -82,7 +82,7 @@ export function createDeveloperWeb({developerId,github,ai,texts,stats,sites,admi
   app.get('/api/developer/sites',auth,guarded(async()=>{if(!sites)throw Error('أداة المواقع غير متاحة');return sites.overview(String(developerId))}));
   app.post('/api/developer/sites/start',auth,guarded(async req=>{if(!sites)throw Error('أداة المواقع غير متاحة');return sites.start(String(developerId),req.body||{})}));
   app.post('/api/developer/sites/stop',auth,guarded(async req=>{if(!sites)throw Error('أداة المواقع غير متاحة');return sites.stop(String(developerId),req.body?.code)}));
-  app.post('/api/developer/ai',auth,guarded(async req=>askCodeAI({apiKey:ai.key(String(developerId)),model:ai.model(String(developerId)),question:req.body?.question,context:req.body?.context})));
+  app.post('/api/developer/ai',auth,guarded(async req=>askCodeAI({apiKey:ai.key(String(developerId)),model:ai.model(String(developerId)),question:req.body?.question,context:req.body?.context,keyless:typeof ai.keyless==='function'?ai.keyless:null})));
  }
  return {issue,revoke,register};
 }

@@ -125614,7 +125614,10 @@ function shouldAiReply(numberId, jid, isGroup, aiEnabled, aiTargets, aiGroups, a
 // ══════════════════════════════════════════════════════════════════
 var _metaAiClients = /* @__PURE__ */ new WeakMap(); // sock → client
 var _metaAiHealth = /* @__PURE__ */ new Map(); // userId → { fails, disabledUntil, lastError }
-var META_AI_DISABLED_MS = 12 * 60 * 60 * 1000; // [META-FAST v8.22.0] حساب بلا ميتا = لا نُبطئ كل رسالة
+// [META-BREAKER v8.34.0] كان التعطيل 6/12 ساعة بعد إخفاقين ⇒ «الرد يعمل مرة ثم يقف».
+// صار تعطيلاً قصيراً متزايداً (2د → 4د → 8د → 15د كحد أقصى) يتعافى تلقائياً.
+var META_AI_DISABLED_MS = 2 * 60 * 1000;
+var META_AI_DISABLED_MAX_MS = 15 * 60 * 1000;
 function _metaAiState(userId) {
   const k = String(userId);
   if (!_metaAiHealth.has(k)) _metaAiHealth.set(k, { fails: 0, disabledUntil: 0, lastError: null, ok: 0 });
@@ -125646,7 +125649,11 @@ function _metaAiSock(userId) {
   } catch { }
   return null;
 }
-async function _metaAiReply(userId, prompt, senderName, incomingText, conversationKey) {
+// [FREE-AI-RACE v8.34.0] مهلة السباق: الخاسر لا يكتب في ذاكرة المحادثة (كان يكرّر السياق)
+var _freeAiSeq = /* @__PURE__ */ new Map();
+function _freeAiToken(key) { const n = (_freeAiSeq.get(key) || 0) + 1; _freeAiSeq.set(key, n); return n; }
+function _freeAiAlive(key, token) { return !token || _freeAiSeq.get(key) === token; }
+async function _metaAiReply(userId, prompt, senderName, incomingText, conversationKey, raceToken) {
   try {
     const u = getUser(userId) || {};
     if (u.metaAiEnabled === false) return null;
@@ -125657,7 +125664,7 @@ async function _metaAiReply(userId, prompt, senderName, incomingText, conversati
     const mod = await import("../services/ai/meta-ai-provider.mjs");
     let client = _metaAiClients.get(sock);
     // [META-FAST v8.22.0] 60 ثانية كانت تعني انتظار دقيقة لكل رسالة على حسابات Business (لا رد أصلاً)
-    const _metaTimeout = Number(process.env.META_AI_TIMEOUT_MS) || 12000;
+    const _metaTimeout = Number(process.env.META_AI_TIMEOUT_MS) || 9000; // [FREE-AI-ORDER v8.34.0] ميتا أولاً ⇒ مهلة أقصر
     if (!client || client.__timeoutMs !== _metaTimeout) {
       client = mod.createMetaAiClient({ sock, logger, timeoutMs: _metaTimeout });
       client.__timeoutMs = _metaTimeout;
@@ -125674,19 +125681,23 @@ async function _metaAiReply(userId, prompt, senderName, incomingText, conversati
     if (!reply) {
       st.fails = (st.fails || 0) + 1;
       if (st.fails >= 2) {
-        st.disabledUntil = Date.now() + META_AI_DISABLED_MS;
+        // [META-BREAKER v8.34.0] تعطيل قصير متزايد بدل ساعات — ثم نصف-مفتوح للمحاولة تلقائياً
+        const _wait = Math.min(META_AI_DISABLED_MS * 2 ** Math.min(st.fails - 2, 3), META_AI_DISABLED_MAX_MS);
+        st.disabledUntil = Date.now() + _wait;
         st.lastError = "no-reply";
-        try { logger.warn({ userId }, "[META-AI] تعطيل مؤقت 6 ساعات بعد 3 محاولات بلا رد"); } catch { }
+        try { logger.warn({ userId, seconds: Math.round(_wait / 1000) }, "[META-AI] تعطيل مؤقت قصير بعد محاولات بلا رد"); } catch { }
       }
       return null;
     }
     st.fails = 0; st.ok = (st.ok || 0) + 1; st.disabledUntil = 0; st.lastError = null;
-    const updated = [
-      ...history,
-      { role: "user", content: `${senderName}: ${incomingText}` },
-      { role: "assistant", content: reply },
-    ];
-    conversationHistory.set(conversationKey, updated.slice(-20));
+    if (_freeAiAlive(conversationKey, raceToken)) {
+      const updated = [
+        ...history,
+        { role: "user", content: `${senderName}: ${incomingText}` },
+        { role: "assistant", content: reply },
+      ];
+      conversationHistory.set(conversationKey, updated.slice(-20));
+    }
     try {
       const _s = u.aiStats || { requests: 0, tokens: 0 };
       saveUser(userId, { aiStats: { requests: (_s.requests || 0) + 1, tokens: _s.tokens || 0, metaAi: (_s.metaAi || 0) + 1, lastAt: Date.now() } });
@@ -125697,18 +125708,14 @@ async function _metaAiReply(userId, prompt, senderName, incomingText, conversati
     return null;
   }
 }
-// [KEYLESS-HTTP v8.21.1] مزوّد بلا مفتاح ولا واتساب (HTTP) — يعمل حتى مع حساب Business
-var _keylessClients = /* @__PURE__ */ new Map(); // userId → client
+// [KEYLESS-HTTP v8.34.0] عميل واحد لكل العملية: حصة المزوّد المجاني (ردّ كل 45 ثانية)
+// هي **لكل IP** لا لكل مستخدم — تعدد العملاء كان يستهلك الحصة كلها برسالة واحدة ثم يتوقف.
+var _keylessShared = { mod: null, client: null };
 function _keylessClient(userId) {
-  const key = String(userId);
-  let client = _keylessClients.get(key);
-  if (!client) {
-    client = { mod: null, client: null };
-    _keylessClients.set(key, client);
-  }
-  return client;
+  if (!_keylessShared.client) _keylessShared = { mod: null, client: null };
+  return _keylessShared;
 }
-async function _keylessReply(userId, prompt, senderName, incomingText, conversationKey) {
+async function _keylessReply(userId, prompt, senderName, incomingText, conversationKey, raceToken) {
   try {
     const holder = _keylessClient(userId);
     if (!holder.client) {
@@ -125725,11 +125732,13 @@ async function _keylessReply(userId, prompt, senderName, incomingText, conversat
       text: incomingText,
     });
     if (!reply) return null;
-    conversationHistory.set(conversationKey, [
-      ...history,
-      { role: "user", content: `${senderName}: ${incomingText}` },
-      { role: "assistant", content: reply },
-    ].slice(-20));
+    if (_freeAiAlive(conversationKey, raceToken)) {
+      conversationHistory.set(conversationKey, [
+        ...history,
+        { role: "user", content: `${senderName}: ${incomingText}` },
+        { role: "assistant", content: reply },
+      ].slice(-20));
+    }
     try {
       const _s = u.aiStats || { requests: 0, tokens: 0 };
       saveUser(userId, { aiStats: { requests: (_s.requests || 0) + 1, tokens: _s.tokens || 0, keyless: (_s.keyless || 0) + 1, metaAi: (_s.metaAi || 0), lastAt: Date.now() } });
@@ -125758,15 +125767,83 @@ function _firstReply(promises) {
   });
 }
 async function _freeAiReply(userId, prompt, senderName, incomingText, conversationKey) {
+  // [FREE-AI-ORDER v8.34.0] ميتا أولاً (بلا حصة) ثم المزوّد المجاني.
+  // السباق القديم كان يستهلك حصة المزوّد (ردّ كل 45 ثانية لكل IP) حتى لو ردّت ميتا،
+  // فتفشل الرسائل التالية — وهذا سبب «يعمل مرة ثم يقف».
+  const token = _freeAiToken(conversationKey);
   const st = _metaAiState(userId);
-  const metaUsable = getUser(userId)?.metaAiEnabled !== false && !(st.disabledUntil && Date.now() < st.disabledUntil) && Boolean(_metaAiSock(userId));
-  const httpReply = _keylessReply(userId, prompt, senderName, incomingText, conversationKey);
-  if (!metaUsable) return await httpReply;
-  const reply = await _firstReply([
-    _metaAiReply(userId, prompt, senderName, incomingText, conversationKey),
-    httpReply,
-  ]);
-  return reply || null;
+  const metaUsable = getUser(userId)?.metaAiEnabled !== false
+    && !(st.disabledUntil && Date.now() < st.disabledUntil)
+    && Boolean(_metaAiSock(userId));
+  if (metaUsable) {
+    const metaReply = await _metaAiReply(userId, prompt, senderName, incomingText, conversationKey, token);
+    if (metaReply) return metaReply;
+  }
+  const httpReply = await _keylessReply(userId, prompt, senderName, incomingText, conversationKey, token);
+  if (httpReply) return httpReply;
+  // محاولة ثانية سريعة — فقط إذا لم يكن السبب حصة/تعطيلاً (وإلا فهي مضيعة للحصة)
+  const _kc = _keylessShared?.client;
+  if (_kc && !_kc.blocked && !(_kc.nextSlotMs > 0)) {
+    try { await new Promise((r) => setTimeout(r, 700)); } catch { }
+    return (await _keylessReply(userId, prompt, senderName, incomingText, conversationKey, token)) || null;
+  }
+  return null;
+}
+// [META-MEDIA v8.34.0] إنشاء/تعديل صورة عبر محادثة Meta AI (بلا مفتاح)
+async function _metaImagineImage(sock, prompt, download, timeoutMs) {
+  try {
+    if (!sock) return null;
+    const mod = await import("../services/ai/meta-media.mjs");
+    const res = await mod.imagine({
+      sock,
+      prompt,
+      download,
+      logger,
+      timeoutMs: Number(timeoutMs) || Number(process.env.META_AI_IMAGE_TIMEOUT_MS) || 90000,
+    });
+    return res && res.buffer && res.buffer.length ? res : null;
+  } catch (err) {
+    try { logger.warn({ err: String(err?.message || err).slice(0, 160) }, "[META-MEDIA] imagine فشل"); } catch { }
+    return null;
+  }
+}
+async function _metaEditImage(sock, buffer, instruction, download, timeoutMs) {
+  try {
+    if (!sock || !buffer || !buffer.length) return null;
+    const mod = await import("../services/ai/meta-media.mjs");
+    const res = await mod.edit({
+      sock,
+      buffer,
+      instruction,
+      download,
+      logger,
+      timeoutMs: Number(timeoutMs) || Number(process.env.META_AI_IMAGE_TIMEOUT_MS) || 90000,
+    });
+    return res && res.buffer && res.buffer.length ? res : null;
+  } catch (err) {
+    try { logger.warn({ err: String(err?.message || err).slice(0, 160) }, "[META-MEDIA] edit فشل"); } catch { }
+    return null;
+  }
+}
+// [AI-HEALTH v8.34.0] تشخيص شفّاف: هل السبب ميتا؟ أم حصة المزوّد المجاني؟
+function _aiHealth(userId) {
+  const st = _metaAiState(userId);
+  const kc = _keylessShared?.client || null;
+  return {
+    meta: {
+      enabled: getUser(userId)?.metaAiEnabled !== false,
+      sock: Boolean(_metaAiSock(userId)),
+      cooldownSec: st.disabledUntil && Date.now() < st.disabledUntil ? Math.ceil((st.disabledUntil - Date.now()) / 1000) : 0,
+      fails: st.fails || 0,
+      ok: st.ok || 0,
+    },
+    keyless: {
+      blocked: Boolean(kc?.blocked),
+      cooldownSec: kc ? Math.ceil((kc.cooldownMs || 0) / 1000) : 0,
+      nextSlotSec: kc ? Math.ceil((kc.nextSlotMs || 0) / 1000) : 0,
+      lastError: kc?.lastError || null,
+    },
+  };
 }
 async function getAiReply(userId, prompt, senderName, incomingText, conversationKey) {
   const apiKey = getNvidiaKey(userId);
@@ -296913,25 +296990,91 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
         }
         if (myS.aiImgEnabled && trimmed.startsWith(myS.aiImgCmd)) {
           const prompt = trimmed.slice(myS.aiImgCmd.length).trim();
+          // [META-IMG-EDIT v8.34.0] ردّ على صورة + نفس الأمر ⇒ تعديل حقيقي عبر Meta AI
+          const _imgCtx = msg?.message?.extendedTextMessage?.contextInfo
+            || msg?.message?.imageMessage?.contextInfo
+            || msg?.message?.documentMessage?.contextInfo
+            || null;
+          const _quotedRaw = _imgCtx?.quotedMessage || null;
+          let _quotedImg = null;
+          if (_quotedRaw) {
+            const _innerQ = _quotedRaw.viewOnceMessageV2?.message
+              || _quotedRaw.viewOnceMessage?.message
+              || _quotedRaw.documentWithCaptionMessage?.message
+              || _quotedRaw.ephemeralMessage?.message
+              || _quotedRaw;
+            _quotedImg = _innerQ?.imageMessage
+              || (_innerQ?.documentMessage && /^image\//i.test(String(_innerQ.documentMessage.mimetype || "")) ? _innerQ.documentMessage : null)
+              || null;
+          }
+          const _dlMedia = async (m) => {
+            try {
+              const { downloadMediaMessage: _dlm } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
+              return await _dlm(m, "buffer", {}, { logger: baileysLogger, reuploadRequest: activeSock.updateMediaMessage });
+            } catch { return null; }
+          };
+          const _imgExample = `\u26A0\uFE0F \u0645\u062B\u0627\u0644: ${myS.aiImgCmd} \u063A\u0631\u0648\u0628 \u0627\u0644\u0634\u0645\u0633 \u0641\u0648\u0642 \u0627\u0644\u062C\u0628\u0627\u0644`;
+          const _editHelp = "\u270F\uFE0F *\u062A\u0639\u062F\u064A\u0644 \u0635\u0648\u0631\u0629*\n\n\u0627\u0631\u0651\u062F \u0639\u0644\u0649 \u0627\u0644\u0635\u0648\u0631\u0629 \u062B\u0645 \u0627\u0643\u062A\u0628:\n" + myS.aiImgCmd + " \u0627\u0644\u062A\u0639\u0644\u064A\u0645\u0627\u062A\n\n\u0645\u062B\u0627\u0644: " + myS.aiImgCmd + " \u0627\u062C\u0639\u0644 \u0627\u0644\u062E\u0644\u0641\u064A\u0629 \u0644\u064A\u0644\u0627\u064B \u0628\u0646\u062C\u0648\u0645";
+          if (_quotedImg) {
+            if (!prompt) {
+              try { await activeSock.sendMessage(jid, { text: _editHelp, parse_mode: "Markdown" }); } catch { }
+              return; // [DISPATCH-FIX]
+            }
+            let _phKey = null;
+            try {
+              const _ph = await activeSock.sendMessage(jid, { text: `\u{1F58C}\uFE0F \u062C\u0627\u0631\u064A \u062A\u0639\u062F\u064A\u0644 \u0627\u0644\u0635\u0648\u0631\u0629 \u0639\u0628\u0631 Meta AI... "${prompt}"` });
+              _phKey = _ph?.key || null;
+            } catch { }
+            try {
+              const _qMsg = {
+                key: { remoteJid: jid, fromMe: false, id: _imgCtx?.stanzaId || _imgCtx?.quotedMessageId || "", participant: _imgCtx?.participant },
+                message: _quotedRaw
+              };
+              let _srcBuf = await _dlMedia(_qMsg);
+              if (!_srcBuf || !_srcBuf.length) throw new Error("\u062A\u0639\u0630\u0651\u0631 \u062A\u0646\u0632\u064A\u0644 \u0627\u0644\u0635\u0648\u0631\u0629 \u0627\u0644\u0645\u064F\u0631\u062F\u0651 \u0639\u0644\u064A\u0647\u0627");
+              const _edited = await _metaEditImage(activeSock, _srcBuf, prompt, _dlMedia);
+              if (_phKey) { try { await activeSock.sendMessage(jid, { delete: _phKey }); } catch { } }
+              if (_edited?.buffer?.length) {
+                await activeSock.sendMessage(jid, { image: _edited.buffer, caption: `\u{1F58C}\uFE0F *${prompt}*` });
+              } else {
+                await activeSock.sendMessage(jid, { text: "\u26A0\uFE0F Meta AI \u0644\u0645 \u062A\u064F\u0631\u062C\u0639 \u0627\u0644\u0635\u0648\u0631\u0629 \u0627\u0644\u0645\u0639\u062F\u0651\u0644\u0629.\n\n\u0627\u0644\u0623\u0633\u0628\u0627\u0628 \u0627\u0644\u0645\u062D\u062A\u0645\u0644\u0629:\n\u2022 \u0627\u0644\u062D\u0633\u0627\u0628 Business \u0644\u0627 \u064A\u062D\u062A\u0648\u064A \u0645\u062D\u0627\u062F\u062B\u0629 Meta AI\n\u2022 \u0627\u0644\u062A\u0639\u062F\u064A\u0644 \u063A\u064A\u0631 \u0645\u062F\u0639\u0648\u0645 \u0641\u064A \u0627\u0644\u062F\u0648\u0644\u0629\n\n\u0628\u062F\u064A\u0644: \u0623\u0631\u0633\u0644 \u0627\u0644\u0635\u0648\u0631\u0629 \u0625\u0644\u0649 \u0645\u062D\u0627\u062F\u062B\u0629 Meta AI \u064A\u062F\u0648\u064A\u0627\u064B \u0645\u0639 \u0646\u0641\u0633 \u0627\u0644\u062A\u0639\u0644\u064A\u0645\u0627\u062A." });
+              }
+            } catch (e) {
+              logger.warn({ e }, "[/\u0635\u0648\u0631\u0629] edit failed");
+              if (_phKey) { try { await activeSock.sendMessage(jid, { delete: _phKey }); } catch { } }
+              try { await activeSock.sendMessage(jid, { text: `\u26A0\uFE0F ${String(e?.message || e).slice(0, 140)}` }); } catch { }
+            }
+            return; // [DISPATCH-FIX]
+          }
           if (!prompt) {
             try {
-              await activeSock.sendMessage(jid, { text: `\u26A0\uFE0F \u0645\u062B\u0627\u0644: ${myS.aiImgCmd} \u063A\u0631\u0648\u0628 \u0627\u0644\u0634\u0645\u0633 \u0641\u0648\u0642 \u0627\u0644\u062C\u0628\u0627\u0644` });
+              await activeSock.sendMessage(jid, { text: _imgExample });
             } catch {
             }
           } else {
+            let _genKey = null;
             try {
-              await activeSock.sendMessage(jid, { text: `\u{1F3A8} \u062C\u0627\u0631\u064A \u062A\u0648\u0644\u064A\u062F \u0627\u0644\u0635\u0648\u0631\u0629: "${prompt}"...` });
-            } catch {
-            }
+              const _gp = await activeSock.sendMessage(jid, { text: `\u{1F3A8} \u062C\u0627\u0631\u064A \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0635\u0648\u0631\u0629: "${prompt}"\n\u0642\u062F \u062A\u0623\u062E\u0630 \u062D\u062A\u0649 \u062F\u0642\u064A\u0642\u0629...` });
+              _genKey = _gp?.key || null;
+            } catch { }
             try {
-              const { generateAIImage: generateAIImage2 } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
-              const imgBuffer = await generateAIImage2(prompt);
+              // [META-IMG v8.34.0] ميتا أولاً (كما طُلب) ثم المزوّد المجاني كبديل مضمون
+              let _out = await _metaImagineImage(activeSock, prompt, _dlMedia);
+              let _via = "Meta AI";
+              if (!_out?.buffer?.length) {
+                const { generateAIImage: generateAIImage2 } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
+                _out = { buffer: await generateAIImage2(prompt) };
+                _via = "\u0627\u0644\u0645\u0632\u0648\u0651\u062F \u0627\u0644\u0645\u062C\u0627\u0646\u064A";
+              }
+              if (_genKey) { try { await activeSock.sendMessage(jid, { delete: _genKey }); } catch { } }
+              if (!_out?.buffer?.length) throw new Error("no image");
               await activeSock.sendMessage(jid, {
-                image: imgBuffer,
-                caption: `\u{1F3A8} *${prompt}*`
+                image: _out.buffer,
+                caption: `\u{1F3A8} *${prompt}*\n_\u0639\u0628\u0631 ${_via}_`
               });
             } catch (e) {
               logger.warn({ e }, "[/\u0635\u0648\u0631\u0629] AI image failed");
+              if (_genKey) { try { await activeSock.sendMessage(jid, { delete: _genKey }); } catch { } }
               try {
                 await activeSock.sendMessage(jid, { text: `\u26A0\uFE0F \u062A\u0639\u0630\u0651\u0631 \u062A\u0648\u0644\u064A\u062F \u0627\u0644\u0635\u0648\u0631\u0629\u060C \u062D\u0627\u0648\u0644 \u0645\u062C\u062F\u062F\u0627\u064B` });
               } catch {
@@ -326296,7 +326439,7 @@ init_database();
 init_state();
 init_keyboards();
 async function handleAiCallback2(bot2, chatId, userId, data) {
-  _aiMod.setDeps({ getUser, saveUser, setState, cancelKeyboard, aiMenuKeyboard, hasNvidiaKey, getUserSelectedModel, init_ai_manager, ai_manager_exports, inMemoryDB, getSock: (uid) => _metaAiSock(uid), freeAiReply: (uid, prompt, text) => _freeAiReply(uid, prompt, "المستخدم", text, `aitest_${uid}`), keylessReply: (uid, prompt, text) => _keylessReply(uid, prompt, "المستخدم", text, `aitest_${uid}`) });
+  _aiMod.setDeps({ getUser, saveUser, setState, cancelKeyboard, aiMenuKeyboard, hasNvidiaKey, getUserSelectedModel, init_ai_manager, ai_manager_exports, inMemoryDB, getSock: (uid) => _metaAiSock(uid), freeAiReply: (uid, prompt, text) => _freeAiReply(uid, prompt, "المستخدم", text, `aitest_${uid}`), keylessReply: (uid, prompt, text) => _keylessReply(uid, prompt, "المستخدم", text, `aitest_${uid}`), aiHealth: (uid) => _aiHealth(uid) });
   return _aiMod.handleAiCallback2(bot2, chatId, userId, data);
 }
 // src/bot/features/groups/index.ts — فُصِل في dist/groups.mjs [PATCH_GROUPS_SPLIT_APPLIED]
@@ -326886,6 +327029,12 @@ async function startBot() {
       replyTargetKeyboard, personsMenuKeyboard,
       callsMenuKeyboard, securityMenuKeyboard, bridgeMenuKeyboard,
       scheduleMenuKeyboard,
+      // [FREE-AI-DEPS v8.34.0] كان النشر التلقائي بالذكاء وقسم المطوّر يطلبان مفتاح API
+      // لأن هذه الدوال لم تُمرَّر لأي handler من registry (WEB). الآن متاحة للجميع.
+      metaAiReply: async (uid, systemPrompt, text) => _freeAiReply(uid, systemPrompt, "المستخدم", text, `autopost_${uid}`),
+      freeAiReply: async (uid, systemPrompt, senderName, text, key) => _freeAiReply(uid, systemPrompt, senderName || "المستخدم", text, key || `free_${uid}_${Date.now()}`),
+      keylessReply: async (uid, systemPrompt, text) => _keylessReply(uid, systemPrompt, "المستخدم", text, `keyless_${uid}`),
+      hasFreeAi: () => true,
       // [PATCH_PHASE6] Bundle-internal functions needed by state-switch-handler
       addPoints, saveAutoReply,
       triggerTypeKeyboard, replyScopeKeyboard, personChatKeyboard, getContacts,
@@ -331422,7 +331571,7 @@ try {
     guardUsers: listGuardUserIds,
     github: { hasToken: () => { init_github(); try { globalThis.__ghLoadToken?.(); } catch { } return !!GITHUB_TOKEN; }, repos: (force) => { init_github(); try { globalThis.__ghLoadToken?.(); } catch { } return getAllRepos(force); }, status: () => { init_github(); try { globalThis.__ghLoadToken?.(); } catch { } return ghStatus(); }, fetch: (...args) => { init_github(); try { globalThis.__ghLoadToken?.(); } catch { } return ghFetch(...args); } },
   });
-  developerConsole=createDeveloperWeb({developerId:DEVELOPER_ID,diagnostics,backup:backupService,replyDiag:createDevDiagService(),admin:adminService,sites:createSiteGenWebService({developerId:DEVELOPER_ID}),github:{hasToken:()=>{init_github();try{globalThis.__ghLoadToken?.()}catch{};return !!GITHUB_TOKEN},repos:(force)=>{init_github();try{globalThis.__ghLoadToken?.()}catch{};return getAllRepos(force)},status:()=>{init_github();try{globalThis.__ghLoadToken?.()}catch{};return ghStatus()},fetch:(...args)=>{init_github();try{globalThis.__ghLoadToken?.()}catch{};return ghFetch(...args)}},ai:{key:getNvidiaKey,model:getUserSelectedModel},texts:{list:getTextKeys,get:getText,set:setText,reset:resetText},stats:()=>({users:inMemoryDB.users.size,workers:workerManager.getStats(),uptime:Math.floor(process.uptime()),memoryMB:Math.round(process.memoryUsage().rss/1048576)})});
+  developerConsole=createDeveloperWeb({developerId:DEVELOPER_ID,diagnostics,backup:backupService,replyDiag:createDevDiagService(),admin:adminService,sites:createSiteGenWebService({developerId:DEVELOPER_ID}),github:{hasToken:()=>{init_github();try{globalThis.__ghLoadToken?.()}catch{};return !!GITHUB_TOKEN},repos:(force)=>{init_github();try{globalThis.__ghLoadToken?.()}catch{};return getAllRepos(force)},status:()=>{init_github();try{globalThis.__ghLoadToken?.()}catch{};return ghStatus()},fetch:(...args)=>{init_github();try{globalThis.__ghLoadToken?.()}catch{};return ghFetch(...args)}},ai:{key:getNvidiaKey,model:getUserSelectedModel,keyless:(text)=>_freeAiReply(String(DEVELOPER_ID),null,"المطور",String(text||"").slice(0,12000),"devcode")},texts:{list:getTextKeys,get:getText,set:setText,reset:resetText},stats:()=>({users:inMemoryDB.users.size,workers:workerManager.getStats(),uptime:Math.floor(process.uptime()),memoryMB:Math.round(process.memoryUsage().rss/1048576)})});
   developerConsole.register(app);
   // [SETTINGS-BACKUP][LEVEL-2] النسخ التلقائي المجدول يعمل داخل البوت (لا يحتاج لوحة مفتوحة)
   try {
