@@ -108,12 +108,22 @@ async function showMetaAiPanel(bot2, chatId, userId) {
       lines.push(`• ميتا: ${h.meta.cooldownSec ? `⏸️ متوقفة ${h.meta.cooldownSec}ث (${h.meta.fails} إخفاق)` : "✅ جاهزة"} — نجاحات: ${h.meta.ok}`);
       lines.push(`• المزوّد المجاني: ${h.keyless.blocked ? `⏸️ متوقف ${h.keyless.cooldownSec}ث` : h.keyless.nextSlotSec ? `⏳ دوره بعد ${h.keyless.nextSlotSec}ث` : "✅ جاهز"}`);
       lines.push("• حصة المجاني: ردّ واحد كل 45 ثانية (لكل IP) — لذلك ميتا أولاً دائماً.");
+      const a = h.assistant;
+      if (a) {
+        lines.push(`• محادثة المساعد: ${a.confirmed ? `✅ ${a.confirmed}` : a.manual ? `📌 يدوي ${a.manual}` : "❓ لم تُحدَّد بعد (سيُجرَّب تلقائياً)"}`);
+        if (Array.isArray(a.candidates) && a.candidates.length && !a.confirmed) lines.push(`• المرشحون: ${a.candidates.slice(0, 4).join(" · ")}`);
+      }
       if (h.keyless.lastError) lines.push(`• آخر خطأ: ${String(h.keyless.lastError).slice(0, 80)}`);
     }
   } catch { }
   const rows = [
     [{ text: enabled ? "⛔ إيقاف ذكاء ميتا" : "✅ تفعيل ذكاء ميتا", callback_data: "ai_metaai_toggle" }],
     [{ text: "🧪 اختبار الآن", callback_data: "ai_metaai_test" }],
+    // [META-ASSISTANT v8.36.0] إدارة محادثة المساعد نفسها
+    [
+      { text: "🔎 بحث عن محادثة المساعد", callback_data: "ai_metaai_scan" },
+      { text: "✍️ تعيين يدوياً", callback_data: "ai_metaai_setjid" },
+    ],
     [{ text: "🔙 رجوع", callback_data: "menu_ai" }],
   ];
   await bot2.sendMessage(chatId, lines.join("\n"), { parse_mode: "Markdown", reply_markup: { inline_keyboard: rows } });
@@ -141,6 +151,28 @@ export async function handleAiCallback2(bot2, chatId, userId, data) {
     await showMetaAiPanel(bot2, chatId, userId);
     return true;
   }
+  if (data === "ai_metaai_scan") {
+    // يمسح المثبَّت ثم يعيد المسبار على المرشحين (Meta AI · مساعد الأعمال · المكتشَف)
+    try { _deps.assistantReset?.(userId); } catch { }
+    await bot2.sendMessage(chatId, "🔎 أبحث عن محادثة المساعد… (حتى دقيقة)");
+    let res = null;
+    try { res = await _deps.assistantProbe?.(userId); } catch { }
+    if (res?.ok) {
+      await bot2.sendMessage(chatId, `✅ وجدتُها وردّت: \`${res.jid}\``, { parse_mode: "Markdown" });
+    } else if (res?.reason === "no-sock") {
+      await bot2.sendMessage(chatId, "⚠️ لا يوجد رقم واتساب متصل الآن. اربط رقماً ثم أعد المحاولة.");
+    } else {
+      const list = (res?.candidates || []).slice(0, 6);
+      await bot2.sendMessage(chatId, "❌ لم ترد أي محادثة مرشحة.\n\n" + (list.length ? `جرّبت: ${list.join(" · ")}\n\n` : "") + "افتح محادثة *مساعد الأعمال* في واتساب وأرسل لها رسالة، ثم اضغط «✍️ تعيين يدوياً» وأدخل رقمها.", { parse_mode: "Markdown" });
+    }
+    return true;
+  }
+  if (data === "ai_metaai_setjid") {
+    const { setState } = _deps;
+    setState(userId, "awaiting_meta_ai_jid");
+    await bot2.sendMessage(chatId, "✍️ أرسل رقم محادثة المساعد أو معرّفها:\n\n• من داخل المحادثة: ⋮ ← «معلومات جهة الاتصال» ← الرقم\n• أو المعرّف كما هو: `13135550002@s.whatsapp.net`", { parse_mode: "Markdown" });
+    return true;
+  }
   if (data === "ai_metaai_test") {
     const sock = _metaAiSockOf(userId);
     if (!sock) { await bot2.sendMessage(chatId, "❌ لا يوجد رقم واتساب متصل الآن. اربط رقماً أولاً."); return true; }
@@ -152,13 +184,26 @@ export async function handleAiCallback2(bot2, chatId, userId, data) {
       } catch (e) { await bot2.sendMessage(chatId, "❌ فشل الاختبار: " + String(e?.message || e).slice(0, 200)); }
       return true;
     }
-    await bot2.sendMessage(chatId, "🧪 أرسلنا سؤالاً تجريبياً إلى Meta AI… قد يستغرق حتى دقيقة.");
+    // [META-ASSISTANT v8.36.0] أولاً نحدّد محادثة المساعد التي تردّ فعلاً (مسبار آمن)
+    let probe = null;
+    try { probe = await _deps.assistantProbe?.(userId); } catch { }
+    if (!probe?.ok) {
+      await bot2.sendMessage(chatId, "⚠️ لم تعُد أي محادثة مساعد مرشحة على المسبار.\n\n" + (probe?.candidates?.length ? `جرّبت: ${probe.candidates.slice(0, 4).join(" · ")}\n\n` : "") + "استخدم «✍️ تعيين يدوياً» لتحديد معرّف محادثة ميتا/مساعد الأعمال.\n\n🧪 أجرّب المزوّد بلا مفتاح (HTTP) الآن…", { parse_mode: "Markdown" });
+      try {
+        const alt = typeof _deps.keylessReply === "function"
+          ? await _deps.keylessReply(userId, getUser(userId)?.aiSystemPrompt || null, "اكتب جملة قصيرة بالعربية تقول: تم اختبار الاتصال بنجاح.")
+          : null;
+        if (alt) await bot2.sendMessage(chatId, "✅ *المزوّد بلا مفتاح يعمل — وردّه:*\n" + String(alt).slice(0, 1200), { parse_mode: "Markdown" });
+      } catch { }
+      return true;
+    }
+    await bot2.sendMessage(chatId, `🧪 المحادثة: \`${probe.jid}\` — أرسلنا سؤالاً تجريبياً…`);
     try {
       const mod = await import("../services/ai/meta-ai-provider.mjs");
-      const client = mod.createMetaAiClient({ sock, timeoutMs: 20000 });
-      const reply = await client.ask("اكتب جملة قصيرة بالعربية تقول: تم اختبار الاتصال بنجاح.");
+      const client = mod.createMetaAiClient({ sock, jids: [probe.jid], timeoutMs: 15000 });
+      const reply = await client.ask("اكتب جملة قصيرة بالعربية تقول: تم اختبار الاتصال بنجاح.", { only: probe.jid });
       if (!reply) {
-        await bot2.sendMessage(chatId, "⚠️ لم يصل رد من Meta AI خلال 90 ثانية (الأرجح: حساب Business أو دولة غير مدعومة).\n\n🧪 أجرّب المزوّد بلا مفتاح (HTTP) الآن…");
+        await bot2.sendMessage(chatId, "⚠️ المحادثة موجودة لكن لم يصل رد (قد يكون المساعد مشغولاً).\n\n🧪 أجرّب المزوّد بلا مفتاح (HTTP) الآن…");
         try {
           const alt = typeof _deps.keylessReply === "function"
             ? await _deps.keylessReply(userId, getUser(userId)?.aiSystemPrompt || null, "اكتب جملة قصيرة بالعربية تقول: تم اختبار الاتصال بنجاح.")

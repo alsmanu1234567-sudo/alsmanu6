@@ -205,9 +205,9 @@ test("index.mjs: القاطع قصير + الخيارات موصولة + مسا�
   assert.match(src, /keyless:\(text\)=>_freeAiReply/, "مساعد المطوّر بلا مفتاح");
   assert.match(src, /async function _metaImagineImage/, "إنشاء صورة عبر ميتا");
   assert.match(src, /async function _metaEditImage/, "تعديل صورة عبر ميتا");
-  assert.match(src, /let _out = await _metaImagineImage\(activeSock, prompt, _dlMedia\)/, "ميتا أولاً ثم المزوّد المجاني");
+  assert.match(src, /let _out = await _metaImagineImage\(activeSock, prompt, _dlMedia, null, userId\)/, "ميتا أولاً ثم المزوّد المجاني");
   assert.match(src, /_out = \{ buffer: await generateAIImage2\(prompt\) \}/, "بديل مضمون عند فشل ميتا");
-  assert.match(src, /const _edited = await _metaEditImage\(activeSock, _srcBuf, prompt, _dlMedia\)/, "الرد على صورة ⇒ تعديل");
+  assert.match(src, /const _edited = await _metaEditImage\(activeSock, _srcBuf, prompt, _dlMedia, null, userId\)/, "الرد على صورة ⇒ تعديل");
   assert.match(src, /const httpReply = await _keylessReply\(/, "ميتا أولاً ثم المجاني بالتسلسل لا بالسباق");
   assert.match(src, /if \(_kc && !_kc\.blocked && !\(_kc\.nextSlotMs > 0\)\)/, "محاولة ثانية فقط خارج وقت الحصة");
 });

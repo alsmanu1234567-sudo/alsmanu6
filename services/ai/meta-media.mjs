@@ -16,7 +16,7 @@
  *    ويشرح المستدعي السبب للمستخدم بدل الادّعاء بأن شيئاً حدث.
  *  - كل الدوال تُرجع قيمة أو null — لا ترمي أبداً.
  */
-import { META_AI_JID, isMetaAiJid } from "./meta-ai-provider.mjs";
+import { META_AI_JID, sameChat } from "./meta-ai-provider.mjs";
 
 const DEFAULT_TIMEOUT_MS = 90000;
 
@@ -89,10 +89,34 @@ export async function askMetaMedia({
   download = null,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   logger = null,
+  jids = null,
+  onHit = null,
 } = {}) {
   const text = String(prompt || "").trim();
   if (!sock || typeof sock.sendMessage !== "function") return null;
   if (!text && !image) return null;
+  // [META-ASSISTANT v8.36.0] محادثة المساعد قد تكون «مساعد الأعمال» بمعرّف غير 13135550002
+  const targets = (() => {
+    // المحادثة التي طلبها المستدعي (المثبَّتة/المرشحة) أولاً، والرقم المعروف كاحتياط
+    const primary = Array.isArray(jids) && jids.length ? jids : [META_AI_JID];
+    const list = [...primary, META_AI_JID].filter(Boolean);
+    const out = [];
+    for (const t of list) if (!out.some((x) => sameChat(x, t))) out.push(String(t));
+    return out;
+  })();
+  const target = targets[0];
+  // نطلب من المحادثة الأولى؛ وإن لم ترد نجرّب البقية (بمهلة أقصر لكل واحدة)
+  for (let i = 0; i < targets.length; i++) {
+    const got = await _askOne({ sock, target: targets[i], text, image, mimetype, download, logger, timeoutMs: i === 0 ? timeoutMs : Math.min(timeoutMs, 20000), firstTry: i === 0 ? null : targets[0] });
+    if (got) {
+      try { onHit?.(targets[i], got); } catch { }
+      return got;
+    }
+  }
+  return null;
+}
+
+async function _askOne({ sock, target, text, image, mimetype, download, logger, timeoutMs, firstTry }) {
 
   const run = () => new Promise((resolve) => {
     let done = false;
@@ -110,7 +134,7 @@ export async function askMetaMedia({
       try {
         const list = Array.isArray(ev?.messages) ? ev.messages : [];
         for (const msg of list) {
-          if (!isMetaAiJid(msg?.key?.remoteJid)) continue;
+          if (!sameChat(msg?.key?.remoteJid, target)) continue;
           if (msg?.key?.fromMe) continue;
           const media = mediaFromMessage(msg?.message);
           if (!media) {
@@ -145,9 +169,9 @@ export async function askMetaMedia({
       ? { image, caption: text || "عدّل هذه الصورة", mimetype }
       : { text };
     Promise.resolve()
-      .then(() => sock.sendMessage(META_AI_JID, payload))
+      .then(() => sock.sendMessage(target, payload))
       .catch((err) => {
-        try { logger?.warn?.({ err: String(err?.message || err).slice(0, 160) }, "[META-MEDIA] فشل الإرسال إلى Meta AI"); } catch { }
+        try { logger?.warn?.({ err: String(err?.message || err).slice(0, 160), target }, "[META-MEDIA] فشل الإرسال إلى محادثة المساعد"); } catch { }
         finish(null);
       });
   });
@@ -167,12 +191,12 @@ async function _defaultDownload(sock, msg) {
 }
 
 /** يطلب من Meta AI إنشاء صورة من وصف. */
-export function imagine({ sock, prompt, timeoutMs, download, logger } = {}) {
-  return askMetaMedia({ sock, prompt, timeoutMs, download, logger });
+export function imagine({ sock, prompt, timeoutMs, download, logger, jids, onHit } = {}) {
+  return askMetaMedia({ sock, prompt, timeoutMs, download, logger, jids, onHit });
 }
 
 /** يطلب من Meta AI تعديل صورة موجودة بتعليمات نصية. */
-export function edit({ sock, buffer, instruction, timeoutMs, download, logger } = {}) {
+export function edit({ sock, buffer, instruction, timeoutMs, download, logger, jids, onHit } = {}) {
   return askMetaMedia({
     sock,
     image: buffer,
@@ -180,6 +204,8 @@ export function edit({ sock, buffer, instruction, timeoutMs, download, logger } 
     timeoutMs,
     download,
     logger,
+    jids,
+    onHit,
   });
 }
 

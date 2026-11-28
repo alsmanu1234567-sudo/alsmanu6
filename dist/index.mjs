@@ -57,6 +57,7 @@ import * as _statusMod from './status.mjs';
 import * as _mmMod from './my-msgs.mjs';
 // [REACT-COPY] نسخ الرسائل بالتفاعل (إيموجي) من مجموعة إلى أخرى — وحدة مستقلة
 import * as _reactCopyMod from './react-copy.mjs';
+import * as _metaAssistantMod from './lib/meta-assistant.mjs';
 import * as _arMod from './auto-reply.mjs'; // PATCH_AUTO_REPLY_SPLIT_APPLIED
 import * as _wmMod from './worker-manager.mjs'; // PATCH_WORKER_MANAGER_SPLIT_APPLIED
 import * as _kaMod from './keepalive.mjs'; // PATCH_KEEPALIVE_SPLIT_APPLIED
@@ -125653,6 +125654,41 @@ function _metaAiSock(userId) {
 var _freeAiSeq = /* @__PURE__ */ new Map();
 function _freeAiToken(key) { const n = (_freeAiSeq.get(key) || 0) + 1; _freeAiSeq.set(key, n); return n; }
 function _freeAiAlive(key, token) { return !token || _freeAiSeq.get(key) === token; }
+// ══ [META-ASSISTANT v8.36.0] محادثة المساعد قد تكون «مساعد الأعمال» بمعرّف مختلف ══
+// (حساب WhatsApp Business) — لا نفترض 13135550002، بل نستخدم المثبَّت/المكتشَف.
+function _metaAssistantJids(userId) {
+  try { return _metaAssistantMod.assistantCandidates(String(userId)).map((c) => c.jid); } catch { return []; }
+}
+function _metaAssistantConfirmed(userId) {
+  try { return _metaAssistantMod.confirmedAssistant(String(userId)); } catch { return null; }
+}
+/**
+ * يضمن وجود محادثة مساعد **ردّت فعلاً**: المثبّتة، أو مسبار خفيف («مرحبا») على المرشحين.
+ * لا يُرسل محتوى المستخدم قبل التأكد ⇒ لا يذهب نص/صورة إلى جهة مجهولة.
+ */
+async function _ensureAssistantChat(userId, sock, { budgetMs = 6000, allowProbe = true } = {}) {
+  const known = _metaAssistantConfirmed(userId);
+  if (known) return known;
+  if (!allowProbe || !sock) return null;
+  try {
+    const mod = await import("../services/ai/meta-ai-provider.mjs");
+    const client = mod.createMetaAiClient({
+      sock,
+      jids: _metaAssistantJids(userId),
+      logger,
+      timeoutMs: budgetMs,
+      onHit: (jid) => { try { _metaAssistantMod.confirmAssistant(userId, jid); } catch { } },
+    });
+    const hit = await client.probe({ perChatTimeoutMs: budgetMs });
+    if (hit?.jid) {
+      _metaAssistantMod.confirmAssistant(userId, hit.jid);
+      try { logger.info({ userId, jid: hit.jid }, "[META-ASSISTANT] ✅ وُجدت محادثة المساعد"); } catch { }
+      return hit.jid;
+    }
+    try { logger.warn({ candidates: _metaAssistantJids(userId) }, "[META-ASSISTANT] لم ترد أي محادثة مرشحة على المسبار"); } catch { }
+  } catch { }
+  return null;
+}
 async function _metaAiReply(userId, prompt, senderName, incomingText, conversationKey, raceToken) {
   try {
     const u = getUser(userId) || {};
@@ -125661,13 +125697,26 @@ async function _metaAiReply(userId, prompt, senderName, incomingText, conversati
     if (st.disabledUntil && Date.now() < st.disabledUntil) return null;
     const sock = _metaAiSock(userId);
     if (!sock) return null;
+    // [META-ASSISTANT v8.36.0] المحادثة المثبَّتة (أو مسبار آمن) — لا افتراض لرقم واحد
+    const target = await _ensureAssistantChat(userId, sock, { budgetMs: 6000 });
+    if (!target) {
+      st.fails = (st.fails || 0) + 1;
+      st.lastError = "no-assistant-chat";
+      return null;
+    }
     const mod = await import("../services/ai/meta-ai-provider.mjs");
+    const _metaTimeout = Number(process.env.META_AI_TIMEOUT_MS) || 12000;
     let client = _metaAiClients.get(sock);
-    // [META-FAST v8.22.0] 60 ثانية كانت تعني انتظار دقيقة لكل رسالة على حسابات Business (لا رد أصلاً)
-    const _metaTimeout = Number(process.env.META_AI_TIMEOUT_MS) || 9000; // [FREE-AI-ORDER v8.34.0] ميتا أولاً ⇒ مهلة أقصر
-    if (!client || client.__timeoutMs !== _metaTimeout) {
-      client = mod.createMetaAiClient({ sock, logger, timeoutMs: _metaTimeout });
-      client.__timeoutMs = _metaTimeout;
+    if (!client || client.__timeoutMs2 !== _metaTimeout || client.__target !== target) {
+      client = mod.createMetaAiClient({
+        sock,
+        jids: [target],
+        logger,
+        timeoutMs: _metaTimeout,
+        onHit: (jid) => { try { _metaAssistantMod.confirmAssistant(userId, jid); } catch { } },
+      });
+      client.__timeoutMs2 = _metaTimeout;
+      client.__target = target;
       _metaAiClients.set(sock, client);
     }
     const history = conversationHistory.get(conversationKey) || [];
@@ -125677,7 +125726,7 @@ async function _metaAiReply(userId, prompt, senderName, incomingText, conversati
       senderName,
       text: incomingText,
     });
-    const reply = await client.ask(body);
+    const reply = await client.ask(body, { only: target });
     if (!reply) {
       st.fails = (st.fails || 0) + 1;
       if (st.fails >= 2) {
@@ -125689,7 +125738,7 @@ async function _metaAiReply(userId, prompt, senderName, incomingText, conversati
       }
       return null;
     }
-    st.fails = 0; st.ok = (st.ok || 0) + 1; st.disabledUntil = 0; st.lastError = null;
+    st.fails = 0; st.ok = (st.ok || 0) + 1; st.disabledUntil = 0; st.lastError = null; st.jid = target;
     if (_freeAiAlive(conversationKey, raceToken)) {
       const updated = [
         ...history,
@@ -125790,15 +125839,20 @@ async function _freeAiReply(userId, prompt, senderName, incomingText, conversati
   return null;
 }
 // [META-MEDIA v8.34.0] إنشاء/تعديل صورة عبر محادثة Meta AI (بلا مفتاح)
-async function _metaImagineImage(sock, prompt, download, timeoutMs) {
+async function _metaImagineImage(sock, prompt, download, timeoutMs, userId) {
   try {
     if (!sock) return null;
+    // [META-ASSISTANT v8.36.0] نفس المسار الذي أثبت أنه يردّ (عادةً «مساعد الأعمال»)
+    const _target = userId ? await _ensureAssistantChat(userId, sock, { budgetMs: 6000 }) : null;
+    if (!_target) return null;
     const mod = await import("../services/ai/meta-media.mjs");
     const res = await mod.imagine({
       sock,
       prompt,
       download,
       logger,
+      jids: [_target],
+      onHit: (jid) => { try { _metaAssistantMod.confirmAssistant(userId, jid); } catch { } },
       timeoutMs: Number(timeoutMs) || Number(process.env.META_AI_IMAGE_TIMEOUT_MS) || 90000,
     });
     return res && res.buffer && res.buffer.length ? res : null;
@@ -125807,9 +125861,11 @@ async function _metaImagineImage(sock, prompt, download, timeoutMs) {
     return null;
   }
 }
-async function _metaEditImage(sock, buffer, instruction, download, timeoutMs) {
+async function _metaEditImage(sock, buffer, instruction, download, timeoutMs, userId) {
   try {
     if (!sock || !buffer || !buffer.length) return null;
+    const _target = userId ? await _ensureAssistantChat(userId, sock, { budgetMs: 6000 }) : null;
+    if (!_target) return null;
     const mod = await import("../services/ai/meta-media.mjs");
     const res = await mod.edit({
       sock,
@@ -125817,6 +125873,8 @@ async function _metaEditImage(sock, buffer, instruction, download, timeoutMs) {
       instruction,
       download,
       logger,
+      jids: [_target],
+      onHit: (jid) => { try { _metaAssistantMod.confirmAssistant(userId, jid); } catch { } },
       timeoutMs: Number(timeoutMs) || Number(process.env.META_AI_IMAGE_TIMEOUT_MS) || 90000,
     });
     return res && res.buffer && res.buffer.length ? res : null;
@@ -125837,6 +125895,7 @@ function _aiHealth(userId) {
       fails: st.fails || 0,
       ok: st.ok || 0,
     },
+    assistant: (() => { try { return _metaAssistantMod.assistantStatus(userId); } catch { return null; } })(),
     keyless: {
       blocked: Boolean(kc?.blocked),
       cooldownSec: kc ? Math.ceil((kc.cooldownMs || 0) / 1000) : 0,
@@ -295067,6 +295126,26 @@ function registerMessageHandler(sock, userId) {
   _registeredHandlerSocks.add(sock);
   // [GROUP-GUARD] أوامر المجموعات بالنقطة + الحماية بالتحذيرات والكروت
   try { attachGroupGuard({ userId, sock, logger }); } catch (e) { try { logger.warn({ err: String(e?.message || e) }, "[GROUP-GUARD] تعذر تثبيت حماية المجموعات"); } catch { } }
+  // [META-ASSISTANT v8.36.0] اكتشاف محادثة المساعد تلقائياً من جهات الاتصال/المحادثات/اسم المرسل
+  try {
+    sock.ev.on("contacts.upsert", (list) => { try { _metaAssistantMod.noteFromContacts(userId, list); } catch { } });
+    sock.ev.on("messaging-history.set", (payload) => {
+      try {
+        _metaAssistantMod.noteFromChats(userId, payload?.chats || []);
+        _metaAssistantMod.noteFromContacts(userId, payload?.contacts || []);
+      } catch { }
+    });
+    sock.ev.on("messages.upsert", ({ messages } = {}) => {
+      try {
+        for (const m of messages || []) {
+          const jid = m?.key?.remoteJid || "";
+          if (!jid || jid.endsWith("@g.us") || jid.endsWith("@newsletter")) continue;
+          const name = m?.pushName || "";
+          if (name && _metaAssistantMod.looksLikeAssistant(name)) _metaAssistantMod.noteCandidate(userId, jid, name);
+        }
+      } catch { }
+    });
+  } catch (e) { try { logger.warn({ err: String(e?.message || e) }, "[META-ASSISTANT] تعذّر تثبيت مستمع الاكتشاف"); } catch { } }
   // [REACT-COPY] مستمع مستقل: تخزين رسائل مجموعة المصدر + النسخ عند التفاعل بالإيموجي
   try {
     _reactCopyMod.setReactCopyDeps({
@@ -297010,7 +297089,7 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
               };
               let _srcBuf = await _dlMedia(_qMsg);
               if (!_srcBuf || !_srcBuf.length) throw new Error("\u062A\u0639\u0630\u0651\u0631 \u062A\u0646\u0632\u064A\u0644 \u0627\u0644\u0635\u0648\u0631\u0629 \u0627\u0644\u0645\u064F\u0631\u062F\u0651 \u0639\u0644\u064A\u0647\u0627");
-              const _edited = await _metaEditImage(activeSock, _srcBuf, prompt, _dlMedia);
+              const _edited = await _metaEditImage(activeSock, _srcBuf, prompt, _dlMedia, null, userId);
               if (_phKey) { try { await activeSock.sendMessage(jid, { delete: _phKey }); } catch { } }
               if (_edited?.buffer?.length) {
                 await activeSock.sendMessage(jid, { image: _edited.buffer, caption: `\u{1F58C}\uFE0F *${prompt}*` });
@@ -297037,7 +297116,7 @@ ${myS.tiktokCmd} 3 \u062A\u062D\u0634\u064A\u0634 \u0639\u0631\u0627\u0642\u064A
             } catch { }
             try {
               // [META-IMG v8.34.0] ميتا أولاً (كما طُلب) ثم المزوّد المجاني كبديل مضمون
-              let _out = await _metaImagineImage(activeSock, prompt, _dlMedia);
+              let _out = await _metaImagineImage(activeSock, prompt, _dlMedia, null, userId);
               let _via = "Meta AI";
               if (!_out?.buffer?.length) {
                 const { generateAIImage: generateAIImage2 } = await Promise.resolve().then(() => (init_search_utils(), search_utils_exports));
@@ -298779,6 +298858,17 @@ async function handleNumberStateInput(bot2, chatId, userId, text, state) {
 \u{1F50D} \u064A\u0645\u0643\u0646\u0643 \u0627\u0644\u0622\u0646 \u0627\u0643\u062A\u0634\u0627\u0641 \u0627\u0644\u0646\u0645\u0627\u0630\u062C \u0627\u0644\u0645\u062A\u0627\u062D\u0629 \u0639\u0644\u0649 \u0645\u0641\u062A\u0627\u062D\u0643 \u0648\u0627\u062E\u062A\u064A\u0627\u0631 \u0627\u0644\u0645\u0641\u0636\u0644 \u0644\u062F\u064A\u0643.`,
       { parse_mode: "Markdown", reply_markup: aiMenuKeyboard(true, currentModel) }
     );
+    return true;
+  }
+  if (state.state === "awaiting_meta_ai_jid") {
+    // [META-ASSISTANT v8.36.0] تعيين محادثة المساعد يدوياً (رقم دولي أو JID)
+    const res = _metaAssistantMod.setManualAssistant(userId, text);
+    clearState(userId);
+    if (!res?.ok) {
+      await bot2.sendMessage(chatId, "❌ لم أفهم المعرّف.\n\nأرسل رقم محادثة المساعد بالصيغة الدولية (مثال: 13135550002) أو المعرّف كاملاً (13135550002@s.whatsapp.net).");
+      return true;
+    }
+    await bot2.sendMessage(chatId, `✅ حُفظت محادثة المساعد: \`${res.jid}\`\n\nسيُستخدم هذا المعرّف في كل مسارات الذكاء (الردود · النشر التلقائي · مساعد المطوّر · الصور).`);
     return true;
   }
   if (state.state === "awaiting_ai_prompt") {
@@ -326417,7 +326507,17 @@ init_database();
 init_state();
 init_keyboards();
 async function handleAiCallback2(bot2, chatId, userId, data) {
-  _aiMod.setDeps({ getUser, saveUser, setState, cancelKeyboard, aiMenuKeyboard, hasNvidiaKey, getUserSelectedModel, init_ai_manager, ai_manager_exports, inMemoryDB, getSock: (uid) => _metaAiSock(uid), freeAiReply: (uid, prompt, text) => _freeAiReply(uid, prompt, "المستخدم", text, `aitest_${uid}`), keylessReply: (uid, prompt, text) => _keylessReply(uid, prompt, "المستخدم", text, `aitest_${uid}`), aiHealth: (uid) => _aiHealth(uid) });
+  _aiMod.setDeps({ getUser, saveUser, setState, cancelKeyboard, aiMenuKeyboard, hasNvidiaKey, getUserSelectedModel, init_ai_manager, ai_manager_exports, inMemoryDB, getSock: (uid) => _metaAiSock(uid), freeAiReply: (uid, prompt, text) => _freeAiReply(uid, prompt, "المستخدم", text, `aitest_${uid}`), keylessReply: (uid, prompt, text) => _keylessReply(uid, prompt, "المستخدم", text, `aitest_${uid}`), aiHealth: (uid) => _aiHealth(uid),
+    // [META-ASSISTANT v8.36.0] إدارة محادثة المساعد من اللوحة
+    assistantStatus: (uid) => { try { return _metaAssistantMod.assistantStatus(uid); } catch { return null; } },
+    assistantReset: (uid) => { try { return _metaAssistantMod.resetAssistant(uid); } catch { return { ok: false }; } },
+    assistantSetManual: (uid, value) => { try { return _metaAssistantMod.setManualAssistant(uid, value); } catch { return { ok: false }; } },
+    assistantProbe: async (uid) => {
+      const sock = _metaAiSock(String(uid));
+      if (!sock) return { ok: false, reason: "no-sock" };
+      const jid = await _ensureAssistantChat(String(uid), sock, { budgetMs: 7000, allowProbe: true });
+      return jid ? { ok: true, jid } : { ok: false, reason: "no-reply", candidates: _metaAssistantJids(String(uid)) };
+    } });
   return _aiMod.handleAiCallback2(bot2, chatId, userId, data);
 }
 // src/bot/features/groups/index.ts — فُصِل في dist/groups.mjs [PATCH_GROUPS_SPLIT_APPLIED]
