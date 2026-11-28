@@ -166,8 +166,11 @@ test("getPrefetchedMedia + /copy يستخدم البايتات المحفوظة"
   const pre = getPrefetchedMedia(SRC, "PX1");
   assert.ok(pre && pre.length === BUF.length, "البايتات متاحة للاستخدام من /copy");
   assert.equal(getPrefetchedMedia(SRC, "غير-موجود"), null);
+  // [PEEK v8.35.0] البايتات المحفوظة تُستخدم داخل وحدة النسخ نفسها (copyToSameChat)
+  const copySrc = readFileSync(new URL("../../dist/react-copy.mjs", import.meta.url), "utf8");
+  assert.match(copySrc, /let buffer = qid \? _voGet\(jid, qid\) : null/);
   const indexSrc = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
-  assert.match(indexSrc, /getPrefetchedMedia\(jid, quotedId\)/);
+  assert.match(indexSrc, /_reactCopyMod\.copyToSameChat\(/, "‏/copy يستخدم نفس وحدة النسخ الموحّدة");
 });
 
 test("التشخيص يعرض حجم ذاكرة عرض-مرة", async () => {

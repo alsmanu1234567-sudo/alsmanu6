@@ -295908,74 +295908,52 @@ ${nameLine}${statusLine}`;
           return; // [DISPATCH-FIX]
         }
         if (myS.copyEnabled && trimmed === myS.copyCmd) {
-          // [/COPY v8.22.0] طريقة alsmanu5 نفسها (قراءة المقتبس مباشرة + downloadMediaMessage)
-          // مع فكّ أغلفة «عرض مرة واحدة» وإرسال المحتوى **بلا viewOnce**.
+          // [/COPY v8.35.0] كل منطق النسخ انتقل إلى dist/react-copy.mjs — تقنية بوت al-jin
+          // (modules/peek.js): نُمرّر عقدة الوسائط نفسها عبر relayMessage بعد حذف علم
+          // viewOnce ⇒ تُنسخ رسالة «عرض مرة واحدة» **مفتوحة وبلا أي غلاف** حتى لو كان
+          // رابط التنزيل ميتاً. وإن تعذّر التمرير يُنزَّل المحتوى ويُرسل من جديد.
           try {
-            const ctxInfo = msg.message?.extendedTextMessage?.contextInfo || msg.message?.imageMessage?.contextInfo || msg.message?.videoMessage?.contextInfo || msg.message?.audioMessage?.contextInfo || msg.message?.documentMessage?.contextInfo;
+            const ctxInfo = msg.message?.extendedTextMessage?.contextInfo
+              || msg.message?.imageMessage?.contextInfo
+              || msg.message?.videoMessage?.contextInfo
+              || msg.message?.audioMessage?.contextInfo
+              || msg.message?.documentMessage?.contextInfo
+              || msg.message?.stickerMessage?.contextInfo
+              || null;
             const quoted = ctxInfo?.quotedMessage;
             if (!quoted) {
-              await activeSock.sendMessage(jid, { text: `\u26A0\uFE0F \u0631\u062F\u0651 \u0639\u0644\u0649 \u0631\u0633\u0627\u0644\u0629 \u0623\u0648\u0644\u0627\u064B \u062B\u0645 \u0623\u0631\u0633\u0644 ${myS.copyCmd}` });
+              await activeSock.sendMessage(jid, { text: `⚠️ ردّ على رسالة أولاً ثم أرسل ${myS.copyCmd}` });
             } else {
-              const inner = quoted.viewOnceMessageV2?.message
-                || quoted.viewOnceMessage?.message
-                || quoted.viewOnceMessageV2Extension?.message
-                || quoted.documentWithCaptionMessage?.message
-                || quoted.ephemeralMessage?.message
-                || quoted;
-              const qText = inner.conversation || inner.extendedTextMessage?.text || null;
-              const mediaObj = inner.imageMessage || inner.videoMessage || inner.ptvMessage || inner.audioMessage || inner.documentMessage || inner.stickerMessage || null;
-              const quotedId = ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || "";
-              if (qText) {
-                await activeSock.sendMessage(jid, { text: qText });
-              } else if (mediaObj) {
-                const quotedMsgForDl = {
-                  key: { remoteJid: jid, fromMe: !ctxInfo?.participant, id: quotedId, participant: ctxInfo?.participant },
-                  message: quoted
+              const res = await _reactCopyMod.copyToSameChat({
+                sock: activeSock,
+                baileys: installedBaileys,
+                jid,
+                quoted,
+                quotedKey: {
+                  id: ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || "",
+                  participant: ctxInfo?.participant,
+                  fromMe: false,
+                },
+                userId,
+                logger,
+              });
+              if (!res?.ok) {
+                const _reasons = {
+                  "no-message": "لا توجد رسالة مُقتبَسة",
+                  "unsupported": "نوع الرسالة غير مدعوم في النسخ",
+                  "empty-text": "الرسالة فارغة",
+                  "no-media-node": "لم أجد ملف الوسائط في الرسالة المُقتبَسة",
+                  "download-failed": "تعذّر تنزيل المحتوى — أعد المحاولة بعد لحظات (رابط الوسائط قد يكون انتهى)",
                 };
-                // [VO-PREFETCH v8.22.2] إن كانت الرسالة عرض-مرة وقد نُزّلت لحظة وصولها ⇒ استخدم بايتاتها (رابطها ميت غالباً)
-                let buf = quotedId ? _reactCopyMod.getPrefetchedMedia(jid, quotedId) : null;
-                try {
-                  if (buf && buf.length) throw { __skip: true };
-                  const { downloadMediaMessage: downloadMediaMessage2 } = await Promise.resolve().then(() => (init_lib6(), lib_exports4));
-                  buf = await downloadMediaMessage2(
-                    quotedMsgForDl,
-                    "buffer",
-                    {},
-                    { logger: baileysLogger, reuploadRequest: activeSock.updateMediaMessage }
-                  );
-                } catch (dlErr) {
-                  if (!dlErr?.__skip) {
-                    // [COPY v8.22.1] المحاولة الأولى تفشل مع بعض الرسائل (بلا url) — الاحتياطي يعالجها، لذلك debug لا warn
-                    logger.debug({ dlErr: String(dlErr?.message || dlErr).slice(0, 160) }, "[/copy] المحاولة الأولى للتنزيل فشلت — استخدام الاحتياطي");
-                  }
-                }
-                if (!buf || !buf.length) {
-                  // احتياط: نفس دالة التنزيل متعددة المصادر المستخدمة في النسخ بالتفاعل
-                  buf = await _reactCopyMod.downloadWithFallbacks(activeSock, installedBaileys, { key: quotedMsgForDl.key, message: quoted, sourceJid: jid }, mediaObj);
-                }
-                if (!buf || !buf.length) {
-                  await activeSock.sendMessage(jid, { text: "\u26A0\uFE0F \u062A\u0639\u0630\u0651\u0631 \u062A\u0646\u0632\u064A\u0644 \u0627\u0644\u0645\u062D\u062A\u0648\u0649 \u2014 \u0623\u0639\u062F \u0627\u0644\u0645\u062D\u0627\u0648\u0644\u0629" });
-                } else if (inner.imageMessage) {
-                  await activeSock.sendMessage(jid, { image: buf, mimetype: inner.imageMessage.mimetype || "image/jpeg", ...(inner.imageMessage.caption ? { caption: inner.imageMessage.caption } : {}) });
-                } else if (inner.videoMessage || inner.ptvMessage) {
-                  const v = inner.videoMessage || inner.ptvMessage;
-                  await activeSock.sendMessage(jid, { video: buf, mimetype: v.mimetype || "video/mp4", ...(v.caption ? { caption: v.caption } : {}), ...(v.seconds ? { seconds: v.seconds } : {}), ...(v.gifPlayback ? { gifPlayback: true } : {}) });
-                } else if (inner.audioMessage) {
-                  await activeSock.sendMessage(jid, { audio: buf, mimetype: inner.audioMessage.mimetype || "audio/mp4", ptt: Boolean(inner.audioMessage.ptt), ...(inner.audioMessage.seconds ? { seconds: inner.audioMessage.seconds } : {}) });
-                } else if (inner.documentMessage) {
-                  await activeSock.sendMessage(jid, { document: buf, mimetype: inner.documentMessage.mimetype || "application/octet-stream", fileName: inner.documentMessage.fileName || "file", ...(inner.documentMessage.caption ? { caption: inner.documentMessage.caption } : {}) });
-                } else if (inner.stickerMessage) {
-                  await activeSock.sendMessage(jid, { sticker: buf });
-                }
-                logger.info({ userId, jid, wasViewOnce: inner !== quoted }, "[/copy] نُسخت الرسالة بلا علامة تحويل");
+                await activeSock.sendMessage(jid, { text: `⚠️ ${_reasons[res?.reason] || "تعذّرت إعادة الإرسال"}` });
               } else {
-                await activeSock.sendMessage(jid, { text: "\u26A0\uFE0F \u0646\u0648\u0639 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u063A\u064A\u0631 \u0645\u062F\u0639\u0648\u0645 \u0641\u064A \u0627\u0644\u0646\u0633\u062E" });
+                logger.info({ userId, jid, kind: res.kind, wasViewOnce: res.wasViewOnce, method: res.usedRelay ? "relay (بلا إعادة رفع)" : "download" }, "[/copy] نُسخت الرسالة بلا غلاف");
               }
             }
           } catch (e) {
             logger.warn({ e }, "[/copy] failed");
             try {
-              await activeSock.sendMessage(jid, { text: "\u26A0\uFE0F \u062A\u0639\u0630\u0651\u0631\u062A \u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0625\u0631\u0633\u0627\u0644" });
+              await activeSock.sendMessage(jid, { text: "⚠️ تعذّرت إعادة الإرسال" });
             } catch {
             }
           }

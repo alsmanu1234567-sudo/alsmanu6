@@ -409,6 +409,91 @@ function textOf(content) {
   return content?.conversation || content?.extendedTextMessage?.text || "";
 }
 
+// ───────────────────── [PEEK v8.35.0] استخراج أي وسائط وفكّ كل الأغلفة ─────────────────────
+// التقنية مأخوذة من بوت al-jin (modules/peek.js) بعد قراءته سطراً سطراً:
+//   • يكفي أن تكون الرسالة **مُقتبَسة** ليجد المحتوى الحقيقي داخل contextInfo.quotedMessage
+//     حتى لو كان «عرض مرة واحدة» — لأن جهاز المُرسِل يُدرج المحتوى مع الردّ.
+//   • التغليف قد يكون viewOnceMessage / viewOnceMessageV2 / viewOnceMessageV2Extension /
+//     ephemeralMessage / documentWithCaptionMessage / editedMessage.
+//   • وأحياناً لا يوجد غلاف أصلاً، بل العقدة نفسها تحمل viewOnce: true.
+const MEDIA_KEYS = [
+  ["imageMessage", "image"],
+  ["videoMessage", "video"],
+  ["ptvMessage", "video"],
+  ["audioMessage", "audio"],
+  ["documentMessage", "document"],
+  ["stickerMessage", "sticker"],
+];
+
+/**
+ * يفكّ كل الأغلفة ويعيد أول وسائط يجدها.
+ * @returns {{node:any, type:string, contentKey:string, viewOnce:boolean}|null}
+ */
+export function extractAnyMedia(message) {
+  if (!message) return null;
+  let m = message.message || message;
+  let wasVO = false;
+  for (let depth = 0; depth < 6 && m; depth++) {
+    const isVO = Boolean(m.viewOnceMessageV2 || m.viewOnceMessageV2Extension || m.viewOnceMessage);
+    for (const [contentKey, type] of MEDIA_KEYS) {
+      if (m[contentKey]) {
+        return { node: m[contentKey], type, contentKey, viewOnce: isVO || m[contentKey].viewOnce === true || wasVO };
+      }
+    }
+    const wrapped = m.viewOnceMessageV2?.message
+      || m.viewOnceMessageV2Extension?.message
+      || m.viewOnceMessage?.message
+      || m.ephemeralMessage?.message
+      || m.documentWithCaptionMessage?.message
+      || m.editedMessage?.message;
+    if (!wrapped) return null;
+    if (isVO) wasVO = true;
+    m = wrapped;
+  }
+  return null;
+}
+
+/** يحلّ generateWAMessageFromContent من أي شكل لحزمة Baileys. */
+async function _generateFromContent(baileys) {
+  const pick = (B) => (typeof B?.generateWAMessageFromContent === "function"
+    ? B.generateWAMessageFromContent
+    : typeof B?.default?.generateWAMessageFromContent === "function"
+      ? B.default.generateWAMessageFromContent
+      : null);
+  const direct = pick(baileys);
+  if (direct) return direct;
+  try { return pick(await import("baileys")); } catch { return null; }
+}
+
+/**
+ * [PEEK v8.35.0] الطريقة الأولى (الأسرع والأدق): تمرير عقدة الوسائط كما هي عبر
+ * `relayMessage` بعد حذف علم `viewOnce` ⇒ تصل **رسالة عادية مفتوحة** بلا إعادة رفع،
+ * ولا تحتاج أن يكون رابط التنزيل حياً (وهذا ما كان يمنع نسخ «عرض مرة واحدة»).
+ * @returns {Promise<boolean>} هل نجح التمرير؟
+ */
+export async function relayMediaStripped({ sock, baileys, destination, node, contentKey, keepViewOnce = false, caption = "", quotedMsg = null, logger } = {}) {
+  try {
+    if (!sock?.relayMessage || !node || !contentKey) return false;
+    if (!node.mediaKey || !(node.url || node.directPath)) return false;
+    const gen = await _generateFromContent(baileys);
+    if (typeof gen !== "function") return false;
+    const cleanNode = { ...node };
+    if (!keepViewOnce) delete cleanNode.viewOnce;
+    if (caption && !cleanNode.caption) cleanNode.caption = caption;
+    const inner = { [contentKey]: cleanNode };
+    const content = keepViewOnce ? { viewOnceMessageV2: { message: inner } } : inner;
+    const waMsg = await gen(destination, content, { userJid: sock?.user?.id, ...(quotedMsg ? { quoted: quotedMsg } : {}) });
+    if (!waMsg?.message || !waMsg?.key?.id) return false;
+    await sock.relayMessage(destination, waMsg.message, { messageId: waMsg.key.id });
+    try { rememberSentId(destination, waMsg.key.id); } catch { }
+    try { (logger || _deps.logger)?.info?.({ destination, contentKey, kind: keepViewOnce ? "viewOnce" : "open" }, "[PEEK] ✅ نُقلت الرسالة بلا إعادة رفع ولا غلاف"); } catch { }
+    return true;
+  } catch (error) {
+    try { (logger || _deps.logger)?.warn?.({ err: String(error?.message || error).slice(0, 140) }, "[PEEK] تعذّر التمرير — سننزّل الوسائط ونعيد إرسالها"); } catch { }
+    return false;
+  }
+}
+
 // ───────────────────────────── الذاكرة المؤقتة ─────────────────────────────
 
 function cacheKey(userId, jid) {
@@ -656,16 +741,22 @@ function settingsCached(userId, sock) {
  * يفكّ غلاف «عرض مرة واحدة» ثم يُرسل الوسائط **عاديّة بلا viewOnce** ⇒ تُفتح دائماً.
  * يعيد { ok, kind, reason, wasViewOnce } — لا يرمي أبداً.
  */
-export async function copyToSameChat({ sock, baileys, jid, quoted, quotedKey, logger }) {
+export async function copyToSameChat({ sock, baileys, jid, quoted, quotedKey, userId, logger }) {
   try {
     if (!jid || !quoted) return { ok: false, reason: "no-message" };
     const { content, viewOnce: wasViewOnce } = unwrapMessage(quoted);
     const kind = classifyContent(content);
     if (!kind) return { ok: false, reason: "unsupported", wasViewOnce };
+    const qid = quotedKey?.id || "";
+    // [PEEK v8.35.0] بايتات محفوظة مسبقاً (حفظ مسبق للعرض-مرة أو من مخزن القرص) تُقدَّم
+    // على أي تنزيل — رابط «عرض مرة واحدة» يموت بعد فتحه.
+    let buffer = qid ? _voGet(jid, qid) : null;
+    if (!buffer && qid && userId) { try { buffer = storeLoadMedia(String(userId), jid, qid); } catch { } }
     const original = {
-      key: { remoteJid: jid, fromMe: Boolean(quotedKey?.fromMe), id: quotedKey?.id || "", ...(quotedKey?.participant ? { participant: quotedKey.participant } : {}) },
+      key: { remoteJid: jid, fromMe: Boolean(quotedKey?.fromMe), id: qid, ...(quotedKey?.participant ? { participant: quotedKey.participant } : {}) },
       message: quoted,
       sourceJid: jid,
+      ...(buffer?.length ? { buffer } : {}),
     };
     const res = await copyMessageToTarget({ sock, baileys, destination: jid, original, preferViewOnce: false, logger });
     return { ...res, wasViewOnce };
@@ -689,7 +780,11 @@ async function _sendAndRemember(sock, destination, payload) {
 export async function copyMessageToTarget({ sock, baileys, destination, original, preferViewOnce, logger }) {
   try {
     if (!destination || !original?.message) return { ok: false, reason: "no-message" };
-    const { content, viewOnce: wasViewOnce } = unwrapMessage(original.message);
+    const unwrapped = unwrapMessage(original.message);
+    const content = unwrapped.content;
+    const found = extractAnyMedia(original.message);
+    // [PEEK v8.35.0] «عرض مرة واحدة» قد يأتي بغلاف أو بعلم viewOnce على العقدة نفسها
+    const wasViewOnce = Boolean(unwrapped.viewOnce || found?.viewOnce);
     const kind = classifyContent(content);
     if (!kind) return { ok: false, reason: "unsupported" };
 
@@ -700,59 +795,91 @@ export async function copyMessageToTarget({ sock, baileys, destination, original
       return { ok: true, kind };
     }
 
-    const mediaObj =
-      content.imageMessage || content.videoMessage || content.ptvMessage ||
+    const mediaObj = found?.node
+      || content.imageMessage || content.videoMessage || content.ptvMessage ||
       content.audioMessage || content.documentMessage || content.stickerMessage;
+    if (!mediaObj) return { ok: false, kind, reason: "no-media-node" };
 
-    // [VO-PREFETCH v8.22.2] إن كانت البايتات محفوظة مسبقاً (عرض مرة واحدة) نستخدمها مباشرة
+    // [PEEK v8.35.0] «رسالة مغلقة تُنقل بدون إغلاق»: العرض-مرة يُرسل مفتوحاً دائماً،
+    // إلا إذا طلب المستدعي صراحةً إبقاءه مغلقاً (preferViewOnce).
+    const asViewOnce = Boolean(preferViewOnce === true && wasViewOnce);
+
+    // ── المحاولة 0: تمرير العقدة بلا إعادة رفع (نفس تقنية بوت al-jin) ──
+    //    تنجح حتى لو انتهى رابط التنزيل، ولذلك كانت «عرض مرة واحدة» تفشل بعد فترة.
+    const contentKey = found?.contentKey
+      || (content.imageMessage ? "imageMessage"
+        : content.videoMessage ? "videoMessage"
+          : content.ptvMessage ? "ptvMessage"
+            : content.audioMessage ? "audioMessage"
+              : content.documentMessage ? "documentMessage" : "stickerMessage");
+    if (original?.relay !== false) {
+      const relayed = await relayMediaStripped({
+        sock, baileys, destination, node: mediaObj, contentKey,
+        keepViewOnce: asViewOnce,
+        caption: mediaObj?.caption || "",
+        logger,
+      });
+      if (relayed) return { ok: true, kind, viewOnce: asViewOnce, usedRelay: true, wasViewOnce };
+    }
+
+    // ── المحاولة 1: بايتات محفوظة مسبقاً ثم تنزيل بأعلى نسبة نجاح ──
     const cachedBuf = original?.buffer?.length ? original.buffer : null;
     let buf = cachedBuf;
     if (!buf) {
-      // [VO-PROBE v8.23.1] لو كانت «عرض مرة واحدة» نجرّب المحتوى الداخلي أولاً (أعلى نسبة نجاح)،
-      // ثم نرجع للتدرّج الكامل. السابق كان يمرّر الغلاف فقط ⇒ فشل صامت حين يكون الرابط سليماً.
       if (wasViewOnce) buf = await _dlViewOnceNow({ sock, baileys, original, content, mediaObj, logger });
       if (!buf) buf = await downloadWithFallbacks(sock, baileys, original, mediaObj);
     }
-    if (!buf) return { ok: false, kind, reason: "download-failed" };
+    if (!buf) return { ok: false, kind, reason: "download-failed", wasViewOnce };
 
-    const asViewOnce = Boolean(preferViewOnce && wasViewOnce);
     const caption = mediaObj?.caption || "";
 
-    if (kind === "image") {
-      await _sendAndRemember(sock, destination, {
-        image: buf,
-        ...(caption ? { caption } : {}),
-        mimetype: mediaObj.mimetype || "image/jpeg",
-        ...(asViewOnce ? { viewOnce: true } : {}),
-      });
-    } else if (kind === "video") {
-      await _sendAndRemember(sock, destination, {
-        video: buf,
-        ...(caption ? { caption } : {}),
-        mimetype: mediaObj.mimetype || "video/mp4",
-        ...(mediaObj.gifPlayback ? { gifPlayback: true } : {}),
-        ...(mediaObj.seconds ? { seconds: mediaObj.seconds } : {}),
-        ...(asViewOnce ? { viewOnce: true } : {}),
-      });
-    } else if (kind === "audio") {
-      // العرض مرة واحدة غير مدعوم للصوت في واتساب ⇒ يُرسل صوتاً عادياً.
-      await _sendAndRemember(sock, destination, {
-        audio: buf,
-        mimetype: mediaObj.mimetype || "audio/mp4",
-        ptt: Boolean(mediaObj.ptt),
-        ...(mediaObj.seconds ? { seconds: mediaObj.seconds } : {}),
-      });
-    } else if (kind === "document") {
-      await _sendAndRemember(sock, destination, {
-        document: buf,
-        mimetype: mediaObj.mimetype || "application/octet-stream",
-        fileName: mediaObj.fileName || "file",
-        ...(caption ? { caption } : {}),
-      });
-    } else if (kind === "sticker") {
-      await _sendAndRemember(sock, destination, { sticker: buf });
+    // [PEEK v8.35.0] لو طلب المستخدم إبقاء «عرض مرة واحدة» مغلقاً وفشل الإرسال بهذه الصيغة
+    // (بعض الأجهزة/الإصدارات ترفضه) ⇒ نُرسله مفتوحاً بدل أن يضيع المحتوى تماماً.
+    const sendAs = async (keepClosed) => {
+      const vo = Boolean(keepClosed && asViewOnce);
+      if (kind === "image") {
+        await _sendAndRemember(sock, destination, {
+          image: buf,
+          ...(caption ? { caption } : {}),
+          mimetype: mediaObj.mimetype || "image/jpeg",
+          ...(vo ? { viewOnce: true } : {}),
+        });
+      } else if (kind === "video") {
+        await _sendAndRemember(sock, destination, {
+          video: buf,
+          ...(caption ? { caption } : {}),
+          mimetype: mediaObj.mimetype || "video/mp4",
+          ...(mediaObj.gifPlayback ? { gifPlayback: true } : {}),
+          ...(mediaObj.seconds ? { seconds: mediaObj.seconds } : {}),
+          ...(vo ? { viewOnce: true } : {}),
+        });
+      } else if (kind === "audio") {
+        // العرض مرة واحدة غير مدعوم للصوت في واتساب ⇒ يُرسل صوتاً عادياً.
+        await _sendAndRemember(sock, destination, {
+          audio: buf,
+          mimetype: mediaObj.mimetype || "audio/mp4",
+          ptt: Boolean(mediaObj.ptt),
+          ...(mediaObj.seconds ? { seconds: mediaObj.seconds } : {}),
+        });
+      } else if (kind === "document") {
+        await _sendAndRemember(sock, destination, {
+          document: buf,
+          mimetype: mediaObj.mimetype || "application/octet-stream",
+          fileName: mediaObj.fileName || "file",
+          ...(caption ? { caption } : {}),
+        });
+      } else if (kind === "sticker") {
+        await _sendAndRemember(sock, destination, { sticker: buf });
+      }
+    };
+    try {
+      await sendAs(true);
+    } catch (error) {
+      if (!asViewOnce) throw error;
+      try { logger?.warn?.({ err: String(error?.message || error).slice(0, 120) }, "[PEEK] فشل إرسال «عرض مرة واحدة» — إعادة الإرسال مفتوحاً"); } catch { }
+      await sendAs(false);
     }
-    return { ok: true, kind, viewOnce: asViewOnce, usedPrefetch: Boolean(cachedBuf) };
+    return { ok: true, kind, viewOnce: asViewOnce, usedPrefetch: Boolean(cachedBuf), wasViewOnce };
   } catch (error) {
     try { logger?.warn?.(`[REACT-COPY] خطأ النسخ: ${String(error?.message || error).slice(0, 160)}`); } catch { }
     return { ok: false, reason: "exception" };
@@ -982,7 +1109,7 @@ async function handleReaction({ userId, sock, logger, baileys, cfg, reaction, re
     }
   }
   try {
-    logger?.info?.(`[REACT-COPY] ${result.ok ? "نُسخت" : "فشلت"} رسالة ${result.kind || "-"} من ${targetJid} إلى ${cfg.to}${result.reason ? " سبب=" + result.reason : ""}${result.usedPrefetch ? " (من الذاكرة المسبقة)" : ""}`);
+    logger?.info?.(`[REACT-COPY] ${result.ok ? "نُسخت" : "فشلت"} رسالة ${result.kind || "-"} من ${targetJid} إلى ${cfg.to}${result.reason ? " سبب=" + result.reason : ""}${result.usedRelay ? " (تمرير بلا إعادة رفع — تقنية peek)" : ""}${result.usedPrefetch ? " (من الذاكرة المسبقة)" : ""}${result.wasViewOnce ? " [عرض مرة واحدة ⇒ أُرسلت " + (result.viewOnce ? "مغلقة" : "مفتوحة") + "]" : ""}`);
   } catch { }
   return result;
 }
