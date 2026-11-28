@@ -32,6 +32,7 @@
    <button class="secondary" data-rd="clear-dedup">🗂 تفريغ ذاكرة التكرار</button>
    <button class="secondary" data-rd="refresh-groups">👥 اختبار قراءة المجموعات</button>
    <button class="secondary" data-rd="self-check">🩺 فحص شامل</button>
+   <button class="secondary" data-rd="rescan-sockets">🧷 فحص وإصلاح السوكتات</button>
    <button class="secondary" data-rd="clear-trace">♻️ تفريغ السجل</button>
   </div><div id="rd-checks" class="list"></div></section>
   <section class="card"><h3>✉️ إرسال رسالة اختبار من الرقم المتصل</h3><div class="row"><input id="rd-to" placeholder="الرقم الدولي بدون +" dir="ltr" style="max-width:220px"><input id="rd-text" class="grow" value="✅ اختبار من لوحة التشخيص"><button class="primary" id="rd-send">إرسال</button></div><div class="note">إن وصلت الرسالة فالإرسال سليم والمشكلة في استقبال/توجيه الوارد.</div></section>

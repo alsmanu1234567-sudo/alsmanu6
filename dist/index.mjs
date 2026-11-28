@@ -28,6 +28,7 @@ import { setMessageCutoff, advanceMessageCutoff, setMessageProcessingPaused } fr
 import { isGeneratedAutoReply, protectAutoReplySocket, matchesReplyTarget } from '../services/auto-reply-routing.mjs';
 import { attachGroupGuard, exportGuardSettings, importGuardSettings, listGuardUserIds } from '../services/group-guard.mjs';
 import { sendAiReply, getAiCardConfig, setAiCardEnabled } from '../services/ai-card.mjs';
+import * as _waSockMod from './lib/wa-sock.mjs';
 // PATCH_MASTER_FIX_APPLIED
 // PATCH_FIXES_V3_APPLIED
 // RUNTIME_BAILEYS_EXTERNAL_PATCH_V3
@@ -293384,6 +293385,8 @@ function _registerNumberSock(userId, phone, sock) {
   const uid = String(userId);
   if (!_numberSocks.has(uid)) _numberSocks.set(uid, /* @__PURE__ */ new Map());
   _numberSocks.get(uid).set(phone, sock);
+  // [WA-SOCK v8.30.0] سجل عام احتياطي حتى تجد لوحة التشخيص السوكت من أي مكان
+  try { _waSockMod.registerGlobalSock(uid, phone, sock); } catch { }
 }
 function getSockForPhone(userId, phone) {
   const byUser = _numberSocks.get(String(userId));
@@ -302596,13 +302599,16 @@ async function openServerControl(bot2,chatId,userId,minutes){
 async function sendServerControlLinkText(bot2,chatId,userId){if(String(userId)!==String(DEVELOPER_ID)||String(chatId)!==String(userId))return;try{const dir=process.env.BOT_SERVER_CONTROL_DIR;if(!dir)throw Error('لوحة السيرفر غير مهيأة');const {getServerControlLink}=await import('../services/developer/server-control-launcher.mjs');const url=await getServerControlLink(dir);await bot2.sendMessage(chatId,url?'🔐 رابط التحكم الكامل؛ لا تشاركه:\n'+url:'لا يوجد رابط صالح محفوظ؛ أنشئ رابطاً جديداً.',{disable_web_page_preview:true})}catch(e){await bot2.sendMessage(chatId,'تعذر إرسال الرابط: '+e.message)}}
 function createDevDiagService() {
   const devOnly = (uid) => { if (String(uid) !== String(DEVELOPER_ID)) throw Error("هذه الصفحة للمطور فقط"); };
-  const sockOf = (uid) => {
-    const byNum = _numberSocks.get(String(uid));
-    if (byNum && byNum.size) { for (const [, sk] of byNum) if (sk?.ws?.readyState === 1) return sk; for (const [, sk] of byNum) return sk; }
-    const raw = inMemoryDB.sessions.get(String(uid));
-    return raw?.sock || raw || null;
-  };
-  const sockState = (sock) => { const r = sock?.ws?.readyState; return r === 1 ? "open" : r === 0 ? "connecting" : r === 2 ? "closing" : r === 3 ? "closed" : "none"; };
+  // [WA-SOCK v8.30.0] حلّال موحّد: كان يقرأ خانتين فقط فيظهر «سوكت واتساب — none»
+  // رغم أن السوكت حيّ تحت مفتاح مثل uid_+249… أو sess_<id> أو داخل {sock}.
+  const sockResolve = (uid, phone = null) => _waSockMod.resolveSockDetailed(String(uid), {
+    numberSocks: _numberSocks,
+    sessions,
+    memorySessions: inMemoryDB.sessions,
+    phone,
+  });
+  const sockOf = (uid) => sockResolve(uid).sock;
+  const sockState = (sock) => _waSockMod.socketState(sock);
   async function overview(uid) {
     devOnly(uid);
     const d = getProcessingDiagnostics(uid);
@@ -302616,7 +302622,7 @@ function createDevDiagService() {
       now: Date.now(),
       bot: { pid: process.pid, node: process.version, uptimeSec: Math.round(process.uptime()), rssMB: Math.round(process.memoryUsage().rss / 1048576), startedAt: BOT_START_TS * 1000 },
       owner: { id: String(uid), name: user?.firstName || null },
-      socket: { state: sockState(sock), hasUser: !!sock?.user?.id, me: String(sock?.user?.id || "").split(":")[0] || null },
+      socket: { state: sockState(sock), hasUser: !!sock?.user?.id, me: String(sock?.user?.id || "").split(":")[0] || null, source: sockResolve(uid).source, found: sockResolve(uid).all.length },
       numbers: (user?.whatsappNumbers || []).map((n) => ({ number: n.number, status: n.status, sessionId: n.sessionId, active: String(n.number || "").replace(/\D/g, "") === String(sock?.user?.id || "").split(":")[0].split("@")[0] })),
       processing: { paused: d.paused, cutoff: d.cutoff || 0, cutoffAgeMs: d.cutoffAgeMs || 0, incoming: d.incoming, pausedDrops: d.pausedDrops, staleDrops: d.staleDrops, lastIncomingAt: d.lastIncomingAt, lastDropAt: d.lastDropAt },
       pipeline: { received: pipeline.received || 0, commands: pipeline.commands || 0, notify: pipeline.notify || 0, newsletter: pipeline.newsletter || 0, dropped: pipeline.dropped || 0, handlerErrors: pipeline.handlerErrors || 0, lanes: pipeline.lanes || null, inflight: pipeline.commandsInflight || 0 },
@@ -302649,8 +302655,11 @@ function createDevDiagService() {
         return { ok: true, message: `أُعيد توصيل الجلسات${dead.length ? " (نُظّفت " + dead.length + " خانة ميتة)" : ""}` };
       }
       case "refresh-groups": {
-        if (!sock) throw Error("لا يوجد سوكت واتساب في الذاكرة");
-        const groups = await sock.groupFetchAllParticipating();
+        // [WA-SOCK v8.30.0] إصلاح ذاتي: ابحث في كل المخازن قبل إعلان الفشل
+        const _live = sock || sockResolve(uid).sock;
+        if (!_live) throw Error("لا يوجد سوكت واتساب حيّ — اضغط «إعادة توصيل واتساب» ثم «فحص وإصلاح السوكتات»");
+        if (!sock) { try { inMemoryDB.sessions.set(String(uid), _live); } catch { } }
+        const groups = await _live.groupFetchAllParticipating();
         const count = Object.keys(groups || {}).length;
         try { inMemoryDB.groupsCache.set(String(uid), Object.values(groups || {}).map((g) => ({ id: g.id, subject: g.subject }))); } catch { }
         return { ok: true, message: `تم تحديث ${count} مجموعة من واتساب` };
@@ -302665,15 +302674,36 @@ function createDevDiagService() {
       }
       case "self-check": {
         const out = [];
-        out.push({ name: "سوكت واتساب", ok: sockState(sock) === "open", detail: sockState(sock) });
+        const _res = sockResolve(uid);
+        out.push({ name: "سوكت واتساب", ok: sockState(sock) === "open", detail: `${sockState(sock)}${_res.source !== "none" ? ` · من ${_res.source}` : " · لم يُعثر عليه في الذاكرة"}` });
         out.push({ name: "هوية الرقم", ok: !!sock?.user?.id, detail: sock?.user?.id || "غير متاح" });
         out.push({ name: "المعالجة غير متوقفة", ok: !getProcessingDiagnostics(uid).paused, detail: getProcessingDiagnostics(uid).paused ? "متوقفة" : "تعمل" });
         out.push({ name: "نقطة القطع", ok: !getProcessingDiagnostics(uid).cutoff, detail: getProcessingDiagnostics(uid).cutoff ? new Date(getProcessingDiagnostics(uid).cutoff).toISOString() : "لا توجد" });
-        try { const g = await sock.groupFetchAllParticipating(); out.push({ name: "قراءة من واتساب", ok: true, detail: Object.keys(g || {}).length + " مجموعة" }); }
-        catch (e) { out.push({ name: "قراءة من واتساب", ok: false, detail: String(e?.message || e).slice(0, 120) }); }
+        if (!sock || typeof sock.groupFetchAllParticipating !== "function") {
+          const keys = _res.all.slice(0, 4).map((x) => `${x.source}:${x.state}`).join(" · ") || "لا شيء";
+          out.push({ name: "قراءة من واتساب", ok: false, detail: `لا يوجد سوكت جاهز (الموجود: ${keys}) — اضغط «إعادة الاتصال» ثم أعد الفحص` });
+        } else {
+          try { const g = await sock.groupFetchAllParticipating(); out.push({ name: "قراءة من واتساب", ok: true, detail: Object.keys(g || {}).length + " مجموعة" }); }
+          catch (e) { out.push({ name: "قراءة من واتساب", ok: false, detail: String(e?.message || e).slice(0, 120) }); }
+        }
+        out.push({ name: "سوكتات في الذاكرة", ok: _res.all.length > 0, detail: _res.all.length ? `${_res.all.length} سوكت · ${_res.all.filter((x) => x.state === "open").length} مفتوح` : "لا يوجد أي سوكت مسجّل" });
         let p = {}; try { p = (await import('../engine/msg-pipeline.mjs')).getPipelineStats(); } catch { }
         out.push({ name: "طابور الإشعارات", ok: (p.lanes?.notify?.pending || 0) < 200, detail: `${p.lanes?.notify?.pending || 0} منتظرة / ${p.lanes?.notify?.running || 0} تعمل` });
         return { ok: true, checks: out, message: out.every((c) => c.ok) ? "كل الفحوصات سليمة" : "توجد فحوصات فاشلة" };
+      }
+      // [WA-SOCK v8.30.0] إصلاح السجل: يبحث عن السوكت الحيّ ويعيد تسجيله في كل الخانات
+      case "rescan-sockets": {
+        const res = sockResolve(uid);
+        if (!res.sock) return { ok: false, message: "لا يوجد أي سوكت حيّ في الذاكرة — اضغط «إعادة الاتصال»" };
+        const me = String(res.sock.user?.id || "").split(":")[0];
+        try { inMemoryDB.sessions.set(String(uid), res.sock); } catch { }
+        if (me) {
+          try { inMemoryDB.sessions.set(`${uid}_+${me.replace(/\D/g, "")}`, res.sock); } catch { }
+          try { _registerNumberSock(uid, `+${me.replace(/\D/g, "")}`, res.sock); } catch { }
+          try { setActiveNumberPhone(uid, `+${me.replace(/\D/g, "")}`); } catch { }
+        }
+        try { _waSockMod.registerGlobalSock(uid, me ? `+${me.replace(/\D/g, "")}` : null, res.sock); } catch { }
+        return { ok: true, message: `تم العثور على السوكت (${res.source}) وإعادة ربطه${me ? " — الرقم " + me : ""}` };
       }
       case "clear-trace": { _diag.trace.length = 0; _diag.conn.length = 0; return { ok: true, message: "تم تفريغ سجل التشخيص" }; }
       default: throw Error("إجراء غير معروف");
