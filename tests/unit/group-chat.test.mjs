@@ -157,9 +157,10 @@ test("store: النسخة الأغنى تستبدل الفقيرة تلقائي�
 
 test("/copy g: يفضّل النسخة الكاملة المخزَّنة ويطلب إعادة الإرسال عند نقص المفتاح", () => {
   const src = readFileSync(new URL("../../dist/index.mjs", import.meta.url), "utf8");
-  assert.match(src, /sourceOfTruth/);
-  assert.match(src, /resendRequested/);
-  assert.match(src, /updateMediaMessage\(\{/);
+  assert.match(src, /chosenSource/);
+  assert.match(src, /resend\.requested/);
+  assert.match(src, /updateMediaMessage/);
   assert.match(src, /messages\.update/);
   assert.match(src, /_voPending/);
+  assert.match(src, /_voWaitForRicher/);
 });

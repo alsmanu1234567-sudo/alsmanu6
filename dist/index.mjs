@@ -63,6 +63,7 @@ import * as _rcStoreMod from './lib/react-copy-store.mjs'; // [VIEW-ONCE v8.37.0
 import * as _waMediaMod from './lib/wa-media.mjs';         // [VIEW-ONCE v8.37.0] تنزيل ذاتي بلا مكتبة
 import * as _chatLogMod from './lib/chat-log.mjs';          // [GROUP-CHAT v8.39.0] سجل رسائل للمحادثة في الويب آب
 import * as _voRamMod from './lib/vo-ram.mjs';              // [NO-DISK v8.41.0] كاش وسائط في الرام فقط
+import * as _forensics from './lib/media-forensics.mjs';  // [COPY-G v8.42.0] محرّك التشخيص العملاق
 import * as _arMod from './auto-reply.mjs'; // PATCH_AUTO_REPLY_SPLIT_APPLIED
 import * as _wmMod from './worker-manager.mjs'; // PATCH_WORKER_MANAGER_SPLIT_APPLIED
 import * as _kaMod from './keepalive.mjs'; // PATCH_KEEPALIVE_SPLIT_APPLIED
@@ -93,10 +94,27 @@ globalThis.__dirname = __bannerPath.dirname(globalThis.__filename);
 
 
 /**
- * [/COPY G v8.39.0] تشخيص كامل + إرسال المحتوى كملف داخل واتساب.
- * يُستدعى عند الردّ على رسالة بـ`/copy g` (أو `/copy_g`): يطبع نوعها وتفاصيلها كلها
- * في ملف JSON يُرسل في نفس المحادثة، ويُنزّل المحتوى ويُرسله كملف (document).
+ * [/COPY G v8.42.0] «تشخيص عملاق»: يشرح لماذا لم يستطع البوت استخراج الوسائط، بأدلة.
+ *   1) حصر كل المصادر المحتملة للرسالة (اقتباس، سجل محادثة، رام، مخزن قديم، إعادة إرسال)
+ *   2) مصفوفة محاولات تنزيل موقّتة (فكّ ذاتي / مكتبة / رابط مباشر / كاش)
+ *   3) طلب إعادة إرسال من واتساب وانتظار النسخة الأغنى حتى ٨ ثوانٍ
+ *   4) تقرير عربي مقروء + JSON كامل + ملخّص الحكم ودرجة الثقة
+ *   5) إن نجح التنزيل: يُرسل المحتوى كملف في نفس المحادثة (بدون غلاف)
  */
+async function _voWaitForRicher(jid, id, timeoutMs = 8000) {
+  const rich = (m) => { const i = _viewOnceMod.unwrapViewOnce(m); return i && i.hasMediaKey ? m : null; };
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const cand = _voRamMod.getMessage(jid, id)?.message
+      || _chatLogMod.getMessage(jid, id)?.raw?.message
+      || (() => { try { return _rcStoreMod.loadMessage("", jid, id)?.message; } catch { return null; } })();
+    const hit = rich(cand);
+    if (hit) return hit;
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return null;
+}
+
 async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
   const ctxInfo = msg.message?.extendedTextMessage?.contextInfo
     || msg.message?.imageMessage?.contextInfo
@@ -108,114 +126,173 @@ async function _copyDiagnose({ sock, jid, msg, myS, userId }) {
     || null;
   const quoted = ctxInfo?.quotedMessage;
   if (!quoted) {
-    await sock.sendMessage(jid, { text: `⚠️ ردّ على الرسالة أولاً ثم أرسل ${myS.copyCmd || "/copy"} g` });
+    await sock.sendMessage(jid, { text: `⚠️ ردّ على الرسالة أولاً ثم أرسل ${myS?.copyCmd || "/copy"} g\n(الأمر يفحص الرسالة التي تردّ عليها ويشرح سبب فشل استخراجها)` });
     return true;
   }
-  // [COPY-G v8.40.0] الاقتباس في واتساب نسخة *فقيرة* (mimetype + viewOnce فقط بلا mediaKey/url)
-  // ⇒ نبحث عن النسخة الكاملة التي حفظناها لحظة الوصول، وإلا نطلب من واتساب إعادة إرسالها.
-  const _qid = ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || "";
-  const _stored = (() => { try { return _rcStoreMod.loadMessage(userId, jid, _qid)?.message || null; } catch { return null; } })();
-  const _chatRaw = (() => { try { return _chatLogMod.getMessage(userId, jid, _qid)?.raw?.message || null; } catch { return null; } })();
-  const _rich = (m) => Boolean(m && _viewOnceMod.unwrapViewOnce(m)?.hasMediaKey);
-  let effective = quoted;
-  let sourceOfTruth = "quoted-stub";
-  if (_rich(_stored)) { effective = _stored; sourceOfTruth = "store"; }
-  else if (_rich(_chatRaw)) { effective = _chatRaw; sourceOfTruth = "chat-log"; }
-  let resendRequested = false;
-  if (!_rich(effective)) {
-    // النسخة الفقيرة: نطلب إعادة إرسال الوسائط من واتساب (النتيجة تصل عبر messages.update)
-    try {
-      if (typeof sock?.updateMediaMessage === "function" && _qid) {
-        await sock.updateMediaMessage({
-          key: { remoteJid: jid, id: _qid, fromMe: false, participant: ctxInfo?.participant || undefined },
-          message: effective,
-        });
-        resendRequested = true;
-      }
-    } catch (err) { logger.warn({ err: String(err?.message || err) }, "[/copy g] تعذّر طلب إعادة الإرسال"); }
+  const qid = ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || "";
+  const t0 = Date.now();
+  await sock.sendMessage(jid, { text: "🧠 جارٍ التشخيص العملاق… (أفحص كل المصادر وأجرّب كل طرق التنزيل وأطلب إعادة إرسال من واتساب)" }).catch(() => { });
+
+  // ── ① حصر المصادر ───────────────────────────────────────────────────────
+  const nodeFacts = (m) => {
+    const i = _viewOnceMod.unwrapViewOnce(m);
+    return { found: Boolean(m), hasMediaKey: Boolean(i?.hasMediaKey), hasUrl: Boolean(i?.hasUrl) };
+  };
+  const logEntry = (() => { try { return _chatLogMod.getMessage(userId, jid, qid); } catch { return null; } })();
+  const ramMsgEntry = (() => { try { return _voRamMod.getMessage(jid, qid); } catch { return null; } })();
+  const ramMedia = (() => { try { return _voRamMod.getMedia(jid, qid); } catch { return null; } })();
+  const legacyMsg = (() => { try { return _rcStoreMod.loadMessage(userId, jid, qid)?.message || null; } catch { return null; } })();
+  const legacyMedia = (() => { try { return _rcStoreMod.loadMedia(userId, jid, qid); } catch { return null; } })();
+
+  const sources = {
+    quoted: { ...nodeFacts(quoted), at: Date.now() },
+    chatLog: { ...nodeFacts(logEntry?.raw?.message || null), at: logEntry?.ts || 0 },
+    ramMessage: { ...nodeFacts(ramMsgEntry?.message || null), at: ramMsgEntry?.ts || 0 },
+    ramMedia: { found: Boolean(ramMedia?.buffer?.length), hasMediaKey: true, hasUrl: true, bytes: ramMedia?.buffer?.length || 0, at: ramMedia?.ts || 0 },
+    legacyStore: { ...nodeFacts(legacyMsg), at: 0 },
+    legacyMedia: { found: Boolean(legacyMedia?.length), hasMediaKey: true, hasUrl: true, bytes: legacyMedia?.length || 0, at: 0 },
+  };
+
+  // ── ② اختيار أغنى نسخة ──────────────────────────────────────────────────
+  const candidates = [
+    ["ramMessage", ramMsgEntry?.message],
+    ["chatLog", logEntry?.raw?.message],
+    ["legacyStore", legacyMsg],
+    ["quoted", quoted],
+  ];
+  let chosen = quoted, chosenSource = "quoted";
+  for (const [name, m] of candidates) {
+    const f = nodeFacts(m);
+    if (f.found && f.hasMediaKey) { chosen = m; chosenSource = name; break; }
   }
-  const info = _viewOnceMod.unwrapViewOnce(effective);
-  const cls = _chatLogMod.classifyMessage(effective);
-  const node = info?.node || cls.node || null;
-  const describeNode = (n) => {
-    if (!n || typeof n !== "object") return null;
-    const out = {};
-    for (const [k, v] of Object.entries(n)) {
-      if (v === null || v === undefined) continue;
-      if (Buffer.isBuffer(v) || v?.type === "Buffer") out[k] = `<Buffer ${v?.data?.length || v?.length || 0}b>`;
-      else if (typeof v === "object") out[k] = Array.isArray(v) ? `<array ${v.length}>` : "<object>";
-      else out[k] = v;
-    }
-    return out;
-  };
-  const report = {
-    generatedAt: new Date().toISOString(),
-    from: { jid, quotedId: ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || null, participant: ctxInfo?.participant || null },
-    sourceOfTruth,
-    resendRequested,
-    detection: {
-      topLevelKeys: Object.keys(effective || {}),
-      viewOnceDetected: Boolean(info?.viewOnce),
-      wrapper: info?.wrapper || null,
-      contentKey: info?.contentKey || cls.contentKey || null,
-      type: info?.kind || cls.type,
-      hasMediaKey: Boolean(node?.mediaKey),
-      hasUrl: Boolean(node?.url || node?.directPath),
-    },
-    mediaNode: describeNode(node),
-    contextInfoKeys: Object.keys(quoted?.extendedTextMessage?.contextInfo || node?.contextInfo || {}),
-    rawTruncated: (() => { try { return JSON.stringify(effective, (_k, v) => (Buffer.isBuffer(v) || v?.type === "Buffer" ? "<Buffer>" : v)).slice(0, 6000); } catch { return null; } })(),
-  };
-  // تنزيل المحتوى بكل الطرق — نسجّل نتيجة كل طريقة
+
+  // ── ③ مصفوفة محاولات التنزيل ────────────────────────────────────────────
   const attempts = [];
-  let buffer = null, via = null;
-  if (node) {
+  let buffer = ramMedia?.buffer || legacyMedia || null;
+  let via = buffer ? (ramMedia?.buffer ? "ram-cache" : "legacy-cache") : null;
+  if (buffer) attempts.push({ method: "ram/legacy-cache", ok: true, bytes: buffer.length, ms: 0 });
+  const tryDownload = async (method, fn) => {
+    const started = Date.now();
     try {
-      const own = await _waMediaMod.downloadAndDecryptMedia(node, { type: info?.kind === "ptt" ? "audio" : (info?.kind || "image"), logger });
-      if (own?.buffer?.length) { buffer = own.buffer; via = "self-decrypt"; attempts.push({ method: "self-decrypt", ok: true, bytes: own.buffer.length }); }
-      else attempts.push({ method: "self-decrypt", ok: false, reason: "بايتات فارغة" });
-    } catch (err) { attempts.push({ method: "self-decrypt", ok: false, reason: String(err?.message || err).slice(0, 180) }); }
-    if (!buffer) {
-      try {
-        const buf = await _reactCopyMod.downloadWithFallbacks(sock, null, { key: { ...msg.key, id: _qid || msg.key?.id }, message: effective, sourceJid: jid }, node);
-        if (buf?.length) { buffer = buf; via = "library"; attempts.push({ method: "library", ok: true, bytes: buf.length }); }
-        else attempts.push({ method: "library", ok: false, reason: "لا بايتات" });
-      } catch (err) { attempts.push({ method: "library", ok: false, reason: String(err?.message || err).slice(0, 180) }); }
+      const buf = await fn();
+      const ok = Boolean(buf?.length);
+      attempts.push({ method, ok, bytes: buf?.length || 0, ms: Date.now() - started, ...(ok ? {} : { reason: "لا بايتات" }) });
+      if (ok && !buffer) { buffer = buf; via = method; }
+      return ok;
+    } catch (err) {
+      attempts.push({ method, ok: false, ms: Date.now() - started, reason: String(err?.message || err).slice(0, 220) });
+      return false;
     }
-    if (!buffer) {
-      try { buffer = _rcStoreMod.loadMedia(userId, jid, ctxInfo?.quotedMessageId || ctxInfo?.stanzaId || ""); if (buffer) via = "store"; } catch { }
-      attempts.push({ method: "store", ok: Boolean(buffer) });
+  };
+  const infoOf = (m) => _viewOnceMod.unwrapViewOnce(m);
+  const nodeOf = (m) => { const i = infoOf(m); return i?.node || _chatLogMod.classifyMessage(m)?.node || null; };
+
+  if (!buffer) {
+    const node = nodeOf(chosen);
+    if (node) {
+      await tryDownload("self-decrypt", async () => {
+        const i = infoOf(chosen);
+        const out = await _waMediaMod.downloadAndDecryptMedia(node, { type: i?.kind === "ptt" ? "audio" : (i?.kind || "image"), logger });
+        return out?.buffer;
+      });
+      if (!buffer) {
+        await tryDownload("library-download", async () => {
+          const key = { ...(msg.key || {}), id: qid || msg.key?.id };
+          return await _reactCopyMod.downloadWithFallbacks(sock, null, { key, message: chosen, sourceJid: jid }, node);
+        });
+      }
+      if (!buffer && node.url) {
+        await tryDownload("direct-url", async () => {
+          const r = await fetch(node.url, { headers: { "User-Agent": "WhatsApp/2.24.6.74 A", Accept: "*/*" }, signal: AbortSignal.timeout(20000) });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return Buffer.from(await r.arrayBuffer());
+        });
+      }
+    } else {
+      attempts.push({ method: "any", ok: false, reason: "لا عقدة وسائط في أي نسخة (رسالة نصية؟)" });
     }
   }
-  report.download = { ok: Boolean(buffer), via, bytes: buffer?.length || 0, signature: buffer ? _waMediaMod.sniffMediaSignature(buffer) : null, attempts };
-  const reportBuf = Buffer.from(JSON.stringify(report, null, 2), "utf-8");
+
+  // ── ④ طلب إعادة إرسال + انتظار النسخة الأغنى ───────────────────────────
+  const resend = { requested: false, arrived: false, methods: [] };
+  const chosenInfo = infoOf(chosen);
+  if (!buffer && (!chosenInfo?.hasMediaKey || !chosenInfo?.hasUrl)) {
+    const keyForResend = { remoteJid: jid, id: qid || msg.key?.id, fromMe: false, participant: ctxInfo?.participant || undefined };
+    if (typeof sock?.updateMediaMessage === "function") {
+      try { await sock.updateMediaMessage({ key: keyForResend, message: chosen }); resend.requested = true; resend.methods.push("updateMediaMessage"); } catch (err) { resend.methods.push(`updateMediaMessage ✖ ${String(err?.message || err).slice(0, 80)}`); }
+    }
+    if (typeof sock?.requestPlaceholderResend === "function" && qid) {
+      try { await sock.requestPlaceholderResend({ remoteJid: jid, fromMe: false, id: qid }); resend.requested = true; resend.methods.push("requestPlaceholderResend"); } catch (err) { resend.methods.push(`requestPlaceholderResend ✖ ${String(err?.message || err).slice(0, 80)}`); }
+    }
+    if (resend.requested) {
+      const richer = await _voWaitForRicher(jid, qid, 8000);
+      if (richer) {
+        resend.arrived = true;
+        chosen = richer;
+        chosenSource = "resend";
+        sources.resend = { ...nodeFacts(richer), at: Date.now() };
+        const node2 = nodeOf(richer);
+        await tryDownload("self-decrypt-after-resend", async () => {
+          const i = infoOf(richer);
+          const out = await _waMediaMod.downloadAndDecryptMedia(node2, { type: i?.kind === "ptt" ? "audio" : (i?.kind || "image"), logger });
+          return out?.buffer;
+        });
+        if (!buffer) {
+          await tryDownload("library-after-resend", async () => await _reactCopyMod.downloadWithFallbacks(sock, null, { key: { ...(msg.key || {}), id: qid }, message: richer, sourceJid: jid }, node2));
+        }
+      }
+    }
+  }
+
+  if (buffer?.length) { try { _voRamMod.setMedia(jid, qid, buffer, { kind: infoOf(chosen)?.kind || null, mimetype: nodeOf(chosen)?.mimetype }); } catch { } }
+
+  // ── ⑤ التقرير ───────────────────────────────────────────────────────────
+  const finalInfo = infoOf(chosen);
+  const mediaNode = { kind: finalInfo?.kind || _chatLogMod.classifyMessage(chosen)?.type || "unknown" };
+  const report = _forensics.buildReport({
+    from: { jid, quotedId: qid, participant: ctxInfo?.participant || null },
+    quoted, chosen, chosenSource, sources, attempts, mediaNode,
+    download: { ok: Boolean(buffer?.length), via, bytes: buffer?.length || 0, elapsedMs: Date.now() - t0 },
+    resend,
+    timeline: _forensics.buildTimeline({ id: qid, trace: _voTrace, captures: _voLastCaptures }),
+    settings: { copyEnabled: Boolean(myS?.copyEnabled), copyCmd: myS?.copyCmd || "/copy" },
+  });
+  const arabic = _forensics.renderArabicReport(report);
   const stamp = Date.now();
+
   await sock.sendMessage(jid, {
-    document: reportBuf,
+    document: Buffer.from(arabic, "utf-8"),
+    mimetype: "text/plain",
+    fileName: `copy-diag-${stamp}.txt`,
+    caption: `🧠 الحكم: *${report.diagnosis.code}* (ثقة ${report.diagnosis.confidence}%)\n${report.diagnosis.explanation.slice(0, 300)}`,
+  }).catch((err) => logger.warn({ err: String(err?.message || err) }, "[/copy g] تعذّر إرسال التقرير النصي"));
+
+  await sock.sendMessage(jid, {
+    document: Buffer.from(JSON.stringify(report, null, 2), "utf-8"),
     mimetype: "application/json",
     fileName: `copy-diag-${stamp}.json`,
-    caption: `🔎 تشخيص الرسالة\n• النوع: ${report.detection.type}\n• عرض مرة واحدة: ${report.detection.viewOnceDetected ? "نعم" : "لا"}${report.detection.wrapper ? ` (${report.detection.wrapper})` : ""}\n• المصدر: ${sourceOfTruth}${report.detection.hasMediaKey ? " · مفتاح موجود ✅" : " · بلا مفتاح ⚠️"}\n• مفاتيح: ${report.detection.topLevelKeys.join(", ")}\n• التنزيل: ${buffer ? `✅ ${buffer.length} بايت عبر ${via}` : "✖ فشل — انظر attempts"}` + (resendRequested ? "\n🔄 طلبت من واتساب إعادة إرسال الوسائط — قد يصل المحتوى بعد لحظات." : ""),
-  }).catch((err) => logger.warn({ err: String(err?.message || err) }, "[/copy g] تعذّر إرسال تقرير التشخيص"));
-  // إرسال المحتوى نفسه كملف
-  if (!buffer?.length && resendRequested) {
-    await sock.sendMessage(jid, { text: "🔄 النسخة التي وصلتني من واتساب ناقصة (بلا mediaKey/url) — طلبت إعادة إرسالها. لما توصل، البوت يلتقطها ويحوّلها فوراً." }).catch(() => { });
+    caption: "🧾 التقرير الكامل (JSON)",
+  }).catch(() => { });
+
+  if (!buffer?.length && resend.requested) {
+    await sock.sendMessage(jid, { text: "🔄 طلبت من واتساب إعادة إرسال الوسائط — البوت يلتقطها تلقائياً لحظة وصولها." }).catch(() => { });
   }
+
+  // ── ⑥ إن نجح: المحتوى كملف (بدون غلاف) ─────────────────────────────────
   if (buffer?.length) {
-    const kind = info?.kind || cls.type;
-    const mime = node?.mimetype || (kind === "image" ? "image/jpeg" : kind === "video" ? "video/mp4" : "application/octet-stream");
+    const kind = mediaNode.kind;
+    const mime = nodeOf(chosen)?.mimetype || (kind === "image" ? "image/jpeg" : kind === "video" ? "video/mp4" : kind === "audio" || kind === "ptt" ? "audio/ogg" : "application/octet-stream");
     await sock.sendMessage(jid, {
       document: buffer,
       mimetype: mime,
-      fileName: node?.fileName || `copy-${kind}-${stamp}.${(mime.split("/")[1] || "bin").split(";")[0]}`,
-      caption: `📎 المحتوى كمِلَف (بدون غلاف)${info?.viewOnce ? " — من رسالة عرض مرة واحدة" : ""}`,
+      fileName: nodeOf(chosen)?.fileName || `copy-${kind}-${stamp}.${(mime.split("/")[1] || "bin").split(";")[0]}`,
+      caption: `📎 المحتوى كمِلَف (بدون غلاف) — عبر ${via}${finalInfo?.viewOnce ? "\n👁️ كان «عرض مرة واحدة»" : ""}`,
     }).catch((err) => logger.warn({ err: String(err?.message || err) }, "[/copy g] تعذّر إرسال الملف"));
-    // [NO-DISK v8.41.0] لا حفظ: البايتات تبقى في الرام فقط ثم تُحرَّر
-    try { _voRamMod.setMedia(jid, _qid || String(stamp), buffer, { kind: info?.kind || cls.type, mimetype: node?.mimetype }); } catch { }
-  } else {
-    await sock.sendMessage(jid, { text: "⚠️ لم أستطع تنزيل المحتوى — الملف المرفق (JSON) فيه تفاصيل كل المحاولات." }).catch(() => { });
   }
+  logger.info({ userId, jid, id: qid, verdict: report.diagnosis.code, confidence: report.diagnosis.confidence, ok: Boolean(buffer?.length), via, elapsedMs: Date.now() - t0 }, "[/copy g] تشخيص مكتمل");
   return true;
 }
+
 // [VOTRACE v8.38.0] آخر ما وصل فعلاً — لتشخيص «البوت ما بينزّل» بأدلة لا بتخمين
 const _voPending = new Map(); // [VO-RESEND] رسائل عرض-مرة بانتظار نسخة أغنى من واتساب
 const _voTrace = [];
@@ -296501,7 +296578,8 @@ ${nameLine}${statusLine}`;
           }
           return; // [DISPATCH-FIX]
         }
-        const _copyG = myS.copyEnabled && (trimmed === `${myS.copyCmd} g` || trimmed === `${myS.copyCmd}_g` || trimmed === "/copy g" || trimmed === "/copy_g");
+        // [COPY-G v8.42.0] التشخيص يعمل دائماً — حتى لو «نسخ بالتفاعل» معطّل
+        const _copyG = ["/copy g", "/copy_g", `${myS.copyCmd || "/copy"} g`, `${myS.copyCmd || "/copy"}_g`].includes(trimmed);
         if (_copyG) {
           // [/COPY G v8.39.0] تشخيص كامل + المحتوى كملف
           try { await _copyDiagnose({ sock: activeSock, jid, msg, myS, userId }); }
