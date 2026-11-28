@@ -264,9 +264,22 @@ function _ltOpenConn(host, port, localPort) {
   remote.on("error", () => remote.destroy());
 }
 
-async function _tryLocaltunnel(port, log) {
+async function _tryLocaltunnel(port, log, subdomain = null) {
   try {
-    const res = await fetch("https://localtunnel.me/?new", { redirect: "follow" });
+    // [v8.52.0] نطلب نطاقاً فرعياً ثابتاً ⇒ نفس الرابط في كل تشغيل (رابط دائم مجاني)
+    let res = null;
+    const sub = String(subdomain || process.env.STABLE_SUBDOMAIN || "").trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
+    if (sub) {
+      try {
+        res = await fetch("https://localtunnel.me/?new", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ requested_subdomain: sub }),
+          redirect: "follow",
+        });
+      } catch { res = null; }
+    }
+    if (!res || !res.ok) res = await fetch("https://localtunnel.me/?new", { redirect: "follow" });
     if (!res.ok) throw new Error(`API ${res.status}`);
     const info = await res.json();
     if (!info?.url || !info?.port) throw new Error("bad response");
@@ -360,6 +373,24 @@ export async function startTunnel(port, logger, onUrl) {
     if (envUrl) {
       log(`[TUNNEL] رابط عام موجود من البيئة: ${envUrl} — لا حاجة للنفق`);
       return envUrl;
+    }
+
+    // 0) [v8.52.0] الرابط الثابت المجاني: localtunnel بنطاق فرعي ثابت.
+    //    إن نجح وتحقّق ⇒ هو الرابط الوحيد لكل الويب آب (لا يتغيّر بعد إعادة التشغيل).
+    const wantSub = String(process.env.STABLE_SUBDOMAIN ?? "alsmanu6").trim();
+    if (wantSub && process.env.DISABLE_STABLE_SUBDOMAIN !== "1") {
+      log(`[TUNNEL] محاولة رابط ثابت مجاني: ${wantSub}.loca.lt ...`);
+      const fixed = await _tryLocaltunnel(port, log, wantSub);
+      if (fixed) {
+        const ok = await _probeTunnel(fixed, 20_000);
+        const wanted = fixed.includes(`${wantSub}.loca.lt`);
+        if (ok && wanted) {
+          _setUrl(fixed, "localtunnel-stable", log, onUrl);
+          log(`[TUNNEL] ✅ الرابط الثابت جاهز: ${fixed}`);
+          return fixed;
+        }
+        log(`[TUNNEL] النطاق الثابت غير متاح الآن (${fixed}) — نكمل بالمزودين الآخرين`);
+      }
     }
 
     // 1) Cloudflare أولاً — أداة ثنائية خفيفة **بلا حصة شهرية** (tunnelmole المجاني

@@ -440,7 +440,7 @@ export function registerServerHub(app, deps = {}) {
       const auth = await import("./webapp-auth.mjs");
       webToken = auth.tokenForUser(auth.ownerUid()) || "";
     } catch {}
-    const base = globalThis.__STABLE_BASE__ || globalThis.__FW_PUBLIC_URL || "";
+    const base = globalThis.__FW_PUBLIC_URL || globalThis.__STABLE_BASE__ || "";
     res.json({
       ok: true,
       bot: {
@@ -451,7 +451,7 @@ export function registerServerHub(app, deps = {}) {
         node: process.version,
       },
       panel: { port, alive, tokenSet: Boolean(panelToken()) },
-      stable: { base, kind: globalThis.__STABLE_BASE__ ? "port" : globalThis.__FW_PUBLIC_URL ? "tunnel" : null },
+      stable: { base, kind: globalThis.__FW_PUBLIC_URL ? "tunnel" : globalThis.__STABLE_BASE__ ? "port" : null },
       paths: { bot: BOT_DIR(), panel: PANEL_DIR() },
       links: {
         dev: base ? `${base}/dev?k=${key}` : null,
@@ -594,7 +594,7 @@ export function registerServerHub(app, deps = {}) {
 
   // رابط دخول جاهز للوحة الأصلية (مفتاح المطوّر + توكن اللوحة في #hash)
   globalThis.__PANEL_ENTRY__ = () => {
-    const base = globalThis.__STABLE_BASE__ || globalThis.__FW_PUBLIC_URL || "";
+    const base = globalThis.__FW_PUBLIC_URL || globalThis.__STABLE_BASE__ || "";
     if (!base) return null;
     const t = panelToken();
     return `${base}/sc?k=${key}${t ? "#" + t : ""}`;

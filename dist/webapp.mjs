@@ -910,10 +910,20 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     if (!text) throw new Error("اكتب رسالة أولاً");
     const info = CL().groupInfo(uid, jid);
     const quotedEntry = replyTo ? CL().getMessage(uid, jid, replyTo) : null;
-    const out = await webSendGroupMessage(uid, jid, text, info.phoneNumber || req.body?.phoneNumber || "", {
-      quoted: quotedEntry?.raw || null,
-      chat: true,
-    });
+    // [v8.52.0] الإرسال المباشر عبر السوكت الذي استقبل رسائل هذه المجموعة.
+    // السبب: webSendGroupMessage كانت تشترط مطابقة «الرقم المالك» لمطابقة
+    // phoneNumber المعروفة، فأي اختلاف بسيط (صيغة الرقم/المفتاح) يعطي
+    // «رقم واتساب غير تابع لك أو غير متصل» رغم أن الرقم متصل ويعمل.
+    let out = null;
+    const chatSock = CL().sockFor(uid, jid);
+    if (chatSock?.sendMessage) {
+      out = await chatSock.sendMessage(jid, { text }, quotedEntry?.raw ? { quoted: quotedEntry.raw } : undefined);
+    } else {
+      out = await webSendGroupMessage(uid, jid, text, info.phoneNumber || req.body?.phoneNumber || "", {
+        quoted: quotedEntry?.raw || null,
+        chat: true,
+      });
+    }
     try {
       CL().recordMessage(uid, jid, {
         key: out?.key || { id: `local-${Date.now()}`, remoteJid: jid, fromMe: true },
@@ -1065,6 +1075,27 @@ export function registerWebApp(app, { replyService, aiService, myMsgsService, si
     } catch (e) {
       res.status(500).json({ error: String(e?.message || e) });
     }
+  });
+
+  // [v8.52.0] تشخيص الرابط الموحّد — افتحه لتعرف أي رابط يُستخدم فعلاً
+  app.get("/api/webapp/link", async (_req, res) => {
+    const out = { ok: true, tunnel: null, stable: null, base: null, kind: null, probe: null, providers: {} };
+    try {
+      const T = await import("./tunnel.mjs");
+      out.tunnel = T.tunnelUrl?.() || null;
+      out.providers = { provider: T.tunnelProvider?.() || null, health: T.tunnelHealth?.() || null };
+    } catch (e) { out.providers = { error: String(e?.message || e) }; }
+    try { out.stable = globalThis.__STABLE_BASE__ || null; } catch {}
+    try { out.base = webappBaseUrl(); } catch {}
+    out.kind = out.tunnel ? "tunnel" : out.stable ? "ip-port" : null;
+    if (out.base) {
+      try {
+        const t0 = Date.now();
+        const r = await fetch(out.base + "/healthz", { signal: AbortSignal.timeout(8000) });
+        out.probe = { status: r.status, ms: Date.now() - t0 };
+      } catch (e) { out.probe = { error: String(e?.message || e) }; }
+    }
+    res.json(out);
   });
 
   registerGroupWorldWebApp(app, parseJson, guard);

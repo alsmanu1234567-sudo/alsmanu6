@@ -387,7 +387,8 @@ export function registerDevConsole(app, deps = {}) {
     // [v8.48.0] إعدادات المجموعة داخل اللوحة + رابط لوحة السيرفر الدائم
     let _webToken = "";
     try { _webToken = tokenForUser(ownerUid()) || ""; } catch { }
-    const _base = globalThis.__STABLE_BASE__ || globalThis.__FW_PUBLIC_URL || "";
+    // [v8.52.0] النفق أولاً — رابط واحد لكل الويب آب
+    const _base = globalThis.__FW_PUBLIC_URL || globalThis.__STABLE_BASE__ || "";
     res.end(pageHtml(key, {
       groupsUrl: _base && _webToken ? `${_base}/group-world?token=${_webToken}` : "",
       srvUrl: `${_base || ""}/srv?k=${key}`,

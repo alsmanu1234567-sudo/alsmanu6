@@ -303672,7 +303672,7 @@ async function openServerControl(bot2,chatId,userId,minutes){
   const dir=process.env.BOT_SERVER_CONTROL_DIR;if(!dir){await bot2.sendMessage(chatId,'لوحة السيرفر غير جاهزة: شغّل البوت عبر bootstrap/index.mjs أولاً.');return;}
   // [v8.48.4] رابط دائم لا ينتهي ولا يُغلق بخمول: لوحة السيرفر المدمجة على الرابط الثابت.
   {
-    const base=globalThis.__STABLE_BASE__||globalThis.__FW_PUBLIC_URL||'';
+    const base=globalThis.__FW_PUBLIC_URL||globalThis.__STABLE_BASE__||'';
     const key=globalThis.__DEV_KEY__||'';
     if(!base||!key){await bot2.sendMessage(chatId,'⚠️ الرابط الدائم لم يجهز بعد — انتظر ثوانٍ ثم اضغط الزر مرة أخرى.');return;}
     const panel=globalThis.__PANEL_ENTRY__?globalThis.__PANEL_ENTRY__():`${base}/srv?k=${key}`;
@@ -303901,7 +303901,7 @@ async function sendDevPanel(bot2, chatId, userId) {
   // [v8.48.3] أزرار تفتح مباشرة — بلا أوامر ولا كود: لوحة المطوّر + لوحة السيرفر + الويب آب.
   // تُبنى من الرابط الدائم (منفذ الاستضافة) فلا تتوقف إن مات النفق.
   if(String(chatId)===String(userId)){try{
-    const _b=globalThis.__STABLE_BASE__||globalThis.__FW_PUBLIC_URL||"";
+    const _b=globalThis.__FW_PUBLIC_URL||globalThis.__STABLE_BASE__||"";
     const _k=globalThis.__DEV_KEY__||"";
     if(_b&&_k){
       // [v8.48.6] «لوحة المطوّر» = لوحة البوت الحقيقية /developer-console (كان الزر يفتح لوحة أخرى).
@@ -304031,7 +304031,7 @@ ${isDev2 ? "\u{1F451} *\u0635\u0644\u0627\u062D\u064A\u0627\u062A \u0627\u0644\u
       }
     }catch{}
     let _u=_webUrl;
-    if(!_u){const _b=globalThis.__STABLE_BASE__||globalThis.__FW_PUBLIC_URL||'';if(_b&&typeof tokenForUser==='function')_u=_b+'/webapp?token='+tokenForUser(userId);}
+    if(!_u){const _b=globalThis.__FW_PUBLIC_URL||globalThis.__STABLE_BASE__||'';if(_b&&typeof tokenForUser==='function')_u=_b+'/webapp?token='+tokenForUser(userId);}
     if(!kb||!Array.isArray(kb.inline_keyboard))return kb;
     if(_u && /^https:\/\//i.test(_u))kb.inline_keyboard.unshift([{text:'🌐 فتح الويب آب',web_app:{url:_u}}]);
     else if(_u)kb.inline_keyboard.unshift([{text:'🌐 فتح الويب آب (المجموعات والردود)',url:_u}]);
@@ -328042,7 +328042,9 @@ async function startBot() {
         const DC = await import("./dev-console.mjs");
         let _uname = null;
         try { _uname = (await bot.getMe())?.username || null; } catch { }
-        const _base = SL.stableBase() || globalThis.__STABLE_BASE__ || globalThis.__FW_PUBLIC_URL || null;
+        // [v8.52.0] الرابط الموحّد: النفق أولاً (كان الدائم أولاً) — رابط واحد لكل الويب آب
+        const _wa2 = await import("./webapp-auth.mjs");
+        const _base = (_wa2.webappBaseUrl?.() || null) || SL.stableBase() || globalThis.__STABLE_BASE__ || null;
         await bot.sendMessage(msg.chat.id, DC.panelCommandText({ base: _base, username: _uname, key: DC.devKey() }), { parse_mode: "Markdown", disable_web_page_preview: true });
         return;
       }
@@ -332676,20 +332678,20 @@ async function main() {
           log: (m) => { try { logger.info(m); } catch { } },
         });
         if (_st?.base) {
+          // [v8.52.0] إصلاح جذري: كان الكود يجعل IP:port هو الرابط العام ويوقف
+          // النفق تماماً (__SKIP_TUNNEL__) ⇒ كل الويب آب يمرّ على رابط ثقيل
+          // وغالباً لا يفتح. الآن: النفق هو الرابط العام دائماً، وIP:port احتياط
+          // يُستخدم فقط إن غاب النفق.
           globalThis.__STABLE_BASE__ = _st.base;
-          globalThis.__FW_PUBLIC_URL = _st.base;
-          globalThis.__FW_PUBLIC_TRUSTED = true;
-          try { logger.info({ base: _st.base, kind: _st.kind }, "[STABLE-LINK] ✅ رابط ثابت جاهز"); } catch { }
-          setTimeout(() => { _pushLink(_st.base, _st.kind); }, 8000);
-          return "stable";
+          try { logger.info({ base: _st.base, kind: _st.kind }, "[STABLE-LINK] رابط احتياطي (IP:port) — النفق هو الأساس"); } catch { }
+          return "reserve";
         }
         try { logger.warn("[STABLE-LINK] لا منفذ عام متاح — سيبقى النفق مسؤولاً عن الرابط"); } catch { }
         return null;
       }).then((_r) => {
-        if (_r === "stable") {
-          globalThis.__SKIP_TUNNEL__ = true;
-          try { logger.info("[TUNNEL] تخطّي النفق — لدينا رابط ثابت"); } catch { }
-        }
+        // [v8.52.0] لا نتخطّى النفق أبداً — النفق (https + سرعة) هو الرابط الموحّد
+        // لكل الويب آب؛ الرابط الدائم احتياط فقط.
+        try { logger.info({ mode: _r }, "[LINK] النفق هو الرابط العام الأساسي"); } catch { }
       }).catch((e) => { try { logger.warn({ err: e?.message }, "[STABLE-LINK] فشل البدء"); } catch { } });
 
       // ═══ [DEV-CONSOLE v8.47.0] لوحة المطوّر: تحكم كامل بكل رسالة ═══

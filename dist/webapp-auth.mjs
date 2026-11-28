@@ -68,13 +68,22 @@ export function webappBaseUrl() {
 
 export function webappUrlFor(uid) {
   const tok = tokenForUser(uid);
-  // [v8.48.6] الرابط الدائم أولاً دائماً — طلب المستخدم: زر واحد يفتح الدائم.
-  // النفق يموت كل دقائق، فلا نضعه في أي زر.
-  const stable = globalThis.__STABLE_BASE__;
-  if (stable) return `${stable}/webapp?token=${tok}`;
+  // [v8.52.0] رابط واحد لكل الويب آب: النفق (https سريع) أولاً؛
+  // وIP:port صار احتياطاً أخيراً فقط (ثقيل وبطيء من شبكات الجوال).
   const base = webappBaseUrl();
   if (base && globalThis.__FW_PUBLIC_TRUSTED !== false) return `${base}/webapp?token=${tok}`;
+  const stable = globalThis.__STABLE_BASE__;
+  if (stable) return `${stable}/webapp?token=${tok}`;
   return null;
+}
+
+/** [v8.52.0] الرابط العام الموحّد لأي صفحة (كل أزرار البوت تستخدمه). */
+export function publicUrlFor(path = "/webapp", token = null) {
+  const base = webappBaseUrl() || globalThis.__STABLE_BASE__ || null;
+  if (!base) return null;
+  const p = String(path || "/").startsWith("/") ? path : "/" + path;
+  const sep = p.includes("?") ? "&" : "?";
+  return token ? `${base}${p}${sep}token=${encodeURIComponent(token)}` : `${base}${p}`;
 }
 
 // رابط محلي (fallback عند غياب رابط عام) — يُعرض كنص للمستخدم
